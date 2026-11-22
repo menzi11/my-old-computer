@@ -5,6 +5,8 @@
 #include <shellapi.h>
 #include <shlwapi.h>
 
+#include <algorithm>
+#include <cwchar>
 #include <string>
 #include <vector>
 
@@ -191,6 +193,7 @@ public:
         diagLog(L"dragEnter screen=%d,%d", (int)pt.x, (int)pt.y);
         data_ = data;
         if (data_) data_->AddRef();
+        paths_ = pathsFromDataObject(data);
         return DragOver(keys, pt, effect);
     }
 
@@ -213,6 +216,9 @@ public:
             want = DROPEFFECT_COPY;
         if (!(allowed & want))
             want = (allowed & DROPEFFECT_COPY) ? DROPEFFECT_COPY : DROPEFFECT_MOVE;
+        // Nothing to do when the files are already in the folder under the
+        // pointer: show the "no drop" cursor instead of a move cursor.
+        if (target.empty() && allFromCurrent()) want = DROPEFFECT_NONE;
         if (effect) *effect = want;
         InvalidateRect(hwnd_, nullptr, FALSE);
         return S_OK;
@@ -249,10 +255,18 @@ public:
     }
 
 private:
+    bool allFromCurrent() const {
+        if (paths_.empty()) return false;
+        for (auto& p : paths_)
+            if (_wcsicmp(fsx::parentPath(p).c_str(), app_->current.c_str()) != 0) return false;
+        return true;
+    }
+
     void clearHighlight() {
         app_->dragTargetFolder.clear();
         app_->dragTargetIsTree = false;
         app_->dragTargetRow = -1;
+        paths_.clear();
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
 
@@ -286,6 +300,7 @@ private:
     HWND hwnd_ = nullptr;
     App* app_ = nullptr;
     IDataObject* data_ = nullptr;
+    std::vector<std::wstring> paths_;
 };
 
 DropTargetImpl* g_target = nullptr;
@@ -314,8 +329,74 @@ bool dragOut(HWND hwnd, const std::vector<std::wstring>& paths, DWORD* effect) {
     if (paths.empty()) return false;
     auto* data = new HdropData(paths);
     auto* source = new DragSource();
+
+    // A small drag image: the first item's icon and name.
+    HBITMAP dragImage = nullptr;
+    SHDRAGIMAGE shdi{};
+    if (paths.size() >= 1) {
+        HDC screen = GetDC(nullptr);
+        HDC mem = CreateCompatibleDC(screen);
+        HFONT font = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                 DEFAULT_PITCH | FF_SWISS, L"Tahoma");
+        HGDIOBJ oldFont = SelectObject(mem, font);
+        std::wstring label = fsx::fileName(paths.front());
+        if (paths.size() > 1) label += L"  +" + std::to_wstring(paths.size() - 1);
+        SIZE textSize{};
+        GetTextExtentPoint32W(mem, label.c_str(), (int)label.size(), &textSize);
+        const int width = std::max(96, (int)(46 + textSize.cx + 10));
+        const int height = std::max(44, (int)(textSize.cy + 16));
+
+        BITMAPINFO bmi{};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = width;
+        bmi.bmiHeader.biHeight = -height;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+        void* bits = nullptr;
+        dragImage = CreateDIBSection(screen, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        if (dragImage) {
+            HGDIOBJ oldBmp = SelectObject(mem, dragImage);
+            RECT all{0, 0, width, height};
+            HBRUSH key = CreateSolidBrush(RGB(255, 0, 255));
+            FillRect(mem, &all, key);
+            DeleteObject(key);
+
+            SHFILEINFOW sfi{};
+            if (SHGetFileInfoW(paths.front().c_str(), 0, &sfi, sizeof(sfi), SHGFI_ICON | SHGFI_LARGEICON)) {
+                DrawIconEx(mem, 6, (height - 32) / 2, sfi.hIcon, 32, 32, 0, nullptr, DI_NORMAL);
+                DestroyIcon(sfi.hIcon);
+            }
+            SetBkMode(mem, TRANSPARENT);
+            SetTextColor(mem, RGB(0, 0, 0));
+            SetTextAlign(mem, TA_LEFT | TA_TOP);
+            TextOutW(mem, 44, (height - textSize.cy) / 2, label.c_str(), (int)label.size());
+            SelectObject(mem, oldBmp);
+            shdi.hbmpDragImage = dragImage;
+            shdi.crColorKey = RGB(255, 0, 255);
+            shdi.sizeDragImage = SIZE{width, height};
+            shdi.ptOffset = POINT{22, height / 2};
+        }
+        SelectObject(mem, oldFont);
+        DeleteObject(font);
+        DeleteDC(mem);
+        ReleaseDC(nullptr, screen);
+
+        if (dragImage) {
+            IDragSourceHelper* helper = nullptr;
+            if (SUCCEEDED(CoCreateInstance(CLSID_DragDropHelper, nullptr, CLSCTX_INPROC_SERVER,
+                                           IID_PPV_ARGS(&helper))) &&
+                helper) {
+                helper->InitializeFromBitmap(&shdi, data);
+                helper->Release();
+            }
+        }
+    }
+
     DWORD performed = DROPEFFECT_NONE;
     HRESULT hr = DoDragDrop(data, source, DROPEFFECT_COPY | DROPEFFECT_MOVE, &performed);
+    if (dragImage) DeleteObject(dragImage);
     data->Release();
     source->Release();
     if (effect) *effect = performed;

@@ -70,7 +70,9 @@ and a keyboard shortcut for every action.
 
 **Three working views** — details with Name / Size / Type / Date columns and
 click-to-sort (directories first, natural name order), list and large-icon views.
-Switching views keeps the selection.
+Switching views keeps the selection. Details rows have no full-row select: only
+clicking the icon or the file name picks the row, so the Size / Type / Date
+columns stay free for scrolling and rubber-band selection.
 
 **A sidebar that knows the machine** — My Computer with every drive or mounted
 volume, folders that expand with `+` / `−`, a Favorites group, a draggable splitter

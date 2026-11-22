@@ -83,7 +83,8 @@ the hand-drawn set.  macOS draws the icons in `Icons.swift` per extension.
 - Directories sort before files in every column; names use a natural
   (number-aware) comparison.
 - Details rows draw the icon at x+3, the name at x+22, and highlight only the
-  name column width.
+  name column width. There is no full-row select: clicks to the right of the
+  name text (including the size, type and date columns) do not select the row.
 - A single click selects; Ctrl/Command toggles; Shift extends from the anchor;
   dragging on empty space draws a rubber band that selects what it touches.
 - Double-click opens; Enter opens; Backspace goes up; F2 renames; F5 refreshes;

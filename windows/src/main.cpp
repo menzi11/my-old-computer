@@ -501,10 +501,10 @@ void onLButtonDown(HWND hwnd, App& a, POINT p) {
         if (row >= 0) {
             bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-            RECT rr = a.listRowRect(row);
-            int extent = pxOf(a.scale, 22) + a.entries[row].name.size() * 0 + 0;
-            extent = pxOf(a.scale, 22) + (int)a.entries[row].name.size() * 0;
-            (void)extent;
+            // No full-row select: only the icon and the name text pick the row.
+            const int rowLeft = a.lay.listViewport.left;
+            const int extent = std::min(a.lay.nameW, a.nameExtent(row));
+            if (p.x - rowLeft > extent) return;
             if (ctrl) {
                 if (a.selection.count(a.entries[row].path)) a.selection.erase(a.entries[row].path);
                 else a.selection.insert(a.entries[row].path);

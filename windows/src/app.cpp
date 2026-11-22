@@ -844,6 +844,13 @@ int App::listVisibleRows() const {
     return std::max(1, (int)(lay.listViewport.bottom - lay.listViewport.top) / std::max(1, m.rowH));
 }
 
+int App::nameExtent(int row) const {
+    if (row < 0 || row >= (int)entries.size()) return 0;
+    const int fontPx = (int)(14.6667 * scale + 0.5);
+    return (int)(22 * scale + 0.5) + measureUiText(entries[row].name, fontPx) +
+           (int)(6 * scale + 0.5);
+}
+
 int App::gridCellW() const { return (int)((mode == ViewMode::Icons ? 94 : 220) * scale + 0.5); }
 int App::gridCellH() const { return (int)((mode == ViewMode::Icons ? 94 : 19) * scale + 0.5); }
 

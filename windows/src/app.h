@@ -182,8 +182,7 @@ public:
     void noteChildren(const std::wstring& dir, bool hasSubdir);
 
     // Geometry helpers (all return screen-client coordinates)
-    RECT titleButtonRect(int i) const;
-    RECT menuItemRect(int i) const;
+    RECT titleButtonRect(int i) const;    RECT menuItemRect(int i) const;
     int menuItemAt(POINT p) const;
     RECT toolbarItemRect(int i) const;
     int toolbarItemCount() const;
@@ -193,6 +192,9 @@ public:
     int treeRowCount() const;
     RECT listRowRect(int i) const;
     int listRowAt(POINT p) const;
+    // Right edge of the icon plus the name text, relative to the row start.
+    // Clicks beyond it must not select the row (no full-row select).
+    int nameExtent(int row) const;
     int listVisibleRows() const;
     int gridCellCount() const;
     int gridCols() const;
