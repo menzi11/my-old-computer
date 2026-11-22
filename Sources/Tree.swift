@@ -22,12 +22,15 @@ final class TreeBodyView: NSView {
         }
     }
 
-    var onSelect: ((URL) -> Void)?
+    var onSelect: ((URL, Bool) -> Void)?
     var onDrop: (([URL], URL) -> Bool)?
     var menuBuilder: (() -> NSMenu?)?
     var onContextNode: ((URL?, Bool) -> Void)?
     private var contextNodeURL: URL?
     private var contextIsFavorite = false
+
+    /// 从树里点进来的导航：只更新选中，不展开、不滚动，避免树“乱跳”
+    private var skipNextReveal = false
 
     var currentURL: URL = URL(fileURLWithPath: "/") {
         didSet {
@@ -35,10 +38,22 @@ final class TreeBodyView: NSView {
                node.url.standardizedFileURL.path != currentURL.standardizedFileURL.path {
                 selectedID = nil
             }
+            if skipNextReveal {
+                skipNextReveal = false
+                needsDisplay = true
+                return
+            }
             reveal()
             scrollSelection()
             needsDisplay = true
         }
+    }
+
+    func setCurrentURL(_ url: URL, fromTreeClick: Bool) {
+        let old = currentURL
+        skipNextReveal = fromTreeClick
+        currentURL = url
+        if currentURL == old { skipNextReveal = false }
     }
 
     /// 与主视图一致：是否显示隐藏项（macOS 上 /usr、/private 等属于隐藏的 firmlink）
@@ -409,25 +424,49 @@ final class TreeBodyView: NSView {
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         for (i, node) in flat.enumerated() where rowRect(i).contains(p) {
-            if node.kind == .favorites {
-                if node.hasChildren { toggle(node) }
-                return
-            }
-            if node.hasChildren && boxRect(i, node).insetBy(dx: -2, dy: -2).contains(p) {
+            // 点在 +/- 小方块上：只展开/收起，不导航
+            if node.kind != .favorites, node.hasChildren,
+               boxRect(i, node).insetBy(dx: -2, dy: -2).contains(p) {
                 toggle(node)
                 return
             }
-            if event.clickCount == 2 {
-                selectedID = ObjectIdentifier(node)
-                if node.hasChildren { toggle(node) }
-                needsDisplay = true
-                return
-            }
-            selectedID = ObjectIdentifier(node)
-            needsDisplay = true
-            onSelect?(node.url)
+            performClick(row: i, node: node, clickCount: event.clickCount)
             return
         }
+    }
+
+    private func performClick(row i: Int, node: Node, clickCount: Int) {
+        if node.kind == .favorites {
+            if node.hasChildren { toggle(node) }
+            return
+        }
+        if clickCount == 2 {
+            selectedID = ObjectIdentifier(node)
+            if node.hasChildren { toggle(node) }
+            needsDisplay = true
+            return
+        }
+        selectedID = ObjectIdentifier(node)
+        needsDisplay = true
+        onSelect?(node.url, true)
+    }
+
+    // MARK: 调试
+
+    var debugCount: Int { flat.count }
+    var debugTopRow: Int {
+        let y = enclosingScrollView?.contentView.bounds.origin.y ?? 0
+        for i in 0..<flat.count where rowRect(i).maxY > y + 0.5 { return i }
+        return flat.count
+    }
+    var debugSelected: Int? { selectedRow }
+    func debugTitle(_ i: Int) -> String { i < flat.count ? flat[i].title : "?" }
+    func debugRowIndex(titled t: String) -> Int? { flat.firstIndex { $0.title == t } }
+    func debugClickRow(_ i: Int) {
+        guard i >= 0, i < flat.count else { print("  (no row \(i))"); return }
+        let n = flat[i]
+        print("  -> click row \(i): kind=\(n.kind) title=\(n.title) url=\(n.url.path) expanded=\(n.expanded)")
+        performClick(row: i, node: n, clickCount: 1)
     }
 
     override func rightMouseDown(with event: NSEvent) {
@@ -532,7 +571,7 @@ final class TreePaneView: NSView {
     private let scroll = NSScrollView()
     private let vbar = Win98ScrollBar()
 
-    var onSelect: ((URL) -> Void)? {
+    var onSelect: ((URL, Bool) -> Void)? {
         get { tree.onSelect }
         set { tree.onSelect = newValue }
     }
@@ -543,6 +582,10 @@ final class TreePaneView: NSView {
     var currentURL: URL {
         get { tree.currentURL }
         set { tree.currentURL = newValue }
+    }
+
+    func setCurrentURL(_ url: URL, fromTreeClick: Bool) {
+        tree.setCurrentURL(url, fromTreeClick: fromTreeClick)
     }
     var menuBuilder: (() -> NSMenu?)? {
         get { tree.menuBuilder }

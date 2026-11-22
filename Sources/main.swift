@@ -29,6 +29,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         let rows = a[s + 1].split(separator: ",").compactMap { Int($0) }
                         self.controller.debugSelect(rows)
                     }
+                    if let c = a.firstIndex(of: "--clicks"), c + 1 < a.count {
+                        self.controller.debugClicks(a[c + 1].split(separator: ",").map(String.init))
+                    }
+                    if let c = a.firstIndex(of: "--clickrows"), c + 1 < a.count {
+                        self.controller.debugClickRows(a[c + 1].split(separator: ",").compactMap { Int($0) })
+                    }
                     if a.contains("--demo") { self.controller.debugDemoTree() }
                     if a.contains("--novolumes") { self.controller.debugHideVolumes() }
                     if a.contains("--fav") { self.controller.debugAddFavorite() }

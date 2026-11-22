@@ -142,7 +142,7 @@ final class ExplorerController: NSObject, NSTableViewDataSource, NSTableViewDele
         addrBar.onGo = { [weak self] text in self?.goToPath(text) }
         addrBar.onPick = { [weak self] path in self?.navigate(to: URL(fileURLWithPath: path)) }
 
-        sidebar.onSelect = { [weak self] url in self?.navigate(to: url) }
+        sidebar.onSelect = { [weak self] url, fromTree in self?.navigate(to: url, fromTree: fromTree) }
 
         listView.tableView.dataSource = self
         listView.tableView.delegate = self
@@ -254,11 +254,11 @@ final class ExplorerController: NSObject, NSTableViewDataSource, NSTableViewDele
 
     // MARK: 导航
 
-    private func navigate(to url: URL) {
+    private func navigate(to url: URL, fromTree: Bool = false) {
         guard url.standardizedFileURL != currentURL.standardizedFileURL else { return }
         backStack.append(currentURL)
         forwardStack.removeAll()
-        load(url)
+        load(url, fromTree: fromTree)
     }
 
     private func goBack() {
@@ -301,7 +301,7 @@ final class ExplorerController: NSObject, NSTableViewDataSource, NSTableViewDele
 
     // MARK: 读取目录
 
-    private func load(_ url: URL) {
+    private func load(_ url: URL, fromTree: Bool = false) {
         currentURL = url
         contextFolder = nil
         generation += 1
@@ -313,7 +313,7 @@ final class ExplorerController: NSObject, NSTableViewDataSource, NSTableViewDele
         root.statusBar.rightText = title
         refreshAddress()
         root.sidebar.tree.showHidden = showHidden
-        root.sidebar.currentURL = url
+        root.sidebar.setCurrentURL(url, fromTreeClick: fromTree)
         // 立即清空旧目录内容，避免新路径下短暂显示上一个文件夹的文件
         entries = []
         refreshViews()
@@ -962,6 +962,28 @@ final class ExplorerController: NSObject, NSTableViewDataSource, NSTableViewDele
         root.listView.tableView.deselectAll(nil)
         root.gridView.grid.selected = []
         print("cleared: sel rows =", root.listView.tableView.selectedRowIndexes.count)
+    }
+
+    func debugClicks(_ titles: [String]) {
+        let tv = root.sidebar.tree
+        for t in titles {
+            guard let i = tv.debugRowIndex(titled: t) else {
+                print("click[\(t)] not-found rows=\(tv.debugCount)")
+                continue
+            }
+            print("click[\(t)] before top=\(tv.debugTopRow) sel=\(tv.debugSelected.map(String.init) ?? "nil") rows=\(tv.debugCount) url=\(currentURL.path)")
+            tv.debugClickRow(i)
+            print("click[\(t)] after  top=\(tv.debugTopRow) sel=\(tv.debugSelected.map(String.init) ?? "nil") rows=\(tv.debugCount) url=\(currentURL.path)")
+        }
+    }
+
+    func debugClickRows(_ rows: [Int]) {
+        let tv = root.sidebar.tree
+        for r in rows {
+            print("row[\(r)] before top=\(tv.debugTopRow) sel=\(tv.debugSelected.map(String.init) ?? "nil") rows=\(tv.debugCount) url=\(currentURL.path)")
+            tv.debugClickRow(r)
+            print("row[\(r)] after  top=\(tv.debugTopRow) sel=\(tv.debugSelected.map(String.init) ?? "nil") rows=\(tv.debugCount) url=\(currentURL.path)")
+        }
     }
 
     func debugDemoTree() {
