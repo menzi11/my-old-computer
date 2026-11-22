@@ -183,18 +183,7 @@ void drawTree(Canvas& c, App& a) {
     RECT vp = a.lay.treeViewport;
     c.fill(vp, Theme::white);
 
-    int selectedRow = -1;
-    for (int i = 0; i < (int)a.treeFlat.size(); ++i) {
-        TreeNode* n = a.treeFlat[i];
-        if (_wcsicmp(n->path.c_str(), a.current.c_str()) == 0) {
-            if (n->kind != TreeNode::Special && n->kind != TreeNode::Favorite &&
-                n->kind != TreeNode::Favorites) {
-                selectedRow = i;
-                break;
-            }
-            if (selectedRow < 0) selectedRow = i;
-        }
-    }
+    const int selectedRow = a.treeSelectedRow();
 
     {
         ClipScope clip(c.dc(), vp);

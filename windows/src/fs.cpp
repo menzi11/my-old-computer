@@ -245,7 +245,8 @@ bool isInside(const std::wstring& child, const std::wstring& parent) {
     std::wstring c = trimTrailingSlash(child), p = trimTrailingSlash(parent);
     if (c == p) return true;
     if (p.empty()) return false;
-    std::wstring prefix = p + L"\\";
+    std::wstring prefix = p;
+    if (prefix.back() != L'\\') prefix += L'\\';
     return c.size() > prefix.size() && _wcsnicmp(c.c_str(), prefix.c_str(), prefix.size()) == 0;
 }
 

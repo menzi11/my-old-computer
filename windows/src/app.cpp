@@ -146,7 +146,7 @@ void App::relayout(int w, int h) {
 
 // ---------------------------------------------------------------- navigation
 
-void App::loadDirectory(const std::wstring& path, bool recordHistory) {
+void App::loadDirectory(const std::wstring& path, bool recordHistory, bool fromTreeClick) {
     std::wstring target = path;
     while (target.size() > 3 && (target.back() == L'\\' || target.back() == L'/')) target.pop_back();
     if (target.empty()) target = fsx::rootOf(current);
@@ -155,6 +155,11 @@ void App::loadDirectory(const std::wstring& path, bool recordHistory) {
         return;
     }
     if (_wcsicmp(target.c_str(), current.c_str()) == 0) {
+        if (!fromTreeClick) {
+            treeClickRow = -1;
+            revealInTree();
+            scrollTreeToSelection();
+        }
         reload();
         return;
     }
@@ -169,9 +174,15 @@ void App::loadDirectory(const std::wstring& path, bool recordHistory) {
     fsx::sortEntries(entries, sortColumn, sortAsc);
     listScroll = 0;
     gridScroll = 0;
-    treeScroll = 0;
-    revealInTree();
-    flattenTree();
+    if (fromTreeClick) {
+        // The tree keeps its expansion and scroll position; only the highlight
+        // and the right-hand pane change (see the click handler).
+    } else {
+        treeClickRow = -1;
+        revealInTree();
+        flattenTree();
+        scrollTreeToSelection();
+    }
     clampScroll();
     if (addrEdit && addrEditing) SetWindowTextW(addrEdit, fsx::abbreviateHome(current).c_str());
 }
@@ -499,6 +510,7 @@ void App::noteChildren(const std::wstring& dir, bool hasSubdir) {
 
 void App::buildTree() {
     treeRoots.clear();
+    treeClickRow = -1;
     if (demo) {
         TreeNode machine;
         machine.kind = TreeNode::Machine;
@@ -630,6 +642,35 @@ void App::flattenTree() {
     for (auto& r : treeRoots) walk(r);
 }
 
+int App::treeSelectedRow() const {
+    if (treeClickRow >= 0 && treeClickRow < (int)treeFlat.size() &&
+        _wcsicmp(treeFlat[treeClickRow]->path.c_str(), current.c_str()) == 0)
+        return treeClickRow;
+    int fallback = -1;
+    for (int i = 0; i < (int)treeFlat.size(); ++i) {
+        TreeNode* n = treeFlat[i];
+        if (_wcsicmp(n->path.c_str(), current.c_str()) != 0) continue;
+        if (n->kind == TreeNode::Special || n->kind == TreeNode::Favorite ||
+            n->kind == TreeNode::Favorites) {
+            if (fallback < 0) fallback = i;
+        } else {
+            return i;
+        }
+    }
+    return fallback;
+}
+
+void App::scrollTreeToSelection() {
+    int idx = treeSelectedRow();
+    if (idx < 0) return;
+    RECT r = treeRowRect(idx);
+    const int top = lay.treeViewport.top + (int)(2 * scale + 0.5);
+    const int bottom = lay.treeViewport.bottom;
+    if (r.top < top) treeScroll -= (top - r.top);
+    else if (r.bottom > bottom) treeScroll += (r.bottom - bottom);
+    clampScroll();
+}
+
 void App::revealInTree() {
     std::function<bool(TreeNode&, const std::wstring&)> walk = [&](TreeNode& n,
                                                                     const std::wstring& target) -> bool {
@@ -676,6 +717,7 @@ void App::revealInTree() {
 }
 
 void App::toggleTreeNode(TreeNode& node) {
+    treeClickRow = -1;
     if (!node.expanded) {
         loadTreeChildren(node);
         node.expanded = true;

@@ -12,6 +12,7 @@
 
 #include "app.h"
 #include "canvas.h"
+#include "debug.h"
 #include "dialog.h"
 #include "fs.h"
 #include "ids.h"
@@ -28,26 +29,6 @@ App g_app;
 bool g_isSnapshot = false;
 
 int pxOf(double scale, double v) { return (int)(v * scale + 0.5); }
-
-void diagLog(const wchar_t* fmt, ...) {
-    static bool enabled = [] {
-        wchar_t buf[8];
-        return GetEnvironmentVariableW(L"MOC_DEBUG", buf, 8) > 0;
-    }();
-    if (!enabled) return;
-    wchar_t path[MAX_PATH]{};
-    GetTempPathW(MAX_PATH, path);
-    wcscat_s(path, L"moc-diag.txt");
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, path, L"a, ccs=UTF-8") == 0 && f) {
-        va_list ap;
-        va_start(ap, fmt);
-        vfwprintf(f, fmt, ap);
-        va_end(ap);
-        fwprintf(f, L"\n");
-        fclose(f);
-    }
-}
 
 UINT g_dumpMsg = 0;
 
@@ -86,8 +67,9 @@ void dumpLayout(App& a) {
                  (int)(r.right - r.left), (int)(r.bottom - r.top));
     }
     fwprintf(f, L"current %ls\n", a.current.c_str());
-    fwprintf(f, L"treeRows %d\n", (int)a.treeFlat.size());
-    for (int i = 0; i < (int)a.treeFlat.size() && i < 12; ++i) {
+    fwprintf(f, L"scrollers tree %d list %d grid %d\n", a.treeScroll, a.listScroll, a.gridScroll);
+    fwprintf(f, L"treeRows %d selected %d\n", (int)a.treeFlat.size(), a.treeSelectedRow());
+    for (int i = 0; i < (int)a.treeFlat.size() && i < 60; ++i) {
         RECT r = a.treeRowRect(i);
         fwprintf(f, L"treeRow %d %d,%d depth %d title %ls\n", i, (int)r.left, (int)r.top,
                  a.treeFlat[i]->depth, a.treeFlat[i]->title.c_str());
@@ -473,8 +455,10 @@ void onLButtonDown(HWND hwnd, App& a, POINT p) {
             } else if (n->hasChildren && PtInRect(&boxHit, p)) {
                 a.toggleTreeNode(*n);
             } else if (!n->path.empty()) {
-                a.revealInTree();
-                a.loadDirectory(n->path);
+                // Tree clicks only select and update the right pane; expanding
+                // and scrolling here made the tree jump under the pointer.
+                a.treeClickRow = row;
+                a.loadDirectory(n->path, true, true);
             }
             repaint(hwnd);
             return;

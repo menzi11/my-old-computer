@@ -85,6 +85,9 @@ public:
 
     std::vector<TreeNode> treeRoots;
     std::vector<TreeNode*> treeFlat;
+    // Row that was clicked in the tree.  Tree clicks only select and navigate;
+    // they must not expand the tree or scroll it out from under the pointer.
+    int treeClickRow = -1;
 
     // Hover / press feedback for the custom chrome.
     int hoverTree = -1;
@@ -131,7 +134,8 @@ public:
     void relayout(int w, int h);
 
     // Navigation
-    void loadDirectory(const std::wstring& path, bool recordHistory = true);
+    void loadDirectory(const std::wstring& path, bool recordHistory = true,
+                       bool fromTreeClick = false);
     void reload();
     void goBack();
     void goForward();
@@ -170,6 +174,8 @@ public:
     void toggleTreeNode(TreeNode& node);
     void revealInTree();
     void flattenTree();
+    int treeSelectedRow() const;
+    void scrollTreeToSelection();
     bool treeHasSubdir(const std::wstring& path);
     void noteChildren(const std::wstring& dir, bool hasSubdir);
 
