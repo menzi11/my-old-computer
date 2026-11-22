@@ -69,6 +69,8 @@ There is not a single bitmap asset in the repository except the generated app ic
 |---|---|
 | ![icon view](screenshots/icon-view.png) | ![list view](screenshots/list-view.png) |
 
+All screenshots are taken with the app's demo mode, so no real folder names appear.
+
 **File type icons** are drawn per extension, at 16 px, with hard edges:
 
 ![file icons](screenshots/file-types.png)
