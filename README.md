@@ -8,6 +8,8 @@ Every pixel is drawn in code: no Electron, no theme pack, no bitmap assets.</p>
 
 <p align="center">English · <a href="README.zh.md">中文</a></p>
 
+<p align="center"><b><a href="https://github.com/menzi11/my-old-computer/releases/latest">Download the Windows build</a></b> · <a href="#build">Build from source</a></p>
+
 <p align="center">
 <img alt="macOS 13+" src="https://img.shields.io/badge/macOS-13%2B-000000">
 <img alt="Windows 10 / 11" src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4">
@@ -155,6 +157,10 @@ stable identity once with:
 Without it the app still works; macOS simply asks again after every rebuild.
 
 ### Windows
+
+The latest prebuilt executable is on the
+[releases page](https://github.com/menzi11/my-old-computer/releases/latest); unzip is
+not needed, it is a single `.exe`. To build it yourself:
 
 Requirements: Windows 10 or 11, and the MSVC C++ tools — Visual Studio 2022
 (Community or Build Tools) with the *Desktop development with C++* workload.

@@ -8,6 +8,8 @@
 
 <p align="center"><a href="README.md">English</a> · 中文</p>
 
+<p align="center"><b><a href="https://github.com/menzi11/my-old-computer/releases/latest">下载 Windows 版</a></b> · <a href="#编译">从源码编译</a></p>
+
 <p align="center">
 <img alt="macOS 13+" src="https://img.shields.io/badge/macOS-13%2B-000000">
 <img alt="Windows 10 / 11" src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4">
@@ -143,6 +145,10 @@ open "build/My Old Computer.app"
 没有证书也能用，只是每次重新编译后 macOS 会再问一次。
 
 ### Windows
+
+最新的可执行文件在
+[Releases 页面](https://github.com/menzi11/my-old-computer/releases/latest)，单个 `.exe`，
+不需要解压。自己编译：
 
 需要 Windows 10 或 11，以及 MSVC C++ 工具——安装了「使用 C++ 的桌面开发」工作负载的
 Visual Studio 2022（Community 或 Build Tools 都行）。不需要 CMake，不需要 vcpkg，
