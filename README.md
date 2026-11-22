@@ -47,7 +47,7 @@ There is not a single bitmap asset in the repository except the generated app ic
   click actually covers the icon or the file name
 
 **File operations**
-- New folder, rename, move to Trash
+- New folder, rename, move to Recycle Bin (回收站)
 - Copy / Cut / Paste, drag & drop move and copy
 - Multi-select with Shift and Command
 - Right-click menus everywhere (list, icon view, sidebar tree)
@@ -57,6 +57,8 @@ There is not a single bitmap asset in the repository except the generated app ic
 - 收藏夹 (Favorites) as a group of folders, seeded with Desktop and Downloads
 - Draggable splitter between the tree and the file list
 - Mounted disk images can be ejected from the context menu
+- 回收站 (Recycle Bin) at the bottom of the tree: restore (还原), delete permanently
+  (删除) and empty it (清空回收站) from the right-click menu
 
 **Extras**
 - Quick Look preview with the space bar
@@ -90,7 +92,7 @@ All screenshots are taken with the app's demo mode, so no real folder names appe
 | `Space` | Quick Look preview |
 | `Cmd` + `A` | Select all |
 | `Cmd` + `C` / `X` / `V` | Copy / Cut / Paste |
-| `Fn` + `Delete` or `Cmd` + `Delete` | Move to Trash |
+| `Fn` + `Delete` or `Cmd` + `Delete` | Move to Recycle Bin |
 
 ## Build
 
@@ -164,7 +166,9 @@ sidebar tree with the current folder, for clean screenshots).
   long as the app keeps the same signing identity (see above).
 - Windows-only conveniences that need OS support (drive letters, `C:\` paths, `.lnk`
   shortcuts) are not emulated.
-- Some file operations use macOS semantics: Delete goes to the Trash.
+- The Recycle Bin is managed by the app (in `~/Library/Application Support/My Old Computer/Recycle Bin`)
+  instead of `~/.Trash`. macOS protects the Trash folder with Full Disk Access, so a
+  non-Finder app can put files in it but cannot list, restore or empty it.
 
 ## 中文简介
 

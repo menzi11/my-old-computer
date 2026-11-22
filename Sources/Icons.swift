@@ -324,6 +324,41 @@ enum Icon {
         }
     }
 
+    /// 回收站：灰色垃圾桶 + 绿色回收三角
+    static func trash(_ s: CGFloat = 16) -> NSImage {
+        image(s) { r in
+            let w = r.width, h = r.height
+            // 提手
+            let handle = NSRect(x: w * 0.35, y: 0.5, width: w * 0.30, height: 1.5)
+            Theme.faceHi.setFill(); handle.fill()
+            Theme.dark.setStroke()
+            NSBezierPath(rect: handle).stroke()
+            // 桶盖
+            let lid = NSRect(x: 1, y: 2, width: w - 2, height: 2.5)
+            Theme.faceHi.setFill(); lid.fill()
+            NSBezierPath(rect: lid).stroke()
+            // 桶身：上宽下窄
+            let body = NSBezierPath()
+            body.move(to: NSPoint(x: 2.2, y: 4.5))
+            body.line(to: NSPoint(x: w - 2.2, y: 4.5))
+            body.line(to: NSPoint(x: w - 3.4, y: h - 1))
+            body.line(to: NSPoint(x: 3.4, y: h - 1))
+            body.close()
+            Theme.face.setFill(); body.fill()
+            body.lineWidth = 1
+            body.stroke()
+            // 绿色回收三角
+            Theme.green.setStroke()
+            let tri = NSBezierPath()
+            tri.move(to: NSPoint(x: w * 0.5, y: 6.5))
+            tri.line(to: NSPoint(x: w * 0.68, y: 10.5))
+            tri.line(to: NSPoint(x: w * 0.32, y: 10.5))
+            tri.close()
+            tri.lineWidth = 1
+            tri.stroke()
+        }
+    }
+
     static func drive(_ s: CGFloat = 16) -> NSImage {
         image(s) { r in
             let w = r.width, h = r.height

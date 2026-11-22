@@ -185,7 +185,7 @@ final class XPTableView: NSTableView {
             onOpen?()
         case 51:                      // 退格 = 上一级
             onGoUp?()
-        case 117:                     // 前向删除 = 移到废纸篓
+        case 117:                     // 前向删除 = 移到回收站
             onDelete?()
         case 49:                      // 空格 = 快速预览
             onPreview?()

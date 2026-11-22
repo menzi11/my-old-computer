@@ -35,6 +35,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     if let c = a.firstIndex(of: "--clickrows"), c + 1 < a.count {
                         self.controller.debugClickRows(a[c + 1].split(separator: ",").compactMap { Int($0) })
                     }
+                    if a.contains("--trashprobe") {
+                        let p = NSHomeDirectory() + "/.Trash"
+                        do {
+                            let items = try FileManager.default.contentsOfDirectory(atPath: p)
+                            print("TRASHPROBE OK \(items.count) \(items.prefix(5))")
+                        } catch {
+                            print("TRASHPROBE ERR \(error)")
+                        }
+                    }
+                    if let c = a.firstIndex(of: "--ctxmenu"), c + 1 < a.count {
+                        self.controller.debugMenu(titled: a[c + 1])
+                    }
+                    if let c = a.firstIndex(of: "--dblrows"), c + 1 < a.count {
+                        self.controller.debugDoubleClickRows(a[c + 1].split(separator: ",").compactMap { Int($0) })
+                    }
+                    if let c = a.firstIndex(of: "--trashnode"), c + 1 < a.count {
+                        self.controller.debugMenu(titled: a[c + 1])
+                        self.controller.debugTrashNode()
+                    }
+                    if a.contains("--ctxitems") { self.controller.debugPrintContextMenu() }
+                    if a.contains("--emptytrash") { self.controller.debugEmptyTrash() }
+                    if a.contains("--restorefirst") { self.controller.debugRestoreFirst() }
                     if a.contains("--demo") { self.controller.debugDemoTree() }
                     if a.contains("--novolumes") { self.controller.debugHideVolumes() }
                     if a.contains("--fav") { self.controller.debugAddFavorite() }

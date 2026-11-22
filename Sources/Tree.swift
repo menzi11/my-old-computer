@@ -4,7 +4,7 @@ import AppKit
 
 final class TreeBodyView: NSView {
     final class Node {
-        enum Kind { case machine, volume, folder, special, favorite, favorites }
+        enum Kind { case machine, volume, folder, special, favorite, favorites, trash }
         let url: URL
         let title: String
         var depth: Int
@@ -166,6 +166,11 @@ final class TreeBodyView: NSView {
             node.hasChildren = hasAnySubdirectory(node.url)
             return node
         }
+        // 回收站：Windows 资源管理器把回收站放在树的最下面
+        RecycleBin.ensureExists()
+        let trashNode = Node(url: RecycleBin.root, title: "回收站", depth: 0, kind: .trash)
+        trashNode.hasChildren = hasAnySubdirectory(RecycleBin.root)
+        specials.append(trashNode)
     }
 
     private func loadChildren(_ node: Node) {
@@ -403,6 +408,7 @@ final class TreeBodyView: NSView {
             switch node.kind {
             case .machine: Icon.computer(16).draw(in: iconRect)
             case .volume: Icon.drive(16).draw(in: iconRect)
+            case .trash: Icon.trash(16).draw(in: iconRect)
             case .special, .favorites, .favorite, .folder: Icon.folder(16, open: node.expanded).draw(in: iconRect)
             }
 
@@ -462,11 +468,23 @@ final class TreeBodyView: NSView {
     var debugSelected: Int? { selectedRow }
     func debugTitle(_ i: Int) -> String { i < flat.count ? flat[i].title : "?" }
     func debugRowIndex(titled t: String) -> Int? { flat.firstIndex { $0.title == t } }
-    func debugClickRow(_ i: Int) {
+    func debugClickRow(_ i: Int, clickCount: Int = 1) {
         guard i >= 0, i < flat.count else { print("  (no row \(i))"); return }
         let n = flat[i]
-        print("  -> click row \(i): kind=\(n.kind) title=\(n.title) url=\(n.url.path) expanded=\(n.expanded)")
-        performClick(row: i, node: n, clickCount: 1)
+        print("  -> click row \(i) x\(clickCount): kind=\(n.kind) title=\(n.title) url=\(n.url.path) expanded=\(n.expanded)")
+        performClick(row: i, node: n, clickCount: clickCount)
+    }
+
+    func debugRightClick(titled t: String) {
+        guard let i = flat.firstIndex(where: { $0.title == t }) else { print("no node \(t)"); return }
+        let n = flat[i]
+        selectedID = ObjectIdentifier(n)
+        contextNodeURL = n.url
+        contextIsFavorite = n.kind == .favorite
+        onContextNode?(n.url, n.kind == .favorite)
+        if let m = menuBuilder?() {
+            print("menu[\(t)]: " + m.items.map { "\($0.isSeparatorItem ? "|" : $0.title)(\($0.isEnabled ? "on" : "off"))" }.joined(separator: " "))
+        }
     }
 
     override func rightMouseDown(with event: NSEvent) {
