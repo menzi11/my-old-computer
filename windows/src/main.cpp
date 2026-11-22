@@ -795,9 +795,6 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         break;
     }
-    case WM_NCCALCSIZE:
-        if (wp == TRUE) return 0;
-        break;
     case WM_NCHITTEST: {
         LRESULT hit = DefWindowProcW(hwnd, msg, wp, lp);
         POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
@@ -830,10 +827,29 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         mmi->ptMinTrackSize.y = pxOf(a.scale, 440);
         return 0;
     }
+    case WM_NCCALCSIZE:
+        if (wp == TRUE) {
+            if (IsZoomed(hwnd)) {
+                // A custom frame has no non-client area, but Windows still
+                // maximises us with an invisible resize border.  Pin the client
+                // to the monitor work area so nothing is clipped off screen.
+                HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                MONITORINFO mi{sizeof(mi)};
+                if (GetMonitorInfoW(mon, &mi)) {
+                    ((NCCALCSIZE_PARAMS*)lp)->rgrc[0] = mi.rcWork;
+                }
+            }
+            return 0;
+        }
+        break;
     case WM_SIZE:
         if (wp != SIZE_MINIMIZED) {
             int w = LOWORD(lp), h = HIWORD(lp);
             diagLog(L"WM_SIZE %dx%d scale=%.2f", w, h, a.scale);
+            if (!IsZoomed(hwnd) && a.scale > 0) {
+                a.logicalW = (int)std::lround(w / a.scale);
+                a.logicalH = (int)std::lround(h / a.scale);
+            }
             a.relayout(w, h);
             repaint(hwnd);
         }
@@ -841,14 +857,16 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DPICHANGED: {
         RECT* r = (RECT*)lp;
         double newScale = HIWORD(wp) / 96.0;
-        double oldScale = a.scale > 0 ? a.scale : 1.0;
-        int logicalW = (int)std::lround(a.width / oldScale);
-        int logicalH = (int)std::lround(a.height / oldScale);
-        diagLog(L"WM_DPICHANGED wp=%u oldScale=%.2f width=%d logical=%dx%d", (unsigned)HIWORD(wp),
-                oldScale, a.width, logicalW, logicalH);
         a.setScale(newScale);
-        SetWindowPos(hwnd, nullptr, r->left, r->top, (int)std::lround(logicalW * newScale),
-                     (int)std::lround(logicalH * newScale), SWP_NOZORDER | SWP_NOACTIVATE);
+        if (IsZoomed(hwnd)) {
+            // Windows already resized the maximized window; only move it.
+            SetWindowPos(hwnd, nullptr, r->left, r->top, 0, 0,
+                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        } else {
+            int w = (int)std::lround(a.logicalW * newScale);
+            int h = (int)std::lround(a.logicalH * newScale);
+            SetWindowPos(hwnd, nullptr, r->left, r->top, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+        }
         return 0;
     }
     case WM_SETFOCUS:
@@ -1167,6 +1185,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
     g_app.hwnd = hwnd;
     g_app.scale = dpiScaleFor(hwnd);
     g_app.init(hwnd);
+    g_app.logicalW = w;
+    g_app.logicalH = h;
     diagLog(L"startup dpi=%.0f scale=%.2f requested=%dx%d", 0.0, g_app.scale, w, h);
     int physicalW = (int)std::lround(w * g_app.scale);
     int physicalH = (int)std::lround(h * g_app.scale);

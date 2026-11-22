@@ -56,6 +56,9 @@ public:
     Layout lay;
     int width = 0;
     int height = 0;
+    // Logical (96 dpi) frame size, used to keep the size stable across DPI changes.
+    int logicalW = 1000;
+    int logicalH = 640;
     bool windowActive = true;
 
     std::wstring current;

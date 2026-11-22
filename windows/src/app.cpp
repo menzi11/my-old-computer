@@ -1132,12 +1132,14 @@ void App::saveSettings() {
     settings.viewMode = (int)mode;
     settings.showHidden = showHidden;
     if (hwnd) {
-        RECT wr{};
-        if (GetWindowRect(hwnd, &wr)) {
-            settings.x = wr.left;
-            settings.y = wr.top;
-            settings.w = (int)std::lround((wr.right - wr.left) / scale);
-            settings.h = (int)std::lround((wr.bottom - wr.top) / scale);
+        WINDOWPLACEMENT wp{};
+        wp.length = sizeof(wp);
+        if (GetWindowPlacement(hwnd, &wp)) {
+            const RECT& nr = wp.rcNormalPosition;
+            settings.x = nr.left;
+            settings.y = nr.top;
+            settings.w = (int)std::lround((nr.right - nr.left) / scale);
+            settings.h = (int)std::lround((nr.bottom - nr.top) / scale);
         }
     }
     settings.save();
