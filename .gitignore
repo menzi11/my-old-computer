@@ -4,3 +4,5 @@ build/
 *.p12
 key.pem
 cert.pem
+
+windows/build.log
