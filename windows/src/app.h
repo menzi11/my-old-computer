@@ -106,6 +106,7 @@ public:
     bool dragArmed = false;
     bool dragging = false;
     POINT dragPoint{};
+    std::wstring dragPath;  // item the drag started on, used when nothing is selected
     std::wstring dragTargetFolder;
     bool dragTargetIsTree = false;
     int dragTargetRow = -1;

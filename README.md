@@ -78,8 +78,8 @@ and a tree that reveals the folder you are browsing.
 
 **File operations, not just browsing** — new folder, rename, move to Trash or the
 Recycle Bin, copy / cut / paste through the system clipboard, drag & drop between
-folders and from other apps, rubber-band selection, multi-select with Shift and
-Ctrl / Command.
+folders and to or from other apps (Explorer, the desktop), rubber-band selection,
+multi-select with Shift and Ctrl / Command.
 
 **Preview without opening a second app** — `Space` opens Quick Look on macOS
 (images and PDFs get real thumbnails) or a Quick View window on Windows (images

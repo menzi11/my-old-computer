@@ -14,6 +14,7 @@
 #include "canvas.h"
 #include "debug.h"
 #include "dialog.h"
+#include "dnd.h"
 #include "fs.h"
 #include "ids.h"
 #include "preview.h"
@@ -203,49 +204,8 @@ void marqueeUpdate(App& a) {
 
 // ---------------------------------------------------------------- dragging
 
-void updateDragTarget(App& a, POINT p) {
-    a.dragTargetIsTree = false;
-    a.dragTargetRow = -1;
-    a.dragTargetFolder.clear();
-    if (a.sidebarVisible && PtInRect(&a.lay.sidebar, p)) {
-        int row = a.treeRowAt(p);
-        if (row >= 0) {
-            TreeNode* n = a.treeFlat[row];
-            if (!n->path.empty()) {
-                a.dragTargetFolder = n->path;
-                a.dragTargetIsTree = true;
-                a.dragTargetRow = row;
-            }
-        }
-        return;
-    }
-    if (!PtInRect(&a.lay.content, p)) return;
-    if (a.mode == ViewMode::Details) {
-        int row = a.listRowAt(p);
-        if (row >= 0 && a.entries[row].isDir) a.dragTargetFolder = a.entries[row].path;
-    } else {
-        int idx = a.gridIndexAt(p);
-        if (idx >= 0 && a.entries[idx].isDir) a.dragTargetFolder = a.entries[idx].path;
-    }
-}
-
-void finishDrag(App& a, HWND hwnd, bool drop) {
-    if (!a.dragging) {
-        a.dragArmed = false;
-        return;
-    }
-    std::vector<std::wstring> paths;
-    for (auto& e : a.entries)
-        if (a.selection.count(e.path)) paths.push_back(e.path);
-    std::wstring dest = a.dragTargetFolder;
-    a.dragging = false;
-    a.dragArmed = false;
-    a.dragTargetFolder.clear();
-    a.dragTargetIsTree = false;
-    a.dragTargetRow = -1;
-    if (drop && !paths.empty()) a.performDrop(paths, dest);
-    repaint(hwnd);
-}
+// The actual drag is OLE based (see dnd.cpp); the window's IDropTarget keeps
+// app.dragTargetFolder up to date while the pointer is inside the window.
 
 // ---------------------------------------------------------------- commands
 
@@ -343,12 +303,27 @@ void onMouseMove(HWND hwnd, App& a, POINT p) {
 
     if (a.dragArmed && !a.dragging) {
         int dx = p.x - a.marqueeStart.x, dy = p.y - a.marqueeStart.y;
-        if (dx * dx + dy * dy > 16) a.dragging = true;
-    }
-    if (a.dragging) {
-        updateDragTarget(a, p);
-        repaint(hwnd);
-        return;
+        if (dx * dx + dy * dy > 16) {
+            std::vector<std::wstring> paths;
+            for (auto& e : a.entries)
+                if (a.selection.count(e.path)) paths.push_back(e.path);
+            if (paths.empty() && !a.dragPath.empty()) paths.push_back(a.dragPath);
+            a.dragArmed = false;
+            a.dragging = true;
+            if (GetCapture() == hwnd) ReleaseCapture();
+            DWORD effect = 0;
+            diagLog(L"startDrag paths=%d first=%ls", (int)paths.size(),
+                    paths.empty() ? L"" : paths.front().c_str());
+            dnd::dragOut(hwnd, paths, &effect);
+            a.dragging = false;
+            a.dragPath.clear();
+            a.dragTargetFolder.clear();
+            a.dragTargetIsTree = false;
+            a.dragTargetRow = -1;
+            a.reload();
+            repaint(hwnd);
+            return;
+        }
     }
     if (a.marquee) {
         a.marqueeEnd = p;
@@ -541,6 +516,7 @@ void onLButtonDown(HWND hwnd, App& a, POINT p) {
                 selectOnly(a, row);
                 a.selAnchor = row;
             }
+            a.dragPath = a.entries[row].path;
             a.dragArmed = true;
             a.marqueeStart = p;
             SetCapture(hwnd);
@@ -563,6 +539,7 @@ void onLButtonDown(HWND hwnd, App& a, POINT p) {
                 selectOnly(a, idx);
                 a.selAnchor = idx;
             }
+            a.dragPath = a.entries[idx].path;
             a.dragArmed = true;
             a.marqueeStart = p;
             SetCapture(hwnd);
@@ -629,8 +606,10 @@ void onLButtonUp(HWND hwnd, App& a, POINT p) {
         repaint(hwnd);
         return;
     }
-    if (a.dragging || a.dragArmed) {
-        finishDrag(a, hwnd, a.dragging);
+    if (a.dragArmed || a.dragging) {
+        a.dragArmed = false;
+        a.dragging = false;
+        a.dragPath.clear();
         repaint(hwnd);
     }
 }
@@ -914,6 +893,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         DestroyWindow(hwnd);
         return 0;
     case WM_DESTROY:
+        dnd::revokeTarget(hwnd);
         preview::hide();
         PostQuitMessage(0);
         return 0;
@@ -1117,7 +1097,7 @@ int runSnapshot(App& app, const std::vector<std::wstring>& args) {
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
     enableDpiAwareness();
-    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (FAILED(OleInitialize(nullptr))) CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     g_dumpMsg = RegisterWindowMessageW(L"MyOldComputerDump");
 
     int argc = 0;
@@ -1129,7 +1109,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
     bool snapshot = hasArg(args, L"--snapshot");
     if (snapshot) {
         int code = runSnapshot(g_app, args);
-        CoUninitialize();
+        OleUninitialize();
         return code;
     }
     if (hasArg(args, L"--selftest")) {
@@ -1137,7 +1117,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
         app.init(nullptr);
         app.relayout(1000, 640);
         int code = runSelfTest(app);
-        CoUninitialize();
+        OleUninitialize();
         return code;
     }
 
@@ -1191,6 +1171,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
         g_app.buildTree();
     }
     g_app.loadDirectory(startPath, false);
+    dnd::registerTarget(hwnd, &g_app);
     DragAcceptFiles(hwnd, TRUE);
     ShowWindow(hwnd, showCmd == SW_SHOWMAXIMIZED ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL);
     UpdateWindow(hwnd);
@@ -1201,6 +1182,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
         DispatchMessageW(&msg);
     }
     g_app.saveSettings();
-    CoUninitialize();
+    OleUninitialize();
     return 0;
 }
