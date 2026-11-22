@@ -851,6 +851,41 @@ int App::nameExtent(int row) const {
            (int)(6 * scale + 0.5);
 }
 
+// Only the icon and the name text belong to an item.  Everything else inside
+// the view (the rest of the row, the padding around a grid cell) is blank
+// canvas: a press there starts a rubber-band selection instead of picking or
+// dragging whatever row happens to be under the pointer.
+bool App::hitTestItem(POINT p, int* index) const {
+    if (mode == ViewMode::Details) {
+        int row = listRowAt(p);
+        if (row < 0) return false;
+        const int limit = std::min(lay.nameW, nameExtent(row));
+        if (p.x - lay.listViewport.left >= limit) return false;
+        if (index) *index = row;
+        return true;
+    }
+    int idx = gridIndexAt(p);
+    if (idx < 0) return false;
+    RECT r = gridCellRect(idx);
+    const int fontPx = (int)(14.6667 * scale + 0.5);
+    if (mode == ViewMode::List) {
+        const int s16 = (int)(16 * scale + 0.5);
+        const int right = r.left + (int)(2 * scale + 0.5) + s16 + (int)(4 * scale + 0.5) +
+                          measureUiText(entries[idx].name, fontPx) + (int)(2 * scale + 0.5);
+        if (p.x > right) return false;
+        if (index) *index = idx;
+        return true;
+    }
+    const int iconSize = (int)(48 * scale + 0.5);
+    RECT icon{(r.left + r.right) / 2 - iconSize / 2, r.top + (int)(4 * scale + 0.5),
+              (r.left + r.right) / 2 + iconSize / 2, r.top + (int)(4 * scale + 0.5) + iconSize};
+    RECT label{r.left + (int)(2 * scale + 0.5), r.top + (int)(54 * scale + 0.5),
+               r.right - (int)(2 * scale + 0.5), r.bottom};
+    if (!PtInRect(&icon, p) && !PtInRect(&label, p)) return false;
+    if (index) *index = idx;
+    return true;
+}
+
 int App::gridCellW() const { return (int)((mode == ViewMode::Icons ? 94 : 220) * scale + 0.5); }
 int App::gridCellH() const { return (int)((mode == ViewMode::Icons ? 94 : 19) * scale + 0.5); }
 

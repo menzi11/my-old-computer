@@ -8,6 +8,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "app.h"
@@ -76,8 +77,8 @@ void dumpLayout(App& a) {
         fwprintf(f, L"treeRow %d %d,%d depth %d title %ls\n", i, (int)r.left, (int)r.top,
                  a.treeFlat[i]->depth, a.treeFlat[i]->title.c_str());
     }
-    fwprintf(f, L"listRows %d mode %d\n", (int)a.entries.size(), (int)a.mode);
-    for (int i = 0; i < 6 && i < (int)a.entries.size(); ++i) {
+    fwprintf(f, L"listRows %d mode %d rowH %d\n", (int)a.entries.size(), (int)a.mode, a.m.rowH);
+    for (int i = 0; i < 40 && i < (int)a.entries.size(); ++i) {
         RECT r = a.mode == ViewMode::Details ? a.listRowRect(i) : a.gridCellRect(i);
         fwprintf(f, L"row %d %d,%d %dx%d name %ls\n", i, (int)r.left, (int)r.top,
                  (int)(r.right - r.left), (int)(r.bottom - r.top), a.entries[i].name.c_str());
@@ -185,21 +186,37 @@ void moveSelection(App& a, int dx, int dy) {
 }
 
 void marqueeUpdate(App& a) {
+    // +1 on the far edges: a perfectly vertical/horizontal drag has zero width
+    // as a RECT and would otherwise select nothing.
     RECT r{std::min(a.marqueeStart.x, a.marqueeEnd.x), std::min(a.marqueeStart.y, a.marqueeEnd.y),
-           std::max(a.marqueeStart.x, a.marqueeEnd.x), std::max(a.marqueeStart.y, a.marqueeEnd.y)};
+           std::max(a.marqueeStart.x, a.marqueeEnd.x) + 1,
+           std::max(a.marqueeStart.y, a.marqueeEnd.y) + 1};
     bool additive = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
     if (!additive) a.selection.clear();
     for (int i = 0; i < (int)a.entries.size(); ++i) {
+        // Only items the band actually touches: the icon and the name text.
+        // A band drawn in the blank part of the row must not pick anything.
         RECT hit{};
         if (a.mode == ViewMode::Details) {
             hit = a.listRowRect(i);
-            hit.right = hit.left + a.lay.nameW;
+            hit.right = hit.left + std::min(a.lay.nameW, a.nameExtent(i));
         } else {
             hit = a.gridCellRect(i);
         }
         RECT inter{};
         if (IntersectRect(&inter, &hit, &r)) a.selection.insert(a.entries[i].path);
     }
+}
+
+void startMarquee(HWND hwnd, App& a, POINT p) {
+    if (!(GetKeyState(VK_CONTROL) & 0x8000)) a.selection.clear();
+    a.marqueeStart = p;
+    a.marqueeEnd = p;
+    a.marquee = true;
+    a.dragArmed = false;
+    a.dragPath.clear();
+    SetCapture(hwnd);
+    repaint(hwnd);
 }
 
 // ---------------------------------------------------------------- dragging
@@ -303,7 +320,9 @@ void onMouseMove(HWND hwnd, App& a, POINT p) {
 
     if (a.dragArmed && !a.dragging) {
         int dx = p.x - a.marqueeStart.x, dy = p.y - a.marqueeStart.y;
-        if (dx * dx + dy * dy > 16) {
+        const int tx = std::max(3, GetSystemMetrics(SM_CXDRAG) / 2);
+        const int ty = std::max(3, GetSystemMetrics(SM_CYDRAG) / 2);
+        if (std::abs(dx) > tx || std::abs(dy) > ty) {
             std::vector<std::wstring> paths;
             for (auto& e : a.entries)
                 if (a.selection.count(e.path)) paths.push_back(e.path);
@@ -326,6 +345,16 @@ void onMouseMove(HWND hwnd, App& a, POINT p) {
         }
     }
     if (a.marquee) {
+        // Auto-scroll when the pointer is dragged past the edge of the list.
+        const RECT& vp = a.mode == ViewMode::Details ? a.lay.listViewport : a.lay.gridViewport;
+        const int step = a.mode == ViewMode::Details ? a.m.rowH : a.gridCellH();
+        if (p.y < vp.top) {
+            if (a.mode == ViewMode::Details) a.scrollListBy(-step);
+            else a.scrollGridBy(-step);
+        } else if (p.y >= vp.bottom) {
+            if (a.mode == ViewMode::Details) a.scrollListBy(step);
+            else a.scrollGridBy(step);
+        }
         a.marqueeEnd = p;
         marqueeUpdate(a);
         repaint(hwnd);
@@ -495,66 +524,41 @@ void onLButtonDown(HWND hwnd, App& a, POINT p) {
         return;
     }
 
-    if (a.mode == ViewMode::Details) {
-        int row = a.listRowAt(p);
-        diagLog(L"LDOWN %d,%d row=%d", p.x, p.y, row);
-        if (row >= 0) {
-            bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-            bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-            // No full-row select: only the icon and the name text pick the row.
-            const int rowLeft = a.lay.listViewport.left;
-            const int extent = std::min(a.lay.nameW, a.nameExtent(row));
-            if (p.x - rowLeft > extent) return;
-            if (ctrl) {
-                if (a.selection.count(a.entries[row].path)) a.selection.erase(a.entries[row].path);
-                else a.selection.insert(a.entries[row].path);
-                a.selAnchor = row;
-            } else if (shift) {
-                a.selection.clear();
-                selectRange(a, a.selAnchor >= 0 ? a.selAnchor : row, row);
-            } else if (!a.selection.count(a.entries[row].path)) {
-                selectOnly(a, row);
-                a.selAnchor = row;
-            }
-            a.dragPath = a.entries[row].path;
-            a.dragArmed = true;
-            a.marqueeStart = p;
-            SetCapture(hwnd);
-            repaint(hwnd);
-            return;
+    int itemIndex = -1;
+    if (a.hitTestItem(p, &itemIndex)) {
+        const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        const std::wstring& path = a.entries[itemIndex].path;
+        if (ctrl) {
+            if (a.selection.count(path)) a.selection.erase(path);
+            else a.selection.insert(path);
+            a.selAnchor = itemIndex;
+        } else if (shift) {
+            a.selection.clear();
+            selectRange(a, a.selAnchor >= 0 ? a.selAnchor : itemIndex, itemIndex);
+        } else if (!a.selection.count(path)) {
+            selectOnly(a, itemIndex);
+            a.selAnchor = itemIndex;
         }
-    } else {
-        int idx = a.gridIndexAt(p);
-        if (idx >= 0) {
-            bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-            bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-            if (ctrl) {
-                if (a.selection.count(a.entries[idx].path)) a.selection.erase(a.entries[idx].path);
-                else a.selection.insert(a.entries[idx].path);
-                a.selAnchor = idx;
-            } else if (shift) {
-                a.selection.clear();
-                selectRange(a, a.selAnchor >= 0 ? a.selAnchor : idx, idx);
-            } else if (!a.selection.count(a.entries[idx].path)) {
-                selectOnly(a, idx);
-                a.selAnchor = idx;
-            }
-            a.dragPath = a.entries[idx].path;
-            a.dragArmed = true;
-            a.marqueeStart = p;
-            SetCapture(hwnd);
-            repaint(hwnd);
-            return;
-        }
+        a.dragPath = path;
+        a.dragArmed = true;
+        a.marqueeStart = p;
+        SetCapture(hwnd);
+        repaint(hwnd);
+        return;
     }
 
-    // Empty area: clear selection and start a rubber band.
-    if (!(GetKeyState(VK_CONTROL) & 0x8000)) a.selection.clear();
-    a.marqueeStart = p;
-    a.marqueeEnd = p;
-    a.marquee = true;
-    SetCapture(hwnd);
-    repaint(hwnd);
+    // Blank canvas inside the file view (the empty part of a row, the space
+    // below the last row, the padding around an icon): start a rubber band.
+    if (a.mode == ViewMode::Details) {
+        if (PtInRect(&a.lay.listViewport, p)) {
+            startMarquee(hwnd, a, p);
+            return;
+        }
+    } else if (PtInRect(&a.lay.gridViewport, p)) {
+        startMarquee(hwnd, a, p);
+        return;
+    }
 }
 
 void onLButtonUp(HWND hwnd, App& a, POINT p) {
@@ -842,6 +846,15 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         a.windowActive = false;
         repaint(hwnd);
         return 0;
+    case WM_CAPTURECHANGED:
+        // Something stole the mouse: never leave a rubber band or a pending
+        // drag armed.
+        if (a.marquee) a.marquee = false;
+        if (a.dragArmed && !a.dragging) {
+            a.dragArmed = false;
+            a.dragPath.clear();
+        }
+        return 0;
     case WM_MOUSEMOVE: {
         POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         if (!a.splitterDrag && !a.scrollDrag && !a.marquee && !a.dragging && !a.dragArmed) {
@@ -939,6 +952,91 @@ bool hasArg(const std::vector<std::wstring>& args, const wchar_t* name) {
     for (auto& a : args)
         if (a == name) return true;
     return false;
+}
+
+// Drives the same input handlers the window procedure uses, with synthesized
+// points, so click/selection behaviour can be checked without touching the
+// mouse or a real window.
+int runUiTest(App& app) {
+    wchar_t temp[MAX_PATH]{};
+    GetTempPathW(MAX_PATH, temp);
+    std::wstring base = std::wstring(temp) + L"moc-uitest-" + std::to_wstring(GetTickCount64());
+    CreateDirectoryW(base.c_str(), nullptr);
+    for (int i = 0; i < 12; ++i) {
+        std::wstring f = base + L"\\item" + std::to_wstring(i) + L".txt";
+        HANDLE h = CreateFileW(f.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    }
+
+    std::vector<std::pair<std::wstring, bool>> results;
+    auto writeOut = [&results, &temp]() {
+        std::wstring out;
+        for (auto& r : results) {
+            if (!out.empty()) out += L" | ";
+            out += r.first + (r.second ? L" OK" : L" FAIL");
+        }
+        FILE* f = nullptr;
+        if (_wfopen_s(&f, (std::wstring(temp) + L"moc-uitest.txt").c_str(), L"w, ccs=UTF-8") == 0 &&
+            f) {
+            fwprintf(f, L"%s\n", (L"UITEST " + out).c_str());
+            fclose(f);
+        }
+    };
+    auto check = [&results, &writeOut](const wchar_t* name, bool ok) {
+        results.push_back({name, ok});
+        writeOut();
+    };
+
+    app.init(nullptr);
+    app.setViewMode(ViewMode::Details);
+    app.relayout(1100, 760);
+    app.loadDirectory(base, false);
+
+    RECT r0 = app.listRowRect(0);
+    RECT r2 = app.listRowRect(2);
+    POINT namePt{r0.left + 40, (r0.top + r0.bottom) / 2};
+    POINT blankPt{app.lay.listViewport.left + app.lay.nameW + 40, (r0.top + r0.bottom) / 2};
+    check(L"名称可命中", app.hitTestItem(namePt, nullptr));
+    check(L"列空白不命中", !app.hitTestItem(blankPt, nullptr));
+
+    app.selection.clear();
+    onLButtonDown(nullptr, app, namePt);
+    onLButtonUp(nullptr, app, namePt);
+    check(L"单击名称选中1项", app.selection.size() == 1);
+
+    POINT to{blankPt.x, (r2.top + r2.bottom) / 2};
+    onLButtonDown(nullptr, app, blankPt);
+    onMouseMove(nullptr, app, to);
+    onLButtonUp(nullptr, app, to);
+    check(L"列空白框选不选中", app.selection.empty());
+
+    POINT bandTo{namePt.x, (r2.top + r2.bottom) / 2};
+    onLButtonDown(nullptr, app, blankPt);
+    onMouseMove(nullptr, app, bandTo);
+    onLButtonUp(nullptr, app, bandTo);
+    check(L"拖入名称列框选3项", app.selection.size() == 3);
+
+    POINT below{blankPt.x, app.listRowRect(11).bottom + 20};
+    onLButtonDown(nullptr, app, below);
+    onLButtonUp(nullptr, app, below);
+    check(L"点击空白清空选择", app.selection.empty());
+
+    app.setViewMode(ViewMode::Icons);
+    app.relayout(1100, 760);
+    app.clampScroll();
+    RECT cell = app.gridCellRect(0);
+    POINT iconPt{(cell.left + cell.right) / 2, cell.top + 30};
+    POINT padPt{cell.left + 2, cell.top + 2};
+    POINT labelPt{(cell.left + cell.right) / 2, cell.top + 60};
+    check(L"图标可命中", app.hitTestItem(iconPt, nullptr));
+    check(L"格子留白不命中", !app.hitTestItem(padPt, nullptr));
+    check(L"图标名可命中", app.hitTestItem(labelPt, nullptr));
+    RECT cell2 = app.gridCellRect(2);
+    onLButtonDown(nullptr, app, padPt);
+    onMouseMove(nullptr, app, POINT{(cell2.left + cell2.right) / 2, cell2.top + 30});
+    onLButtonUp(nullptr, app, POINT{(cell2.left + cell2.right) / 2, cell2.top + 30});
+    check(L"大图标框选3项", app.selection.size() == 3);
+    return 0;
 }
 
 int runSelfTest(App& app) {
@@ -1117,6 +1215,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
         app.init(nullptr);
         app.relayout(1000, 640);
         int code = runSelfTest(app);
+        OleUninitialize();
+        return code;
+    }
+    if (hasArg(args, L"--uitest")) {
+        App app;
+        int code = runUiTest(app);
         OleUninitialize();
         return code;
     }

@@ -195,6 +195,9 @@ public:
     // Right edge of the icon plus the name text, relative to the row start.
     // Clicks beyond it must not select the row (no full-row select).
     int nameExtent(int row) const;
+    // True when p is on an item's icon or its name (not on the empty part of a
+    // row or a grid cell) - only there may a click select and start a drag.
+    bool hitTestItem(POINT p, int* index) const;
     int listVisibleRows() const;
     int gridCellCount() const;
     int gridCols() const;

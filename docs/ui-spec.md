@@ -9,7 +9,7 @@ this document. If a value changes here, change it in
 | Role | Hex | Used for |
 |---|---|---|
 | Face | `#C0C0C0` | window background, buttons, headers |
-| Highlight | `#DFDFDF` | scrollbar track, selected icon tile |
+| Highlight | `#DFDFDF` | scrollbar track, hover |
 | White | `#FFFFFF` | list background, bevel light edge |
 | Shadow | `#808080` | bevel dark edge, separators |
 | Black | `#000000` | 1 px window outline, text |
@@ -22,7 +22,8 @@ this document. If a value changes here, change it in
 | Folder edge | `#998000` | folder bottom pixel row |
 
 Selection is navy with white text; the selection rectangle never covers a whole
-details row — only the icon and name column.
+details row — only the icon and the name text.  Large icons are not put on a
+grey tile; only the label gets the navy highlight.
 
 ## Metrics (logical pixels at 96 dpi)
 
@@ -83,10 +84,13 @@ the hand-drawn set.  macOS draws the icons in `Icons.swift` per extension.
 - Directories sort before files in every column; names use a natural
   (number-aware) comparison.
 - Details rows draw the icon at x+3, the name at x+22, and highlight only the
-  name column width. There is no full-row select: clicks to the right of the
+  icon and the name text. There is no full-row select: clicks to the right of the
   name text (including the size, type and date columns) do not select the row.
 - A single click selects; Ctrl/Command toggles; Shift extends from the anchor;
-  dragging on empty space draws a rubber band that selects what it touches.
+  dragging on empty space (or on the blank part of a row) draws a rubber band.
+  The band selects only the items whose icon or name it actually touches.
+- Dragging an icon or a name starts a file drag; dropping it on a folder, on the
+  tree or on another application moves (or, across volumes, copies) the items.
 - Double-click opens; Enter opens; Backspace goes up; F2 renames; F5 refreshes;
   Delete moves to the Trash / Recycle Bin.
 - Sizes use the same units on both platforms (`字节`/KB/MB/GB); dates are

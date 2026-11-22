@@ -35,6 +35,21 @@ std::wstring folderTitle(const App& a) {
     return name;
 }
 
+// Shortens a label so it fits maxW pixels, ending it with a real ellipsis.
+std::wstring ellipsize(Canvas& c, const std::wstring& s, int maxW) {
+    if (maxW <= 0) return L"";
+    if (c.textWidth(s) <= maxW) return s;
+    const std::wstring dots = L"\u2026";
+    int lo = 0, hi = (int)s.size();
+    while (lo < hi) {
+        int mid = (lo + hi + 1) / 2;
+        if (c.textWidth(s.substr(0, mid) + dots) <= maxW) lo = mid;
+        else hi = mid - 1;
+    }
+    if (lo <= 0) return dots;
+    return s.substr(0, lo) + dots;
+}
+
 // Draws the icon Explorer would show for this item.  Returns false when the
 // shell has no icon (or system icons are switched off), so the caller can fall
 // back to the code-drawn set.
@@ -347,7 +362,8 @@ void drawDetails(Canvas& c, App& a) {
             const Entry& e = a.entries[i];
             const bool sel = a.selection.count(e.path) > 0;
             c.fill(r, Theme::white);
-            if (sel) c.fill(RECT{r.left, r.top, r.left + a.lay.nameW, r.bottom}, Theme::select);
+            const int extent = std::min(a.lay.nameW, a.nameExtent(i));
+            if (sel) c.fill(RECT{r.left, r.top, r.left + extent, r.bottom}, Theme::select);
             const int s16 = c.px(16);
             RECT iconRect{r.left + c.px(3), r.top + c.px(2), r.left + c.px(3) + s16,
                           r.top + c.px(2) + s16};
@@ -401,25 +417,28 @@ void drawGrid(Canvas& c, App& a) {
             const Entry& e = a.entries[i];
             const bool sel = a.selection.count(e.path) > 0;
             if (a.mode == ViewMode::List) {
-                if (sel) c.fill(r, Theme::select);
                 RECT iconRect{r.left + c.px(2), r.top + c.px(2), r.left + c.px(2) + s16,
                               r.top + c.px(2) + s16};
                 if (!drawShellIcon(c, a, iconRect, e.path, e.isDir)) {
                     if (e.isDir) Icon::folder(c, iconRect);
                     else Icon::file(c, iconRect, fsx::extensionLower(e.name));
                 }
-                c.textClip(e.name,
-                           RECT{iconRect.right + c.px(4), r.top, r.right - c.px(2), r.bottom},
+                const int textLeft = iconRect.right + c.px(4);
+                std::wstring label =
+                    ellipsize(c, e.name, (int)(r.right - c.px(4)) - textLeft);
+                if (sel) {
+                    int tw = c.textWidth(label);
+                    c.fill(RECT{r.left + c.px(1), r.top, textLeft + tw + c.px(3), r.bottom},
+                           Theme::select);
+                }
+                c.textClip(label,
+                           RECT{textLeft, r.top, r.right - c.px(2), r.bottom},
                            sel ? Theme::white : Theme::text, Align::Left);
                 continue;
             }
             const int iconSize = c.px(48);
             RECT iconBox{(r.left + r.right) / 2 - iconSize / 2, r.top + c.px(4),
                          (r.left + r.right) / 2 + iconSize / 2, r.top + c.px(4) + iconSize};
-            if (sel) {
-                c.fill(RECT{r.left + c.px(6), r.top + c.px(2), r.right - c.px(6), r.bottom - c.px(4)},
-                       Theme::faceHi);
-            }
             if (!drawShellIcon(c, a, iconBox, e.path, e.isDir)) {
                 if (e.isDir) {
                     Icon::folder(c, iconBox);
@@ -431,11 +450,16 @@ void drawGrid(Canvas& c, App& a) {
                                fsx::extensionLower(e.name));
                 }
             }
-            RECT label{r.left + c.px(2), r.top + c.px(54), r.right - c.px(2), r.top + c.px(90)};
-            if (sel) c.fill(label, Theme::select);
-            RECT textRect{label.left + c.px(2), label.top + c.px(1), label.right - c.px(2),
-                          label.bottom - c.px(1)};
-            c.textIn(e.name, textRect, sel ? Theme::white : Theme::text, Align::Center, false, true);
+            const int bandTop = r.top + c.px(54);
+            const int bandH = std::max(0, (int)(r.bottom - c.px(2)) - bandTop);
+            std::wstring label = ellipsize(c, e.name, (int)(r.right - r.left) - c.px(10));
+            const int tw = c.textWidth(label);
+            const int lh = c.lineHeight();
+            const int lx = (r.left + r.right - tw) / 2;
+            const int ly = bandTop + std::max(0, (bandH - lh) / 2);
+            if (sel)
+                c.fill(RECT{lx - c.px(3), ly, lx + tw + c.px(3), ly + lh}, Theme::select);
+            c.text(label, lx, ly, sel ? Theme::white : Theme::text);
         }
     }
     c.frame(RECT{vp.left - 1, vp.top - 1, vp.right + 1, vp.bottom + 1}, Theme::shadow);
@@ -444,8 +468,14 @@ void drawGrid(Canvas& c, App& a) {
 
 void drawMarquee(Canvas& c, App& a) {
     if (!a.marquee) return;
+    const RECT& vp = a.mode == ViewMode::Details ? a.lay.listViewport : a.lay.gridViewport;
     RECT r{std::min(a.marqueeStart.x, a.marqueeEnd.x), std::min(a.marqueeStart.y, a.marqueeEnd.y),
            std::max(a.marqueeStart.x, a.marqueeEnd.x), std::max(a.marqueeStart.y, a.marqueeEnd.y)};
+    r.left = std::max(r.left, (LONG)vp.left);
+    r.top = std::max(r.top, (LONG)vp.top);
+    r.right = std::min(r.right, (LONG)vp.right);
+    r.bottom = std::min(r.bottom, (LONG)vp.bottom);
+    if (r.right <= r.left || r.bottom <= r.top) return;
     // Win98 drew a dotted rubber band by XOR.
     for (int x = r.left; x < r.right; x += 2) {
         c.fill(x, r.top, 1, 1, Theme::dark);
