@@ -1,0 +1,6 @@
+build/
+.DS_Store
+*.iconset/
+*.p12
+key.pem
+cert.pem
