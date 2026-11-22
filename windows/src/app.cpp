@@ -435,6 +435,8 @@ bool App::performDrop(const std::vector<std::wstring>& paths, const std::wstring
     std::vector<std::wstring> items;
     for (auto& p : paths) {
         if (_wcsicmp(p.c_str(), dest.c_str()) == 0) continue;
+        // Dropping an item back into its own folder is a no-op, not a copy.
+        if (_wcsicmp(fsx::parentPath(p).c_str(), dest.c_str()) == 0) continue;
         if (fsx::isInside(dest, p)) {
             MessageBeep(MB_ICONASTERISK);
             continue;

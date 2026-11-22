@@ -293,6 +293,7 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
             path = n->path;
             fav = n->kind == TreeNode::Favorite;
             a.selection.clear();
+            a.hoverTree = row;
         }
         a.contextFolder = path;
         a.contextIsFavorite = fav;
@@ -1007,6 +1008,10 @@ int runSelfTest(App& app) {
 
     bool moved = fsx::moveItems({dir + L"\\f2.txt"}, dir + L"\\sub");
     results.push_back(std::wstring(L"移动 ") + (moved ? L"OK" : L"FAIL"));
+
+    bool noopDrop = app.performDrop({dir + L"\\f1.txt"}, L"");
+    results.push_back(std::wstring(L"拖放同目录 ") +
+                      (!noopDrop && fsx::exists(dir + L"\\f1.txt") ? L"OK" : L"FAIL"));
 
     std::wstring out;
     for (auto& r : results) {

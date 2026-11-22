@@ -234,7 +234,7 @@ The Windows build's `--selftest` currently reports:
 
 ```
 SELFTEST 列目录 OK | 大图标 OK | 排序 OK | 新建文件夹 OK |
-         重命名 OK | 回收站 OK | 复制 OK | 同名副本 OK | 移动 OK
+         重命名 OK | 回收站 OK | 复制 OK | 同名副本 OK | 移动 OK | 拖放同目录 OK
 ```
 
 ## Limitations
