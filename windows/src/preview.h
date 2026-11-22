@@ -11,5 +11,6 @@ namespace preview {
 void show(HWND owner, const std::wstring& path);
 void hide();
 bool visible();
+void setSystemIcons(bool on);
 
 }  // namespace preview

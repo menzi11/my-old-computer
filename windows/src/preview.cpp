@@ -12,6 +12,7 @@
 #include "canvas.h"
 #include "fs.h"
 #include "icons.h"
+#include "shellicons.h"
 #include "theme.h"
 
 namespace preview {
@@ -30,6 +31,7 @@ struct State {
     int imgW = 0;
     int imgH = 0;
     bool loaded = false;
+    bool useSystemIcons = true;
     double scale = 1.0;
     bool pressedClose = false;
 };
@@ -258,8 +260,20 @@ void draw(Canvas& c, HWND hwnd) {
         const int s = c.px(48);
         RECT iconRect{inner.left + c.px(16), inner.top + c.px(20), inner.left + c.px(16) + s,
                       inner.top + c.px(20) + s};
-        if (fsx::isDirectory(g.path)) Icon::folder(c, iconRect);
-        else Icon::file(c, iconRect, fsx::extensionLower(fsx::fileName(g.path)));
+        bool drew = false;
+        if (g.useSystemIcons) {
+            HICON shell =
+                shellicons::icon(g.path, fsx::isDirectory(g.path), fsx::isRoot(g.path), s);
+            if (shell) {
+                DrawIconEx(c.dc(), iconRect.left, iconRect.top, shell, s, s, 0, nullptr,
+                           DI_NORMAL);
+                drew = true;
+            }
+        }
+        if (!drew) {
+            if (fsx::isDirectory(g.path)) Icon::folder(c, iconRect);
+            else Icon::file(c, iconRect, fsx::extensionLower(fsx::fileName(g.path)));
+        }
         c.textIn(g.info,
                  RECT{iconRect.right + c.px(16), inner.top + c.px(20), inner.right - c.px(8),
                       inner.bottom - c.px(8)},
@@ -397,5 +411,10 @@ void hide() {
 }
 
 bool visible() { return g.hwnd != nullptr; }
+
+void setSystemIcons(bool on) {
+    g.useSystemIcons = on;
+    if (g.hwnd) InvalidateRect(g.hwnd, nullptr, FALSE);
+}
 
 }  // namespace preview

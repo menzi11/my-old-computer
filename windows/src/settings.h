@@ -12,6 +12,7 @@ struct Settings {
     int sidebarWidth = 200;
     int viewMode = 0;  // 0 details, 1 icons, 2 list
     bool showHidden = false;
+    bool useSystemIcons = true;
     std::vector<std::wstring> favorites;
 
     void load();

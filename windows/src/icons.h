@@ -18,6 +18,7 @@ void arrowLeft(Canvas& c, const RECT& r);
 void arrowRight(Canvas& c, const RECT& r);
 void arrowUp(Canvas& c, const RECT& r);
 void refresh(Canvas& c, const RECT& r);
+void hidden(Canvas& c, const RECT& r);
 void sortArrow(Canvas& c, const RECT& r, bool up);
 void shortcut(Canvas& c, const RECT& r);
 }  // namespace Icon

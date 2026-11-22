@@ -9,11 +9,13 @@
 #include "app.h"
 #include "canvas.h"
 #include "icons.h"
+#include "ids.h"
+#include "shellicons.h"
 #include "scrollbar.h"
 #include "theme.h"
 
 extern const wchar_t* const kMenuTitles[6];
-extern const wchar_t* const kToolTitles[6];
+extern const wchar_t* const kToolTitles[7];
 
 namespace {
 
@@ -31,6 +33,19 @@ std::wstring folderTitle(const App& a) {
     std::wstring name = fsx::fileName(a.current);
     if (name.empty()) return a.current;
     return name;
+}
+
+// Draws the icon Explorer would show for this item.  Returns false when the
+// shell has no icon (or system icons are switched off), so the caller can fall
+// back to the code-drawn set.
+bool drawShellIcon(Canvas& c, App& a, const RECT& r, const std::wstring& path, bool isDir) {
+    if (!a.useSystemIcons || path.empty()) return false;
+    const bool isDrive = isDir && fsx::isRoot(path);
+    HICON icon = shellicons::icon(path, isDir, isDrive, (int)(r.right - r.left));
+    if (!icon) return false;
+    DrawIconEx(c.dc(), r.left, r.top, icon, r.right - r.left, r.bottom - r.top, 0, nullptr,
+               DI_NORMAL);
+    return true;
 }
 
 void drawRoot(Canvas& c, App& a) {
@@ -106,13 +121,14 @@ void drawToolbar(Canvas& c, App& a) {
     const bool canBack = !a.back.empty();
     const bool canForward = !a.forward.empty();
     const bool canUp = a.current != fsx::rootOf(a.current);
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 7; ++i) {
         RECT r = a.toolbarItemRect(i);
         bool enabled = true;
         if (i == 0) enabled = canBack;
         if (i == 1) enabled = canForward;
         if (i == 2) enabled = canUp;
-        if (enabled && a.pressTool == i) c.bevelSunken(r);
+        const bool toggled = (i == kToolbarHiddenIndex) && a.showHidden;
+        if (enabled && (a.pressTool == i || toggled)) c.bevelSunken(r);
         else if (enabled && a.hoverTool == i) c.bevelRaised(r);
         const int s16 = c.px(16);
         RECT iconRect{r.left + c.px(6), (r.top + r.bottom) / 2 - s16 / 2,
@@ -123,7 +139,8 @@ void drawToolbar(Canvas& c, App& a) {
         case 2: Icon::arrowUp(c, iconRect); break;
         case 3: Icon::folder(c, iconRect); break;
         case 4: Icon::views(c, iconRect); break;
-        default: Icon::refresh(c, iconRect); break;
+        case 5: Icon::refresh(c, iconRect); break;
+        default: Icon::hidden(c, iconRect); break;
         }
         COLORREF color = enabled ? Theme::text : Theme::dim;
         RECT textRect{iconRect.right + c.px(4), r.top, r.right - c.px(2), r.bottom};
@@ -208,10 +225,15 @@ void drawTree(Canvas& c, App& a) {
             }
             RECT iconRect{r.left + indent + c.px(13), r.top + c.px(2),
                           r.left + indent + c.px(13) + c.px(16), r.top + c.px(2) + c.px(16)};
-            switch (n->kind) {
-            case TreeNode::Machine: Icon::computer(c, iconRect); break;
-            case TreeNode::Volume: Icon::drive(c, iconRect); break;
-            default: Icon::folder(c, iconRect, n->expanded); break;
+            bool drewIcon = false;
+            if (n->kind != TreeNode::Machine && !n->path.empty())
+                drewIcon = drawShellIcon(c, a, iconRect, n->path, true);
+            if (!drewIcon) {
+                switch (n->kind) {
+                case TreeNode::Machine: Icon::computer(c, iconRect); break;
+                case TreeNode::Volume: Icon::drive(c, iconRect); break;
+                default: Icon::folder(c, iconRect, n->expanded); break;
+                }
             }
             RECT textRect{iconRect.right + c.px(3), r.top, r.right - c.px(4), r.bottom};
             c.textClip(n->title, textRect, selected ? Theme::white : Theme::text, Align::Left);
@@ -329,10 +351,12 @@ void drawDetails(Canvas& c, App& a) {
             const int s16 = c.px(16);
             RECT iconRect{r.left + c.px(3), r.top + c.px(2), r.left + c.px(3) + s16,
                           r.top + c.px(2) + s16};
-            if (e.isDir) {
-                Icon::folder(c, iconRect);
-            } else {
-                Icon::file(c, iconRect, fsx::extensionLower(e.name));
+            if (!drawShellIcon(c, a, iconRect, e.path, e.isDir)) {
+                if (e.isDir) {
+                    Icon::folder(c, iconRect);
+                } else {
+                    Icon::file(c, iconRect, fsx::extensionLower(e.name));
+                }
             }
             RECT nameRect{r.left + c.px(22), r.top, r.left + a.lay.nameW - c.px(4), r.bottom};
             c.textClip(e.name, nameRect, sel ? Theme::white : Theme::text, Align::Left);
@@ -380,8 +404,10 @@ void drawGrid(Canvas& c, App& a) {
                 if (sel) c.fill(r, Theme::select);
                 RECT iconRect{r.left + c.px(2), r.top + c.px(2), r.left + c.px(2) + s16,
                               r.top + c.px(2) + s16};
-                if (e.isDir) Icon::folder(c, iconRect);
-                else Icon::file(c, iconRect, fsx::extensionLower(e.name));
+                if (!drawShellIcon(c, a, iconRect, e.path, e.isDir)) {
+                    if (e.isDir) Icon::folder(c, iconRect);
+                    else Icon::file(c, iconRect, fsx::extensionLower(e.name));
+                }
                 c.textClip(e.name,
                            RECT{iconRect.right + c.px(4), r.top, r.right - c.px(2), r.bottom},
                            sel ? Theme::white : Theme::text, Align::Left);
@@ -394,13 +420,16 @@ void drawGrid(Canvas& c, App& a) {
                 c.fill(RECT{r.left + c.px(6), r.top + c.px(2), r.right - c.px(6), r.bottom - c.px(4)},
                        Theme::faceHi);
             }
-            if (e.isDir) {
-                Icon::folder(c, iconBox);
-            } else {
-                const int inset = c.px(8);
-                Icon::file(c, RECT{iconBox.left + inset, iconBox.top + inset, iconBox.right - inset,
-                                   iconBox.bottom - inset},
-                           fsx::extensionLower(e.name));
+            if (!drawShellIcon(c, a, iconBox, e.path, e.isDir)) {
+                if (e.isDir) {
+                    Icon::folder(c, iconBox);
+                } else {
+                    const int inset = c.px(8);
+                    Icon::file(c,
+                               RECT{iconBox.left + inset, iconBox.top + inset, iconBox.right - inset,
+                                    iconBox.bottom - inset},
+                               fsx::extensionLower(e.name));
+                }
             }
             RECT label{r.left + c.px(2), r.top + c.px(54), r.right - c.px(2), r.top + c.px(90)};
             if (sel) c.fill(label, Theme::select);

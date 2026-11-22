@@ -1,6 +1,10 @@
 #pragma once
 
 // Command ids shared by the menu bar, context menus and the keyboard layer.
+
+// Toolbar index of the "show hidden files" toggle.
+constexpr int kToolbarHiddenIndex = 6;
+
 enum MenuId {
     ID_NONE = 0,
     ID_OPEN = 1,
@@ -17,6 +21,7 @@ enum MenuId {
     ID_REVEAL,
     ID_REFRESH,
     ID_TOGGLE_HIDDEN,
+    ID_TOGGLE_SYSICONS,
     ID_VIEW_BIG,
     ID_VIEW_LIST,
     ID_VIEW_DETAILS,

@@ -67,6 +67,7 @@ void dumpLayout(App& a) {
                  (int)(r.right - r.left), (int)(r.bottom - r.top));
     }
     fwprintf(f, L"current %ls\n", a.current.c_str());
+    fwprintf(f, L"sysicons %d hidden %d\n", a.useSystemIcons ? 1 : 0, a.showHidden ? 1 : 0);
     fwprintf(f, L"scrollers tree %d list %d grid %d\n", a.treeScroll, a.listScroll, a.gridScroll);
     fwprintf(f, L"treeRows %d selected %d\n", (int)a.treeFlat.size(), a.treeSelectedRow());
     for (int i = 0; i < (int)a.treeFlat.size() && i < 60; ++i) {
@@ -607,6 +608,7 @@ void onLButtonUp(HWND hwnd, App& a, POINT p) {
                 a.relayout(a.width, a.height);
                 break;
             case 4: a.cycleViewMode(); break;
+            case 6: a.performMenuAction(ID_TOGGLE_HIDDEN); break;
             default: a.reload(); break;
             }
         }

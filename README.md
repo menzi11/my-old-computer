@@ -31,8 +31,9 @@ It is not a theme for Finder or Explorer, and it does not replace the system she
 It is a normal app you keep next to your other tools.
 
 The title bar, menu bar, toolbar, address bar, status bar, scrollbars, splitter,
-selection highlight and the entire icon set are drawn from code. The repository has
-no bitmap UI assets — the only image is the generated app icon.
+selection highlight and the hand-drawn icon set all come from code. On Windows the
+file icons can instead come from the shell, so every type matches Explorer. The
+repository has no bitmap UI assets — the only image is the generated app icon.
 
 ## Why this one
 
@@ -90,7 +91,9 @@ being shown, which is how every screenshot in this README was produced.
 ### Practical extras
 
 - Sort arrow in the active column, `字节 / KB / MB / GB` sizes and `yyyy/M/d HH:mm` dates
-- Toggle for hidden files and system files
+- Toolbar button and View-menu toggle for hidden and system files
+- File and folder icons come from the shell on Windows, so every type matches Explorer;
+  the View menu can switch back to the hand-drawn icon set
 - Copy the selected paths to the clipboard
 - Reveal in Finder / Explorer, open a terminal in the current folder
 - Window frame, sidebar width, favorites and view mode persist between launches
@@ -197,6 +200,7 @@ windows/src/             Windows app (C++17, Win32, GDI)
   fs.cpp                 listings, natural sort, recycle bin, shell helpers
   canvas.cpp             GDI primitives: fills, 1 px bevels, text
   icons.cpp              the same icon set, drawn on a 16 × 16 grid
+  shellicons.cpp         icons from the Windows shell image lists
   menu.cpp               ownerdrawn Win98 popup menus
   dialog.cpp             ownerdrawn modal dialogs
   preview.cpp            Quick View window (WIC image decode, text, properties)

@@ -52,6 +52,8 @@ void App::init(HWND h) {
     sidebarWidth = settings.sidebarWidth > 0 ? settings.sidebarWidth : 200;
     mode = (ViewMode)clampInt(settings.viewMode, 0, 2);
     showHidden = settings.showHidden;
+    useSystemIcons = settings.useSystemIcons;
+    preview::setSystemIcons(useSystemIcons);
     buildTree();
     refreshTree();
 }
@@ -753,7 +755,8 @@ int measureUiText(const std::wstring& s, int fontPx) {
 }
 
 extern const wchar_t* const kMenuTitles[6] = {L"文件", L"编辑", L"查看", L"收藏", L"工具", L"帮助"};
-extern const wchar_t* const kToolTitles[6] = {L"后退", L"前进", L"向上", L"文件夹", L"查看", L"刷新"};
+extern const wchar_t* const kToolTitles[7] = {L"后退", L"前进", L"向上", L"文件夹",
+                                              L"查看", L"刷新", L"隐藏文件"};
 
 RECT App::titleButtonRect(int i) const {
     const int e = m.edge;
@@ -765,14 +768,14 @@ RECT App::titleButtonRect(int i) const {
     return RECT{x, e + (int)(4 * scale + 0.5), x + btW, e + (int)(4 * scale + 0.5) + btH};
 }
 
-int App::toolbarItemCount() const { return 6; }
+int App::toolbarItemCount() const { return 7; }
 
 RECT App::toolbarItemRect(int i) const {
     const int fontPx = (int)(14.6667 * scale + 0.5);
     int x = lay.tool.left + (int)(3 * scale + 0.5);
     const int y = lay.tool.top + (int)(2 * scale + 0.5);
     const int h = (lay.tool.bottom - lay.tool.top) - (int)(4 * scale + 0.5);
-    for (int j = 0; j < 6; ++j) {
+    for (int j = 0; j < 7; ++j) {
         int tw = measureUiText(kToolTitles[j], fontPx);
         int w = (int)((6 + 16 + 4) * scale + 0.5) + tw + (int)(6 * scale + 0.5);
         if (j == i) return RECT{x, y, x + w, y + h};
@@ -782,7 +785,7 @@ RECT App::toolbarItemRect(int i) const {
 }
 
 int App::toolbarIndexAt(POINT p) const {
-    for (int i = 0; i < 6; ++i)
+    for (int i = 0; i < 7; ++i)
         if (PtInRect(&toolbarItemRect(i), p)) return i;
     return -1;
 }
@@ -968,6 +971,7 @@ std::vector<MenuItem> App::menuFor(const std::wstring& name) const {
         m.push_back({L"刷新", ID_REFRESH, true, false, false, L"F5"});
         m.push_back({L"", 0, false, false, true});
         m.push_back({L"显示隐藏文件", ID_TOGGLE_HIDDEN, true, showHidden});
+        m.push_back({L"使用系统图标", ID_TOGGLE_SYSICONS, true, useSystemIcons});
         m.push_back({L"", 0, false, false, true});
         m.push_back({L"大图标", ID_VIEW_BIG, true, mode == ViewMode::Icons});
         m.push_back({L"列表", ID_VIEW_LIST, true, mode == ViewMode::List});
@@ -1075,6 +1079,11 @@ void App::performMenuAction(int id, const std::wstring& arg) {
         refreshTree();
         reload();
         break;
+    case ID_TOGGLE_SYSICONS:
+        useSystemIcons = !useSystemIcons;
+        settings.useSystemIcons = useSystemIcons;
+        preview::setSystemIcons(useSystemIcons);
+        break;
     case ID_VIEW_BIG: setViewMode(ViewMode::Icons); break;
     case ID_VIEW_LIST: setViewMode(ViewMode::List); break;
     case ID_VIEW_DETAILS: setViewMode(ViewMode::Details); break;
@@ -1173,6 +1182,7 @@ void App::saveSettings() {
     settings.sidebarWidth = sidebarWidth;
     settings.viewMode = (int)mode;
     settings.showHidden = showHidden;
+    settings.useSystemIcons = useSystemIcons;
     if (hwnd) {
         WINDOWPLACEMENT wp{};
         wp.length = sizeof(wp);

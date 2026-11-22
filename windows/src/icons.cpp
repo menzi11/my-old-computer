@@ -289,6 +289,22 @@ void refresh(Canvas& c, const RECT& r) {
     c.polygonFill(tri, 3, Theme::dark);
 }
 
+void hidden(Canvas& c, const RECT& r) {
+    // A dimmed folder with an eye: "show hidden files".
+    Grid g(c, r);
+    const double tabH = 3.2;
+    g.poly({{0.5, tabH}, {0.5, 0.5}, {6.4, 0.5}, {8.32, tabH}}, Theme::faceHi, false);
+    g.poly({{0.5, tabH}, {0.5, 0.5}, {6.4, 0.5}, {8.32, tabH}}, Theme::shadow, true);
+    g.poly({{0.5, tabH}, {15.5, tabH}, {15.5, 15.5}, {0.5, 15.5}}, Theme::faceHi, false);
+    g.poly({{0.5, tabH}, {15.5, tabH}, {15.5, 15.5}, {0.5, 15.5}}, Theme::shadow, true);
+
+    RECT eye{g.X(8), g.Y(8.5), g.X(15), g.Y(13)};
+    c.ellipseFill(eye, Theme::white);
+    c.ellipseOutline(eye, Theme::dark);
+    const int cx = (eye.left + eye.right) / 2, cy = (eye.top + eye.bottom) / 2;
+    c.fill(cx - g.L(1), cy - g.L(1), g.L(2), g.L(2), Theme::dark);
+}
+
 void sortArrow(Canvas& c, const RECT& r, bool up) {
     const int w = r.right - r.left, h = r.bottom - r.top;
     POINT p[3];

@@ -40,6 +40,8 @@ public:
     void polygonFill(const POINT* pts, int n, COLORREF c);
     void polygonOutline(const POINT* pts, int n, COLORREF c);
     void line(int x1, int y1, int x2, int y2, COLORREF c);
+    void ellipseFill(const RECT& r, COLORREF c);
+    void ellipseOutline(const RECT& r, COLORREF c);
 
     // Text.  y is the top of the line box, matching the AppKit draw(at:) origin.
     void text(const std::wstring& s, int x, int y, COLORREF c, bool bold = false);

@@ -72,6 +72,12 @@ Every edge is one hard pixel, no gradients, no shadows, no blur.
 The title bar is a horizontal navy → light-blue gradient with the folder icon,
 bold white title and minimize / maximize / close buttons at the right.
 
+## Icons
+
+Windows uses the shell's own image lists (`SHGetFileInfo` + `SHGetImageList`), so
+file types look exactly as they do in Explorer; the View menu can switch back to
+the hand-drawn set.  macOS draws the icons in `Icons.swift` per extension.
+
 ## Behaviour contract
 
 - Directories sort before files in every column; names use a natural

@@ -70,6 +70,7 @@ public:
     ViewMode mode = ViewMode::Details;
     bool sidebarVisible = true;
     bool showHidden = false;
+    bool useSystemIcons = true;
     int sidebarWidth = 200;
 
     std::set<std::wstring> selection;

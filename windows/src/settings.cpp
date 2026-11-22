@@ -39,6 +39,7 @@ void Settings::load() {
     sidebarWidth = _wtoi(iniRead(path, L"window", L"sidebar", L"200").c_str());
     viewMode = _wtoi(iniRead(path, L"view", L"mode", L"0").c_str());
     showHidden = iniRead(path, L"view", L"hidden", L"0") == L"1";
+    useSystemIcons = iniRead(path, L"view", L"sysicons", L"1") == L"1";
     favorites.clear();
     for (int i = 0; i < 64; ++i) {
         wchar_t key[16];
@@ -64,6 +65,7 @@ void Settings::save() const {
     swprintf_s(buf, L"%d", viewMode);
     WritePrivateProfileStringW(L"view", L"mode", buf, path.c_str());
     WritePrivateProfileStringW(L"view", L"hidden", showHidden ? L"1" : L"0", path.c_str());
+    WritePrivateProfileStringW(L"view", L"sysicons", useSystemIcons ? L"1" : L"0", path.c_str());
     WritePrivateProfileStringW(L"favorites", nullptr, nullptr, path.c_str());
     for (size_t i = 0; i < favorites.size() && i < 64; ++i) {
         wchar_t key[16];

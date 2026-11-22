@@ -112,8 +112,27 @@ void Canvas::polygonOutline(const POINT* pts, int n, COLORREF c) {
     DeleteObject(p);
 }
 
-int Canvas::textWidth(const std::wstring& s, bool bold) {
-    if (s.empty()) return 0;
+void Canvas::ellipseFill(const RECT& r, COLORREF c) {
+    HBRUSH b = CreateSolidBrush(c);
+    HGDIOBJ ob = SelectObject(dc_, b);
+    HGDIOBJ op = SelectObject(dc_, GetStockObject(NULL_PEN));
+    Ellipse(dc_, r.left, r.top, r.right, r.bottom);
+    SelectObject(dc_, op);
+    SelectObject(dc_, ob);
+    DeleteObject(b);
+}
+
+void Canvas::ellipseOutline(const RECT& r, COLORREF c) {
+    HPEN p = CreatePen(PS_SOLID, 1, c);
+    HGDIOBJ op = SelectObject(dc_, p);
+    HGDIOBJ ob = SelectObject(dc_, GetStockObject(NULL_BRUSH));
+    Ellipse(dc_, r.left, r.top, r.right, r.bottom);
+    SelectObject(dc_, ob);
+    SelectObject(dc_, op);
+    DeleteObject(p);
+}
+
+int Canvas::textWidth(const std::wstring& s, bool bold) {    if (s.empty()) return 0;
     HGDIOBJ of = SelectObject(dc_, pick(bold));
     SIZE sz{};
     GetTextExtentPoint32W(dc_, s.c_str(), (int)s.size(), &sz);
