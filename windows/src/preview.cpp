@@ -178,14 +178,18 @@ void loadContent(int viewW, int viewH) {
             g.text = readText(g.path);
         }
         if (g.text.empty()) {
+            const bool isDir = fsx::isDirectory(g.path);
             std::wstring info = fsx::fileName(g.path);
             info += L"\n\n";
-            info += fsx::typeName(g.path, false) + L"\n";
+            info += isDir ? L"文件夹" : fsx::typeName(g.path, false);
+            info += L"\n";
             WIN32_FILE_ATTRIBUTE_DATA fad{};
             if (GetFileAttributesExW(g.path.c_str(), GetFileExInfoStandard, &fad)) {
-                unsigned long long size = ((unsigned long long)fad.nFileSizeHigh << 32) |
-                                          fad.nFileSizeLow;
-                info += fsx::formatSize(size) + L"\n";
+                if (!isDir) {
+                    unsigned long long size = ((unsigned long long)fad.nFileSizeHigh << 32) |
+                                              fad.nFileSizeLow;
+                    info += fsx::formatSize(size) + L"\n";
+                }
                 info += L"修改时间：" + fsx::formatDate(fad.ftLastWriteTime);
             }
             g.info = info;
