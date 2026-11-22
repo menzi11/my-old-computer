@@ -37,12 +37,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                     if a.contains("--trashprobe") {
                         let p = NSHomeDirectory() + "/.Trash"
+                        var out = ""
                         do {
                             let items = try FileManager.default.contentsOfDirectory(atPath: p)
-                            print("TRASHPROBE OK \(items.count) \(items.prefix(5))")
+                            out = "OK \(items.count) \(items.prefix(8))"
                         } catch {
-                            print("TRASHPROBE ERR \(error)")
+                            out = "ERR \(error)"
                         }
+                        try? out.write(toFile: "/tmp/moc_trashprobe.txt", atomically: true, encoding: .utf8)
                     }
                     if let c = a.firstIndex(of: "--ctxmenu"), c + 1 < a.count {
                         self.controller.debugMenu(titled: a[c + 1])
@@ -55,8 +57,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         self.controller.debugTrashNode()
                     }
                     if a.contains("--ctxitems") { self.controller.debugPrintContextMenu() }
-                    if a.contains("--emptytrash") { self.controller.debugEmptyTrash() }
-                    if a.contains("--restorefirst") { self.controller.debugRestoreFirst() }
                     if a.contains("--demo") { self.controller.debugDemoTree() }
                     if a.contains("--novolumes") { self.controller.debugHideVolumes() }
                     if a.contains("--fav") { self.controller.debugAddFavorite() }

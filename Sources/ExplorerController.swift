@@ -256,30 +256,15 @@ final class ExplorerController: NSObject, NSTableViewDataSource, NSTableViewDele
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    // MARK: 回收站
+    // MARK: 删除
 
-    private var trashURL: URL { RecycleBin.root }
-    private var trashPath: String { trashURL.standardizedFileURL.path }
-
-    private func isTrashURL(_ url: URL) -> Bool {
-        url.standardizedFileURL.path == trashPath
-    }
-
-    private func isInsideTrash(_ url: URL) -> Bool {
-        let p = url.standardizedFileURL.path
-        return p == trashPath || p.hasPrefix(trashPath + "/")
-    }
-
-    private var trashHasItems: Bool { !RecycleBin.isEmpty }
-
+    /// 卷本身、系统目录、家目录不允许删；卷里的文件可以
     private func canTrashURL(_ url: URL) -> Bool {
         let p = url.standardizedFileURL.path
         if p == "/" || p == NSHomeDirectory() { return false }
-        if p.hasPrefix("/System/") || p == "/System" { return false }
-        // 卷本身不能删，卷里的文件可以
+        if p == "/System" || p.hasPrefix("/System/") { return false }
         let comps = (p as NSString).pathComponents
-        if comps.count <= 3, comps.count >= 2, comps[1] == "Volumes" { return false }
-        if isInsideTrash(url) { return false }
+        if comps.count >= 2, comps.count <= 3, comps[1] == "Volumes" { return false }
         return true
     }
 
@@ -294,43 +279,11 @@ final class ExplorerController: NSObject, NSTableViewDataSource, NSTableViewDele
         root.sidebar.reloadAll()
     }
 
-    @objc private func emptyTrashAction() {
-        RecycleBin.empty()
-        load(currentURL)
-        root.sidebar.reloadAll()
-    }
-
-    @objc private func restoreFromTrash() {
-        let urls = selectedEntries.map { $0.url }
-        guard !urls.isEmpty else { return }
-        var restored = false
-        for u in urls where isInsideTrash(u) {
-            if RecycleBin.restore(u) { restored = true }
-        }
-        if !restored { NSSound.beep() }
-        load(currentURL)
-        root.sidebar.reloadAll()
-    }
-
-    @objc private func revealTrashInFinder() {
-        NSWorkspace.shared.activateFileViewerSelecting([trashURL])
-    }
-
     /// 右键菜单里针对“树中被右击的那个文件夹”的删除
     @objc private func trashContextNode() {
         guard let f = contextFolder, canTrashURL(f) else { return }
-        guard RecycleBin.move(f) else { NSSound.beep(); return }
+        try? FileManager.default.trashItem(at: f, resultingItemURL: nil)
         reloadAfterDeletion([f])
-    }
-
-    @objc private func deletePermanently() {
-        var urls = selectedEntries.map { $0.url }
-        if urls.isEmpty, contextFromTree, let f = contextFolder { urls = [f] }
-        guard !urls.isEmpty else { return }
-        for u in urls where isInsideTrash(u) {
-            try? FileManager.default.removeItem(at: u)
-        }
-        reloadAfterDeletion(urls)
     }
 
     // MARK: 导航
@@ -390,13 +343,7 @@ final class ExplorerController: NSObject, NSTableViewDataSource, NSTableViewDele
         let gen = generation
 
         let title: String
-        if url.path == "/" {
-            title = "我的电脑"
-        } else if isTrashURL(url) {
-            title = "回收站"
-        } else {
-            title = url.lastPathComponent
-        }
+        if url.path == "/" { title = "我的电脑" } else { title = url.lastPathComponent }
         root.titleBar.title = title
         root.statusBar.rightText = title
         refreshAddress()
@@ -449,11 +396,7 @@ final class ExplorerController: NSObject, NSTableViewDataSource, NSTableViewDele
     }
 
     private func refreshAddress() {
-        if isTrashURL(currentURL) {
-            root.addrBar.path = "回收站"
-        } else {
-            root.addrBar.path = (currentURL.path as NSString).abbreviatingWithTildeInPath
-        }
+        root.addrBar.path = (currentURL.path as NSString).abbreviatingWithTildeInPath
     }
 
     private func sortBy(_ column: Int) {
@@ -706,16 +649,16 @@ final class ExplorerController: NSObject, NSTableViewDataSource, NSTableViewDele
     @objc private func trashSelection() {
         let targets = selectedEntries
         guard !targets.isEmpty else { return }
-        // 回收站里再按删除 = 永久删除（Windows 行为）
-        if targets.allSatisfy({ isInsideTrash($0.url) }) {
-            deletePermanently()
-            return
-        }
         var moved = false
         for e in targets where canTrashURL(e.url) {
-            if RecycleBin.move(e.url) { moved = true }
+            do {
+                try FileManager.default.trashItem(at: e.url, resultingItemURL: nil)
+                moved = true
+            } catch {
+                NSSound.beep()
+            }
         }
-        if !moved { NSSound.beep() }
+        guard moved else { return }
         reloadAfterDeletion(targets.map { $0.url })
     }
 
@@ -850,20 +793,6 @@ final class ExplorerController: NSObject, NSTableViewDataSource, NSTableViewDele
         let m = NSMenu()
         let hasSel = !selectedEntries.isEmpty
         let treeTarget = contextFromTree ? contextFolder : nil
-        let target = (treeTarget ?? contextFolder ?? currentURL).standardizedFileURL
-        let inTrash = isInsideTrash(target)
-        let atTrashRoot = target.path == trashPath
-
-        // 右击“回收站”（或回收站里的空白处）：Windows 只给这几项
-        if atTrashRoot && (treeTarget != nil || !hasSel) {
-            if treeTarget != nil {
-                m.addItem(item("打开", #selector(menuOpen), key: ""))
-            }
-            m.addItem(item("清空回收站", #selector(emptyTrashAction), key: "", enabled: trashHasItems))
-            m.addItem(NSMenuItem.separator())
-            m.addItem(item("在 Finder 中显示", #selector(revealTrashInFinder), key: ""))
-            return m
-        }
 
         m.addItem(item("打开", #selector(menuOpen), key: "", enabled: hasSel || treeTarget != nil))
         m.addItem(item("在 Finder 中显示", #selector(revealInFinder), key: "", enabled: hasSel || treeTarget != nil))
@@ -874,11 +803,7 @@ final class ExplorerController: NSObject, NSTableViewDataSource, NSTableViewDele
         m.addItem(NSMenuItem.separator())
         m.addItem(item("新建文件夹", #selector(newFolder), key: ""))
         m.addItem(item("重命名", #selector(renameSelection), key: "", enabled: hasSel))
-        if inTrash {
-            m.addItem(item("还原", #selector(restoreFromTrash), key: "", enabled: hasSel))
-            m.addItem(item("删除", #selector(deletePermanently), key: "", enabled: hasSel || treeTarget != nil))
-            m.addItem(item("清空回收站", #selector(emptyTrashAction), key: "", enabled: trashHasItems))
-        } else if let t = treeTarget {
+        if let t = treeTarget {
             m.addItem(item("移到回收站", #selector(trashContextNode), key: "",
                           enabled: canTrashURL(t)))
         } else {
@@ -1034,13 +959,6 @@ final class ExplorerController: NSObject, NSTableViewDataSource, NSTableViewDele
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                     let gone = !FileManager.default.fileExists(atPath: base.appendingPathComponent("f0.txt").path)
                     results.append("移到回收站 \(gone ? "OK" : "FAIL")")
-                    // 自检放进回收站的东西要清掉，别留垃圾
-                    let originals = RecycleBin.originalPaths()
-                    for (name, path) in originals where path.contains("xp-selftest-") {
-                        let u = RecycleBin.root.appendingPathComponent(name)
-                        try? FileManager.default.removeItem(at: u)
-                        RecycleBin.forget(name)
-                    }
 
                     // 复制 / 剪切 / 粘贴
                     if let idx = self.entries.firstIndex(where: { $0.name == "f1.txt" }) {
@@ -1148,14 +1066,6 @@ final class ExplorerController: NSObject, NSTableViewDataSource, NSTableViewDele
     }
 
     func debugTrashNode() { trashContextNode() }
-    func debugEmptyTrash() { print("bin before=\(RecycleBin.items().map { $0.lastPathComponent })"); emptyTrashAction(); print("bin after=\(RecycleBin.items().map { $0.lastPathComponent })") }
-    func debugRestoreFirst() {
-        print("bin=\(RecycleBin.items().map { $0.lastPathComponent }) originals=\(RecycleBin.originalPaths())")
-        if let idx = entries.firstIndex(where: { RecycleBin.items().contains($0.url) }) {
-            root.listView.tableView.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
-        }
-        restoreFromTrash()
-    }
 
     func debugDemoTree() {
         TreeBodyView.demoRoot = currentURL

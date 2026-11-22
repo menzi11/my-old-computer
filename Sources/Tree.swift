@@ -4,7 +4,7 @@ import AppKit
 
 final class TreeBodyView: NSView {
     final class Node {
-        enum Kind { case machine, volume, folder, special, favorite, favorites, trash }
+        enum Kind { case machine, volume, folder, special, favorite, favorites }
         let url: URL
         let title: String
         var depth: Int
@@ -166,11 +166,6 @@ final class TreeBodyView: NSView {
             node.hasChildren = hasAnySubdirectory(node.url)
             return node
         }
-        // 回收站：Windows 资源管理器把回收站放在树的最下面
-        RecycleBin.ensureExists()
-        let trashNode = Node(url: RecycleBin.root, title: "回收站", depth: 0, kind: .trash)
-        trashNode.hasChildren = hasAnySubdirectory(RecycleBin.root)
-        specials.append(trashNode)
     }
 
     private func loadChildren(_ node: Node) {
@@ -408,7 +403,6 @@ final class TreeBodyView: NSView {
             switch node.kind {
             case .machine: Icon.computer(16).draw(in: iconRect)
             case .volume: Icon.drive(16).draw(in: iconRect)
-            case .trash: Icon.trash(16).draw(in: iconRect)
             case .special, .favorites, .favorite, .folder: Icon.folder(16, open: node.expanded).draw(in: iconRect)
             }
 
