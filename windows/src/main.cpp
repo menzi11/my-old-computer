@@ -1535,7 +1535,7 @@ int runUiTest(App& app) {
     RECT cell = app.gridCellRect(0);
     POINT iconPt{(cell.left + cell.right) / 2, cell.top + 30};
     POINT padPt{cell.left + 2, cell.top + 2};
-    POINT labelPt{(cell.left + cell.right) / 2, cell.top + 60};
+    POINT labelPt{(cell.left + cell.right) / 2, cell.top + 73};
     check(L"图标可命中", app.hitTestItem(iconPt, nullptr));
     check(L"格子留白不命中", !app.hitTestItem(padPt, nullptr));
     check(L"图标名可命中", app.hitTestItem(labelPt, nullptr));
@@ -1580,6 +1580,7 @@ int runUiTest(App& app) {
             if (app.entries[i].isDir) { subRow = i; break; }
         RECT r = app.listRowRect(subRow);
         const int midY = (r.top + r.bottom) / 2;
+        check(L"行垂直缝不命中", !app.hitTestItem(POINT{r.left + 40, r.top + 1}, nullptr));
         onDoubleClick(nullptr, app, POINT{r.left + 10, midY});
         check(L"双击名称进入文件夹", app.current == sub);
         app.loadDirectory(base, false);
