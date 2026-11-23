@@ -602,10 +602,11 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
         }
         fromTree = true;
     } else {
+        // The same hit rule as clicking and double-clicking: only an item's
+        // icon and name count.  The seam between two entries (the blank rest
+        // of a cell) is the folder background, not a neighbouring file.
         int row = -1;
-        if (a.mode == ViewMode::Details) row = a.listRowAt(p);
-        else row = a.gridIndexAt(p);
-        if (row >= 0 && row < (int)a.entries.size()) {
+        if (a.hitTestItem(p, &row)) {
             if (!a.selection.count(a.entries[row].path)) selectOnly(a, row);
             for (auto& e : a.entries)
                 if (a.selection.count(e.path)) paths.push_back(e.path);
@@ -1143,12 +1144,11 @@ void onDropFiles(HWND hwnd, App& a, HDROP drop) {
     if (a.sidebarVisible && PtInRect(&a.lay.sidebar, p)) {
         int row = a.treeRowAt(p);
         if (row >= 0) target = a.treeFlat[row]->path;
-    } else if (a.mode == ViewMode::Details) {
-        int row = a.listRowAt(p);
-        if (row >= 0 && a.entries[row].isDir) target = a.entries[row].path;
     } else {
-        int idx = a.gridIndexAt(p);
-        if (idx >= 0 && a.entries[idx].isDir) target = a.entries[idx].path;
+        // A drop needs the icon or the name too; the seam between entries
+        // drops into the current folder, like Explorer.
+        int idx = -1;
+        if (a.hitTestItem(p, &idx) && a.entries[idx].isDir) target = a.entries[idx].path;
     }
     a.performDrop(paths, target);
     repaint(hwnd);
@@ -1517,6 +1517,17 @@ int runUiTest(App& app) {
         if (it.id == ID_NEW_FOLDER) hasNewFolder = true;
     check(L"空白右键有新建文件夹", hasNewFolder);
     app.selection.clear();
+
+    // List view: the seam to the right of a short name is blank canvas, the
+    // same seam a right-click must not turn into a neighbouring item.
+    app.setViewMode(ViewMode::List);
+    app.relayout(1100, 760);
+    app.clampScroll();
+    {
+        RECT cellL = app.gridCellRect(0);
+        POINT seam{cellL.left + (int)(150 * app.scale + 0.5), (cellL.top + cellL.bottom) / 2};
+        check(L"列表缝隙不命中", !app.hitTestItem(seam, nullptr));
+    }
 
     app.setViewMode(ViewMode::Icons);
     app.relayout(1100, 760);

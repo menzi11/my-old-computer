@@ -285,13 +285,11 @@ private:
             return;
         }
         if (!PtInRect(&app_->lay.content, p)) return;
-        if (app_->mode == ViewMode::Details) {
-            int r = app_->listRowAt(p);
-            if (r >= 0 && app_->entries[r].isDir) target = app_->entries[r].path;
-        } else {
-            int i = app_->gridIndexAt(p);
-            if (i >= 0 && app_->entries[i].isDir) target = app_->entries[i].path;
-        }
+        // Highlight a folder only under its icon or name - the seam between
+        // entries is the current folder, the same hit rule as clicks.
+        int idx = -1;
+        if (app_->hitTestItem(p, &idx) && app_->entries[idx].isDir)
+            target = app_->entries[idx].path;
     }
 
     LONG ref_ = 1;
