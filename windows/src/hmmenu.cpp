@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "canvas.h"
+#include "debug.h"
 #include "theme.h"
 
 namespace {
@@ -158,6 +159,30 @@ void paintNode(HWND hwnd) {
     EndPaint(hwnd, &ps);
 }
 
+// True while p (client coords of n) sits in the corridor between the row
+// that opened the submenu and the submenu window itself - the path a
+// diagonal mouse move takes to get there.  Explorer keeps the submenu alive
+// while the pointer travels it; without this, crossing a neighbouring row
+// on the way closed the submenu and the item could never be reached.
+bool inCorridor(Node* n, POINT p) {
+    if (n->children.empty() || n->hover < 0 || n->hover >= (int)n->rects.size()) return false;
+    Node* child = n->children.front();
+    if (!child->hwnd) return false;
+    RECT sub{};
+    GetWindowRect(child->hwnd, &sub);
+    MapWindowPoints(nullptr, n->hwnd, (LPPOINT)&sub, 2);
+    const RECT& row = n->rects[n->hover];
+    if (p.x < row.left || p.x > sub.right) return false;
+    if (p.x >= sub.left) return p.y >= sub.top - 2 && p.y <= sub.bottom + 2;
+    // Between the row and the submenu: the wedge between the two diagonals
+    // from the row's ends to the submenu's ends (what Win98 menus use).
+    const int span = std::max(1L, (long)sub.right - row.left);
+    const double t = (double)(p.x - row.left) / (double)span;
+    const int top = row.top + (int)(t * (sub.top - row.top)) - 4;
+    const int bottom = row.bottom + (int)(t * (sub.bottom - row.bottom)) + 4;
+    return p.y >= top && p.y <= bottom;
+}
+
 int hitItem(Node* n, POINT p) {
     for (size_t i = 0; i < n->rects.size(); ++i)
         if (p.y >= n->rects[i].top && p.y < n->rects[i].bottom) return (int)i;
@@ -211,6 +236,7 @@ void createNodeWindow(Node* n, int x, int y) {
 }
 
 void openChild(Node* n, int index) {
+    diagLog(L"openChild idx=%d", index);
     if (index < 0 || index >= (int)n->subs.size() || !n->subs[index] || !n->enabled[index]) return;
     if (!n->children.empty() && n->children.size() == 1 && n->hover == index) return;
     destroyChildren(n);
@@ -248,6 +274,7 @@ void choose(Node* n, int index) {
     Node* root = n;
     while (root->parent) root = root->parent;
     root->chosen = (int)n->ids[index];
+    diagLog(L"choose idx=%d id=0x%X", index, root->chosen);
     closeAll(root);
 }
 
@@ -271,7 +298,10 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             POINT p{(short)LOWORD(lp), (short)HIWORD(lp)};
             int index = hitItem(n, p);
             if (index >= 0 && n->seps[index]) index = -1;
+            diagLog(L"hmmenu move %d,%d idx=%d hover=%d sub=%d", p.x, p.y, index, n->hover,
+                    (index >= 0 && index < (int)n->subs.size()) ? (int)n->subs[index] : -1);
             if (index != n->hover) {
+                if (!n->children.empty() && inCorridor(n, p)) return 0;  // keep the submenu
                 n->hover = index;
                 InvalidateRect(hwnd, nullptr, FALSE);
                 if (index >= 0 && n->subs[index]) openChild(n, index);
@@ -282,12 +312,16 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONDOWN:
         if (n) {
             POINT p{(short)LOWORD(lp), (short)HIWORD(lp)};
+            diagLog(L"hmmenu down %d,%d idx=%d child=%d", p.x, p.y, hitItem(n, p),
+                    (int)(n->parent != nullptr));
             if (hitItem(n, p) < 0) closeAll(n);
         }
         return 0;
     case WM_LBUTTONUP:
         if (n) {
             POINT p{(short)LOWORD(lp), (short)HIWORD(lp)};
+            diagLog(L"hmmenu up %d,%d idx=%d root=%d", p.x, p.y, hitItem(n, p),
+                    (int)(n->parent != nullptr));
             choose(n, hitItem(n, p));
         }
         return 0;
