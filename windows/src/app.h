@@ -3,6 +3,7 @@
 
 #include <windows.h>
 
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -36,6 +37,9 @@ struct Layout {
     int colX[4]{};
     int colW[4]{};
     int nameW = 0;
+    // Measured once per relayout: hit tests and paints must not re-measure.
+    int menuItemW[6]{};
+    int toolItemW[7]{};
 };
 
 struct MenuItem {
@@ -64,6 +68,9 @@ public:
     std::wstring current;
     std::vector<Entry> entries;
     std::vector<int> nameWidths;
+    // Raw name text widths (nameWidths minus the icon lead-in), reused by the
+    // list view's hit test so no view measures text on mouse move.
+    std::vector<int> textWidths;
     std::vector<std::wstring> back;
     std::vector<std::wstring> forward;
     int sortColumn = 0;
@@ -87,6 +94,9 @@ public:
 
     std::vector<TreeNode> treeRoots;
     std::vector<TreeNode*> treeFlat;
+    // +/- answers per folder, invalidated when the disk or the hidden filter
+    // changes (a process-wide cache used to go stale after every file op).
+    std::map<std::wstring, bool> subdirCache;
     // Row that was clicked in the tree.  Tree clicks only select and navigate;
     // they must not expand the tree or scroll it out from under the pointer.
     int treeClickRow = -1;
@@ -104,6 +114,10 @@ public:
     bool marquee = false;
     POINT marqueeStart{};
     POINT marqueeEnd{};
+    // Plain click on one of several selected items: the multi-selection is
+    // kept while the button is down (a drag may still start) and collapsed to
+    // this row on release if it never did.
+    int pressSelectedRow = -1;
     // Set whenever anything but the rubber band changes; lets the window reuse
     // its cached frame while a selection drag is in progress.
     bool paintDirty = true;
@@ -132,6 +146,7 @@ public:
     // Address bar edit control.
     HWND addrEdit = nullptr;
     bool addrEditing = false;
+    HFONT addrFont = nullptr;  // rebuilt on DPI change, deleted then
 
     void init(HWND h);
     void setScale(double s);
@@ -219,8 +234,6 @@ public:
     // True when p is on an item's icon or its name (not on the empty part of a
     // row or a grid cell) - only there may a click select and start a drag.
     bool hitTestItem(POINT p, int* index) const;
-    int listVisibleRows() const;
-    int gridCellCount() const;
     int gridCols() const;
     int gridCellW() const;
     int gridCellH() const;
@@ -229,7 +242,6 @@ public:
     int gridContentHeight() const;
     int listContentHeight() const;
     int treeContentHeight() const;
-    std::wstring nameExtentPath() const;
 
     // Scroll positions
     void clampScroll();

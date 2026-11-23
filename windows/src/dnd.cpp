@@ -41,34 +41,22 @@ public:
     HRESULT STDMETHODCALLTYPE GetData(FORMATETC* fmt, STGMEDIUM* stg) override {
         if (!fmt || !stg) return E_INVALIDARG;
         if (fmt->cfFormat == CF_HDROP && (fmt->tymed & TYMED_HGLOBAL)) {
-            std::wstring list;
-            for (auto& p : paths_) {
-                list += p;
-                list.push_back(L'\0');
-            }
-            list.push_back(L'\0');
-            const SIZE_T bytes = sizeof(DROPFILES) + (list.size() + 1) * sizeof(wchar_t);
-            HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+            HGLOBAL mem = fsx::makeHdropData(paths_);
             if (!mem) return E_OUTOFMEMORY;
-            auto* drop = (DROPFILES*)GlobalLock(mem);
-            if (!drop) {
-                GlobalFree(mem);
-                return E_OUTOFMEMORY;
-            }
-            drop->pFiles = sizeof(DROPFILES);
-            drop->fWide = TRUE;
-            memcpy((char*)drop + sizeof(DROPFILES), list.c_str(),
-                   (list.size() + 1) * sizeof(wchar_t));
-            GlobalUnlock(mem);
             stg->tymed = TYMED_HGLOBAL;
             stg->hGlobal = mem;
             stg->pUnkForRelease = nullptr;
             return S_OK;
         }
-        if (fmt->cfFormat == preferredDropEffect_ && (fmt->tymed & TYMED_HGLOBAL)) {
+        if (fmt->cfFormat == fsx::preferredDropEffectFormat() && (fmt->tymed & TYMED_HGLOBAL)) {
             HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, sizeof(DWORD));
             if (!mem) return E_OUTOFMEMORY;
-            *(DWORD*)GlobalLock(mem) = DROPEFFECT_COPY | DROPEFFECT_MOVE;
+            auto* effect = (DWORD*)GlobalLock(mem);
+            if (!effect) {
+                GlobalFree(mem);
+                return E_OUTOFMEMORY;
+            }
+            *effect = DROPEFFECT_COPY | DROPEFFECT_MOVE;
             GlobalUnlock(mem);
             stg->tymed = TYMED_HGLOBAL;
             stg->hGlobal = mem;
@@ -84,7 +72,8 @@ public:
     HRESULT STDMETHODCALLTYPE QueryGetData(FORMATETC* fmt) override {
         if (!fmt) return E_INVALIDARG;
         if (fmt->cfFormat == CF_HDROP && (fmt->tymed & TYMED_HGLOBAL)) return S_OK;
-        if (fmt->cfFormat == preferredDropEffect_ && (fmt->tymed & TYMED_HGLOBAL)) return S_OK;
+        if (fmt->cfFormat == fsx::preferredDropEffectFormat() && (fmt->tymed & TYMED_HGLOBAL))
+            return S_OK;
         return DV_E_FORMATETC;
     }
     HRESULT STDMETHODCALLTYPE GetCanonicalFormatEtc(FORMATETC*, FORMATETC* out) override {
@@ -98,7 +87,8 @@ public:
         if (direction != DATADIR_GET || !out) return E_NOTIMPL;
         FORMATETC formats[2] = {
             {CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL},
-            {preferredDropEffect_, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL},
+            {(CLIPFORMAT)fsx::preferredDropEffectFormat(), nullptr, DVASPECT_CONTENT, -1,
+             TYMED_HGLOBAL},
         };
         return SHCreateStdEnumFmtEtc(2, formats, out);
     }
@@ -113,11 +103,7 @@ public:
 private:
     LONG ref_ = 1;
     std::vector<std::wstring> paths_;
-    static CLIPFORMAT preferredDropEffect_;
 };
-
-CLIPFORMAT HdropData::preferredDropEffect_ =
-    (CLIPFORMAT)RegisterClipboardFormatW(L"Preferred DropEffect");
 
 class DragSource : public IDropSource {
 public:
@@ -157,11 +143,7 @@ std::vector<std::wstring> pathsFromDataObject(IDataObject* data) {
     if (FAILED(data->GetData(&fmt, &stg))) return out;
     HDROP drop = (HDROP)GlobalLock(stg.hGlobal);
     if (drop) {
-        UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
-        for (UINT i = 0; i < count; ++i) {
-            wchar_t buf[32768];
-            if (DragQueryFileW(drop, i, buf, 32768)) out.push_back(buf);
-        }
+        out = fsx::pathsFromHdrop(drop);
         GlobalUnlock(stg.hGlobal);
     }
     ReleaseStgMedium(&stg);
@@ -213,11 +195,15 @@ public:
         app_->dragTargetRow = row;
 
         DWORD allowed = effect ? *effect : (DROPEFFECT_COPY | DROPEFFECT_MOVE);
-        DWORD want = DROPEFFECT_MOVE;
+        DWORD want;
         if (keys & MK_CONTROL) want = DROPEFFECT_COPY;
         else if (keys & MK_SHIFT) want = DROPEFFECT_MOVE;
-        else if (!target.empty() && !fsx::sameVolume(target, app_->current))
-            want = DROPEFFECT_COPY;
+        else {
+            // The same one rule performDrop applies: same volume moves,
+            // different volumes copy - cursor and action can't disagree.
+            const std::wstring& dest = target.empty() ? app_->current : target;
+            want = fsx::dropShouldMove(paths_, dest) ? DROPEFFECT_MOVE : DROPEFFECT_COPY;
+        }
         if (!(allowed & want))
             want = (allowed & DROPEFFECT_COPY) ? DROPEFFECT_COPY : DROPEFFECT_MOVE;
         // Nothing to do when the files are already in the folder under the
@@ -233,6 +219,10 @@ public:
 
     HRESULT STDMETHODCALLTYPE DragLeave() override {
         clearHighlight();
+        if (data_) {  // DragEnter took a reference; a leave without a drop must give it back
+            data_->Release();
+            data_ = nullptr;
+        }
         return S_OK;
     }
 
@@ -250,8 +240,8 @@ public:
         diagLog(L"drop target=%ls paths=%d", target.c_str(), (int)paths.size());
         DWORD performed = DROPEFFECT_NONE;
         if (!paths.empty() && app_->performDrop(paths, target)) {
-            const bool moved = target.empty() || fsx::sameVolume(paths.front(), target);
-            performed = moved ? DROPEFFECT_MOVE : DROPEFFECT_COPY;
+            const std::wstring& dest = target.empty() ? app_->current : target;
+            performed = fsx::dropShouldMove(paths, dest) ? DROPEFFECT_MOVE : DROPEFFECT_COPY;
         }
         if (effect) *effect = performed;
         if (data_) {
@@ -334,6 +324,7 @@ void revokeTarget(HWND hwnd) {
 }
 
 bool dragOut(HWND hwnd, const std::vector<std::wstring>& paths, DWORD* effect) {
+    (void)hwnd;  // the OLE drag runs its own loop; no window handle needed
     if (paths.empty()) return false;
     auto* data = new HdropData(paths);
     auto* source = new DragSource();

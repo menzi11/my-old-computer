@@ -70,8 +70,6 @@ int rowHeight(bool header, double scale) {
 
 void buildRows(State& st) {
     st.rows.clear();
-    int y = (int)(3 * st.scale + 0.5) + (int)(22 * st.scale + 0.5) + (int)(10 * st.scale + 0.5) +
-            (int)(18 * st.scale + 0.5);
     for (const auto& own : kOwn) {
         Row row;
         row.label = own.label;
@@ -79,7 +77,6 @@ void buildRows(State& st) {
         row.header = own.header;
         row.column = 0;
         st.rows.push_back(row);
-        (void)y;
     }
     Row header;
     header.label = L"系统菜单项（来自注册表）";
@@ -331,12 +328,7 @@ bool showMenuOptions(HWND owner, unsigned* mask, const std::vector<std::wstring>
                      std::vector<std::wstring>& hidden) {
     ensureClass();
 
-    typedef UINT(WINAPI * GetDpiForWindowFn)(HWND);
-    static auto getDpi = (GetDpiForWindowFn)GetProcAddress(GetModuleHandleW(L"user32.dll"),
-                                                           "GetDpiForWindow");
-    UINT dpi = 96;
-    if (getDpi && owner) dpi = getDpi(owner);
-    const double scale = dpi / 96.0;
+    const double scale = dpiScaleOfWindow(owner);
 
     State st;
     st.owner = owner;
@@ -403,8 +395,13 @@ bool showMenuOptions(HWND owner, unsigned* mask, const std::vector<std::wstring>
     SetFocus(st.hwnd);
 
     MSG msg;
-    while (!st.done && GetMessageW(&msg, nullptr, 0, 0)) {
-        if (msg.message == WM_QUIT) break;
+    while (!st.done) {
+        BOOL r = GetMessageW(&msg, nullptr, 0, 0);
+        if (r <= 0) {
+            // WM_QUIT must survive the dialog: put it back for the outer loop.
+            if (r == 0) PostQuitMessage((int)msg.wParam);
+            break;
+        }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }

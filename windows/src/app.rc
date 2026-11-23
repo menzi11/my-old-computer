@@ -1,10 +1,12 @@
 #include <windows.h>
 
+#include "version.h"
+
 1 ICON "app.ico"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 2,8,4,0
- PRODUCTVERSION 2,8,4,0
+ FILEVERSION MOC_VERSION_QUAD
+ PRODUCTVERSION MOC_VERSION_QUAD
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS 0x40004L
@@ -17,12 +19,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "menzi11"
             VALUE "FileDescription", "My Old Computer - a Windows 98 file manager"
-            VALUE "FileVersion", "2.8.4.0"
+            VALUE "FileVersion", MOC_VERSION_TEXT
             VALUE "InternalName", "MyOldComputer"
             VALUE "LegalCopyright", "MIT License"
             VALUE "OriginalFilename", "MyOldComputer.exe"
             VALUE "ProductName", "My Old Computer"
-            VALUE "ProductVersion", "2.8.4.0"
+            VALUE "ProductVersion", MOC_VERSION_TEXT
         END
     END
     BLOCK "VarFileInfo"
@@ -30,10 +32,3 @@ BEGIN
         VALUE "Translation", 0x409, 1200
     END
 END
-
-
-
-
-
-
-

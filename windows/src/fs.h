@@ -2,6 +2,7 @@
 #pragma once
 
 #include <windows.h>
+#include <shellapi.h>  // HDROP, DragQueryFileW
 #include <shlobj.h>
 
 #include <string>
@@ -55,6 +56,16 @@ bool clipboardHasFiles();
 bool revealInExplorer(const std::wstring& path);
 bool openTerminalAt(const std::wstring& dir);
 bool hasAnySubdirectory(const std::wstring& dir, bool showHidden);
+
+// Drag/drop + clipboard helpers shared by the clipboard code and the OLE drop
+// target, so the copy-or-move decision is made in exactly one place.
+// Explorer's rule: same volume moves, different volumes copy.
+bool dropShouldMove(const std::vector<std::wstring>& paths, const std::wstring& dest);
+// Builds a CF_HDROP payload (double-null terminated, wide); caller owns the
+// HGLOBAL and must free it unless SetClipboardData/STGMEDIUM takes ownership.
+HGLOBAL makeHdropData(const std::vector<std::wstring>& paths);
+std::vector<std::wstring> pathsFromHdrop(HDROP drop);
+UINT preferredDropEffectFormat();
 
 std::wstring lastErrorText(DWORD code = 0);
 

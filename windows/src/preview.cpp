@@ -199,16 +199,6 @@ void loadContent(int viewW, int viewH) {
     }
 }
 
-void layout() {
-    if (!g.loaded && g.hwnd) {
-        RECT rc;
-        GetClientRect(g.hwnd, &rc);
-        loadContent((int)((rc.right - rc.left) / g.scale) - 40,
-                    (int)((rc.bottom - rc.top) / g.scale) - 100);
-        g.loaded = true;
-    }
-}
-
 void draw(Canvas& c, HWND hwnd) {
     RECT rc;
     GetClientRect(hwnd, &rc);
@@ -380,15 +370,7 @@ void show(HWND owner, const std::wstring& path) {
     g.title = L"快速查看 - " + fsx::fileName(path);
     g.loaded = false;
     g.pressedClose = false;
-
-    HDC screen = GetDC(nullptr);
-    typedef UINT(WINAPI * GetDpiForWindowFn)(HWND);
-    static auto getDpi = (GetDpiForWindowFn)GetProcAddress(GetModuleHandleW(L"user32.dll"),
-                                                           "GetDpiForWindow");
-    int dpi = 96;
-    if (getDpi && owner) dpi = (int)getDpi(owner);
-    g.scale = dpi / 96.0;
-    ReleaseDC(nullptr, screen);
+    g.scale = dpiScaleOfWindow(owner);
 
     RECT ownerRect{0, 0, 1280, 800};
     if (owner) GetWindowRect(owner, &ownerRect);

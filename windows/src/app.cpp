@@ -15,6 +15,12 @@
 #include "preview.h"
 #include "shellmenu.h"
 
+// Defined further down in this file; relayout() needs them for the cached
+// menu/toolbar item widths.
+extern const wchar_t* const kMenuTitles[6];
+extern const wchar_t* const kToolTitles[7];
+int measureUiText(const std::wstring& s, int fontPx);
+
 namespace {
 
 int clampInt(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
@@ -55,7 +61,6 @@ void App::init(HWND h) {
     showHidden = settings.showHidden;
     useSystemIcons = settings.useSystemIcons;
     preview::setSystemIcons(useSystemIcons);
-    buildTree();
     refreshTree();
 }
 
@@ -64,6 +69,20 @@ void App::setScale(double s) {
     m = metricsFor(s);
     rebuildNameWidths();
     relayout(width, height);
+    if (addrEdit) {
+        // Keep the embedded edit control's font and geometry on the new DPI.
+        HFONT nf = CreateFontW(-(int)(14.6667 * scale + 0.5), 0, 0, 0, FW_NORMAL, 0, 0, 0,
+                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                               CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Tahoma");
+        if (nf) {
+            SendMessageW(addrEdit, WM_SETFONT, (WPARAM)nf, TRUE);
+            if (addrFont) DeleteObject(addrFont);
+            addrFont = nf;
+        }
+        SetWindowPos(addrEdit, HWND_TOP, lay.addrField.left + 2, lay.addrField.top + 2,
+                     lay.addrField.right - lay.addrField.left - 4,
+                     lay.addrField.bottom - lay.addrField.top - 4, SWP_NOACTIVATE);
+    }
 }
 
 void App::relayout(int w, int h) {
@@ -107,7 +126,6 @@ void App::relayout(int w, int h) {
 
     // Details view internals.
     const int contentW = lay.content.right - lay.content.left;
-    const int contentH = lay.content.bottom - lay.content.top;
     const int tableW = std::max(0, contentW - 4 - m.scrollerW);
     lay.listHeader = RECT{lay.content.left + 2, lay.content.top, lay.content.left + 2 + tableW,
                           lay.content.top + m.headerH};
@@ -130,7 +148,6 @@ void App::relayout(int w, int h) {
     for (int i = 1; i < 4; ++i) lay.colX[i] = lay.colX[i - 1] + lay.colW[i - 1];
 
     // Address bar internals.
-    const int addrW = lay.addr.right - lay.addr.left;
     const int labelW = px(52), goW = px(56);
     lay.addrField = RECT{lay.addr.left + labelW + px(6), lay.addr.top + px(3),
                          lay.addr.right - goW - px(18) - px(17), lay.addr.top + px(23)};
@@ -144,6 +161,13 @@ void App::relayout(int w, int h) {
                           lay.status.bottom - 1};
     lay.statusRight = RECT{lay.status.left + 1 + px(243), lay.status.top + 2, lay.status.right - 1,
                            lay.status.bottom - 1};
+
+    // Menu/toolbar widths depend only on the scale; cache them here so hit
+    // tests and paints stop re-measuring text on every mouse move.
+    const int fontPx = (int)(14.6667 * scale + 0.5);
+    for (int i = 0; i < 6; ++i) lay.menuItemW[i] = measureUiText(kMenuTitles[i], fontPx) + px(16);
+    for (int i = 0; i < 7; ++i)
+        lay.toolItemW[i] = px(6 + 16 + 4) + measureUiText(kToolTitles[i], fontPx) + px(6);
 
     clampScroll();
 }
@@ -174,6 +198,7 @@ void App::loadDirectory(const std::wstring& path, bool recordHistory, bool fromT
     current = target;
     contextFolder.clear();
     selection.clear();
+    selAnchor = -1;
     entries = fsx::listDirectory(current, showHidden);
     fsx::sortEntries(entries, sortColumn, sortAsc);
     rebuildNameWidths();
@@ -447,54 +472,46 @@ void App::copySelection(bool cut) {
     clipCut = cut;
 
     // Publish the file list so Explorer and other apps can paste it.
-    std::wstring list;
-    for (auto& p : clip) {
-        list += p;
-        list.push_back(L'\0');
+    HGLOBAL mem = fsx::makeHdropData(clip);
+    if (!mem) return;
+    if (!OpenClipboard(hwnd)) {
+        GlobalFree(mem);
+        return;
     }
-    list.push_back(L'\0');
-    size_t bytes = (list.size() + 1) * sizeof(wchar_t);
-    HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, sizeof(DROPFILES) + bytes);
-    if (mem) {
-        auto* df = (DROPFILES*)GlobalLock(mem);
-        df->pFiles = sizeof(DROPFILES);
-        df->fWide = TRUE;
-        memcpy((char*)df + sizeof(DROPFILES), list.c_str(), bytes);
-        GlobalUnlock(mem);
-        if (OpenClipboard(hwnd)) {
-            EmptyClipboard();
-            SetClipboardData(CF_HDROP, mem);
-            UINT effect = cut ? DROPEFFECT_MOVE : DROPEFFECT_COPY;
-            HGLOBAL fx = GlobalAlloc(GMEM_MOVEABLE, sizeof(DWORD));
-            if (fx) {
-                *(DWORD*)GlobalLock(fx) = effect;
-                GlobalUnlock(fx);
-                SetClipboardData(RegisterClipboardFormatW(L"Preferred DropEffect"), fx);
-            }
-            CloseClipboard();
+    EmptyClipboard();
+    if (!SetClipboardData(CF_HDROP, mem)) GlobalFree(mem);  // on success the system owns it
+    HGLOBAL fx = GlobalAlloc(GMEM_MOVEABLE, sizeof(DWORD));
+    if (fx) {
+        auto* effect = (DWORD*)GlobalLock(fx);
+        if (effect) {
+            *effect = cut ? DROPEFFECT_MOVE : DROPEFFECT_COPY;
+            GlobalUnlock(fx);
+            if (!SetClipboardData(fsx::preferredDropEffectFormat(), fx)) GlobalFree(fx);
         } else {
-            GlobalFree(mem);
+            GlobalFree(fx);
         }
     }
+    CloseClipboard();
 }
 
 void App::paste() {
-    std::vector<std::wstring> urls = clip;
-    bool cut = clipCut;
-    if (urls.empty()) {
-        if (OpenClipboard(hwnd)) {
-            HANDLE h = GetClipboardData(CF_HDROP);
-            if (h) {
-                HDROP drop = (HDROP)h;
-                UINT n = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
-                for (UINT i = 0; i < n; ++i) {
-                    wchar_t buf[32768];
-                    if (DragQueryFileW(drop, i, buf, 32768)) urls.push_back(buf);
-                }
+    // Prefer the real system clipboard so a later copy in another app is not
+    // overridden by our stale mirror; honour the cut marker Explorer leaves.
+    std::vector<std::wstring> urls;
+    bool cut = false;
+    if (OpenClipboard(hwnd)) {
+        if (HANDLE h = GetClipboardData(CF_HDROP)) urls = fsx::pathsFromHdrop((HDROP)h);
+        if (HANDLE eh = GetClipboardData(fsx::preferredDropEffectFormat())) {
+            if (auto* effect = (DWORD*)GlobalLock(eh)) {
+                if (*effect & DROPEFFECT_MOVE) cut = true;
+                GlobalUnlock(eh);
             }
-            CloseClipboard();
         }
-        cut = false;
+        CloseClipboard();
+    }
+    if (urls.empty()) {
+        urls = clip;
+        cut = clipCut;
     }
     if (urls.empty()) {
         MessageBeep(MB_ICONASTERISK);
@@ -536,7 +553,7 @@ void App::copyPaths() {
         if (mem) {
             memcpy(GlobalLock(mem), text.c_str(), bytes);
             GlobalUnlock(mem);
-            SetClipboardData(CF_UNICODETEXT, mem);
+            if (!SetClipboardData(CF_UNICODETEXT, mem)) GlobalFree(mem);
         }
         CloseClipboard();
     }
@@ -573,8 +590,8 @@ bool App::performDrop(const std::vector<std::wstring>& paths, const std::wstring
         items.push_back(p);
     }
     if (items.empty()) return false;
-    bool ok = fsx::sameVolume(items.front(), dest) ? fsx::moveItems(items, dest)
-                                                  : fsx::copyItems(items, dest);
+    bool ok = fsx::dropShouldMove(items, dest) ? fsx::moveItems(items, dest)
+                                               : fsx::copyItems(items, dest);
     if (!ok) MessageBeep(MB_ICONASTERISK);
     refreshAfterChange();
     return ok;
@@ -605,15 +622,15 @@ void App::removeFavorite(const std::wstring& path) {
 // ---------------------------------------------------------------- tree
 
 bool App::treeHasSubdir(const std::wstring& path) {
-    static std::map<std::wstring, bool, std::less<std::wstring>> cache;
-    auto it = cache.find(path);
-    if (it != cache.end()) return it->second;
+    auto it = subdirCache.find(path);
+    if (it != subdirCache.end()) return it->second;
     bool v = fsx::hasAnySubdirectory(path, showHidden);
-    cache[path] = v;
+    subdirCache[path] = v;
     return v;
 }
 
 void App::noteChildren(const std::wstring& dir, bool hasSubdir) {
+    subdirCache[dir] = hasSubdir;
     // Refresh the +/- state of the tree row for dir without a full rebuild.
     for (auto& root : treeRoots) {
         std::vector<TreeNode*> stack{&root};
@@ -679,7 +696,7 @@ void App::buildTree() {
         TreeNode group;
         group.kind = TreeNode::Favorites;
         group.title = L"收藏夹";
-        group.path = fsx::homeDir();
+        group.path = L"";  // a header, not a folder: no menu or navigation of its own
         group.depth = 0;
         group.expanded = true;
         group.loaded = true;
@@ -818,19 +835,7 @@ void App::revealInTree() {
         return false;
     };
 
-    bool found = false;
-    for (auto& r : treeRoots)
-        if (walk(r, current)) {
-            found = true;
-            break;
-        }
-    if (!found) {
-        for (auto& r : treeRoots) {
-            if (r.kind == TreeNode::Special || r.kind == TreeNode::Favorite) {
-                if (_wcsicmp(r.path.c_str(), current.c_str()) == 0) break;
-            }
-        }
-    }
+    for (auto& r : treeRoots) walk(r, current);
     flattenTree();
 }
 
@@ -899,29 +904,43 @@ void App::refreshAfterChange() {
     if (_wcsicmp(dir.c_str(), current.c_str()) != 0) {
         loadDirectory(dir, false);
         pruneTree();
+        subdirCache.clear();
         return;
     }
     pruneTree();
+    // Folders may have gained or lost children: forget the +/- answers.
+    subdirCache.clear();
     reloadTreeChildrenAt(current);
     reload();
 }
 
 // ---------------------------------------------------------------- geometry
 
-// Text measurement for the custom chrome.  A throwaway DC keeps geometry and
-// hit testing identical to what the renderer draws.
+// Text measurement for the custom chrome.  Geometry and hit testing stay
+// identical to what the renderer draws; the measurement DC and font are kept
+// for the process lifetime so hit tests cost one GetTextExtentPoint32 call.
 int measureUiText(const std::wstring& s, int fontPx) {
-    HDC dc = CreateCompatibleDC(nullptr);
-    if (!dc) return (int)s.size() * fontPx / 2;
-    HFONT f = CreateFontW(-fontPx, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                          OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                          DEFAULT_PITCH | FF_SWISS, L"Tahoma");
-    HGDIOBJ of = SelectObject(dc, f);
+    static HDC dc = nullptr;
+    static HFONT font = nullptr;
+    static int px = -1;
+    static bool selected = false;
+    if (px != fontPx) {
+        if (!dc) dc = CreateCompatibleDC(nullptr);
+        HFONT nf = dc ? CreateFontW(-fontPx, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                    CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Tahoma")
+                      : nullptr;
+        if (nf) {
+            HGDIOBJ prev = SelectObject(dc, nf);  // prev is our old font, or the stock default
+            if (selected && prev) DeleteObject(prev);
+            font = nf;
+            selected = true;
+            px = fontPx;
+        }
+    }
+    if (!dc || !font) return (int)s.size() * fontPx / 2;
     SIZE sz{};
     GetTextExtentPoint32W(dc, s.c_str(), (int)s.size(), &sz);
-    SelectObject(dc, of);
-    DeleteObject(f);
-    DeleteDC(dc);
     return sz.cx;
 }
 
@@ -942,13 +961,11 @@ RECT App::titleButtonRect(int i) const {
 int App::toolbarItemCount() const { return 7; }
 
 RECT App::toolbarItemRect(int i) const {
-    const int fontPx = (int)(14.6667 * scale + 0.5);
     int x = lay.tool.left + (int)(3 * scale + 0.5);
     const int y = lay.tool.top + (int)(2 * scale + 0.5);
     const int h = (lay.tool.bottom - lay.tool.top) - (int)(4 * scale + 0.5);
     for (int j = 0; j < 7; ++j) {
-        int tw = measureUiText(kToolTitles[j], fontPx);
-        int w = (int)((6 + 16 + 4) * scale + 0.5) + tw + (int)(6 * scale + 0.5);
+        const int w = lay.toolItemW[j];
         if (j == i) return RECT{x, y, x + w, y + h};
         x += w + (int)(1 * scale + 0.5);
     }
@@ -956,16 +973,17 @@ RECT App::toolbarItemRect(int i) const {
 }
 
 int App::toolbarIndexAt(POINT p) const {
-    for (int i = 0; i < 7; ++i)
-        if (PtInRect(&toolbarItemRect(i), p)) return i;
+    for (int i = 0; i < 7; ++i) {
+        RECT r = toolbarItemRect(i);
+        if (PtInRect(&r, p)) return i;
+    }
     return -1;
 }
 
 RECT App::menuItemRect(int i) const {
-    const int fontPx = (int)(14.6667 * scale + 0.5);
     int x = lay.menu.left + (int)(2 * scale + 0.5);
     for (int j = 0; j < 6; ++j) {
-        int w = measureUiText(kMenuTitles[j], fontPx) + (int)(16 * scale + 0.5);
+        const int w = lay.menuItemW[j];
         if (j == i)
             return RECT{x, lay.menu.top + (int)(1 * scale + 0.5), x + w,
                         lay.menu.top + m.menuH - (int)(1 * scale + 0.5)};
@@ -975,8 +993,10 @@ RECT App::menuItemRect(int i) const {
 }
 
 int App::menuItemAt(POINT p) const {
-    for (int i = 0; i < 6; ++i)
-        if (PtInRect(&menuItemRect(i), p)) return i;
+    for (int i = 0; i < 6; ++i) {
+        RECT r = menuItemRect(i);
+        if (PtInRect(&r, p)) return i;
+    }
     return -1;
 }
 
@@ -1011,10 +1031,6 @@ int App::listRowAt(POINT p) const {
     return idx < (int)entries.size() ? idx : -1;
 }
 
-int App::listVisibleRows() const {
-    return std::max(1, (int)(lay.listViewport.bottom - lay.listViewport.top) / std::max(1, m.rowH));
-}
-
 int App::nameExtent(int row) const {
     if (row < 0 || row >= (int)nameWidths.size()) return 0;
     return nameWidths[row];
@@ -1023,9 +1039,13 @@ int App::nameExtent(int row) const {
 void App::rebuildNameWidths() {
     const int fontPx = (int)(14.6667 * scale + 0.5);
     const int lead = (int)(22 * scale + 0.5) + (int)(6 * scale + 0.5);
-    nameWidths.resize(entries.size());
-    for (size_t i = 0; i < entries.size(); ++i)
-        nameWidths[i] = lead + measureUiText(entries[i].name, fontPx);
+    const size_t n = entries.size();
+    nameWidths.resize(n);
+    textWidths.resize(n);
+    for (size_t i = 0; i < n; ++i) {
+        textWidths[i] = measureUiText(entries[i].name, fontPx);
+        nameWidths[i] = lead + textWidths[i];
+    }
 }
 
 // Only the icon and the name text belong to an item.  Everything else inside
@@ -1044,11 +1064,11 @@ bool App::hitTestItem(POINT p, int* index) const {
     int idx = gridIndexAt(p);
     if (idx < 0) return false;
     RECT r = gridCellRect(idx);
-    const int fontPx = (int)(14.6667 * scale + 0.5);
     if (mode == ViewMode::List) {
         const int s16 = (int)(16 * scale + 0.5);
-        const int right = r.left + (int)(2 * scale + 0.5) + s16 + (int)(4 * scale + 0.5) +
-                          measureUiText(entries[idx].name, fontPx) + (int)(2 * scale + 0.5);
+        const int tw = idx < (int)textWidths.size() ? textWidths[idx] : 0;
+        const int right = r.left + (int)(2 * scale + 0.5) + s16 + (int)(4 * scale + 0.5) + tw +
+                          (int)(2 * scale + 0.5);
         if (p.x > right) return false;
         if (index) *index = idx;
         return true;
@@ -1070,8 +1090,6 @@ int App::gridCols() const {
     int w = (int)(lay.gridViewport.right - lay.gridViewport.left);
     return std::max(1, (int)((w - (int)(8 * scale + 0.5)) / std::max(1, gridCellW())));
 }
-
-int App::gridCellCount() const { return (int)entries.size(); }
 
 RECT App::gridCellRect(int i) const {
     const int cols = gridCols();
@@ -1166,109 +1184,109 @@ std::wstring App::menuTitle(int index) const {
 }
 
 std::vector<MenuItem> App::menuFor(const std::wstring& name) const {
-    std::vector<MenuItem> m;
+    std::vector<MenuItem> items;
     const bool hasSel = !selection.empty();
     if (name == L"文件") {
-        m.push_back({L"打开", ID_OPEN, hasSel});
-        m.push_back({L"快速查看", ID_PREVIEW, hasSel, false, false, L"Space"});
-        m.push_back({L"新建文件夹", ID_NEW_FOLDER, true});
-        m.push_back({L"", 0, false, false, true});
-        m.push_back({L"重命名", ID_RENAME, hasSel});
-        m.push_back({L"删除", ID_DELETE, hasSel});
-        m.push_back({L"", 0, false, false, true});
-        m.push_back({L"关闭", ID_CLOSE, true, false, false, L"Alt+F4"});
+        items.push_back({L"打开", ID_OPEN, hasSel});
+        items.push_back({L"快速查看", ID_PREVIEW, hasSel, false, false, L"Space"});
+        items.push_back({L"新建文件夹", ID_NEW_FOLDER, true});
+        items.push_back({L"", 0, false, false, true});
+        items.push_back({L"重命名", ID_RENAME, hasSel});
+        items.push_back({L"删除", ID_DELETE, hasSel});
+        items.push_back({L"", 0, false, false, true});
+        items.push_back({L"关闭", ID_CLOSE, true, false, false, L"Alt+F4"});
     } else if (name == L"编辑") {
-        m.push_back({L"剪切", ID_CUT, hasSel, false, false, L"Ctrl+X"});
-        m.push_back({L"复制", ID_COPY, hasSel, false, false, L"Ctrl+C"});
-        m.push_back({L"粘贴", ID_PASTE, true, false, false, L"Ctrl+V"});
-        m.push_back({L"", 0, false, false, true});
-        m.push_back({L"全选", ID_SELECT_ALL, true, false, false, L"Ctrl+A"});
-        m.push_back({L"复制路径", ID_COPY_PATH, hasSel});
-        m.push_back({L"", 0, false, false, true});
-        m.push_back({L"在资源管理器中显示", ID_REVEAL, hasSel});
+        items.push_back({L"剪切", ID_CUT, hasSel, false, false, L"Ctrl+X"});
+        items.push_back({L"复制", ID_COPY, hasSel, false, false, L"Ctrl+C"});
+        items.push_back({L"粘贴", ID_PASTE, true, false, false, L"Ctrl+V"});
+        items.push_back({L"", 0, false, false, true});
+        items.push_back({L"全选", ID_SELECT_ALL, true, false, false, L"Ctrl+A"});
+        items.push_back({L"复制路径", ID_COPY_PATH, hasSel});
+        items.push_back({L"", 0, false, false, true});
+        items.push_back({L"在资源管理器中显示", ID_REVEAL, hasSel});
     } else if (name == L"查看") {
-        m.push_back({L"刷新", ID_REFRESH, true, false, false, L"F5"});
-        m.push_back({L"", 0, false, false, true});
-        m.push_back({L"显示隐藏文件", ID_TOGGLE_HIDDEN, true, showHidden});
-        m.push_back({L"使用系统图标", ID_TOGGLE_SYSICONS, true, useSystemIcons});
-        m.push_back({L"", 0, false, false, true});
-        m.push_back({L"大图标", ID_VIEW_BIG, true, mode == ViewMode::Icons});
-        m.push_back({L"列表", ID_VIEW_LIST, true, mode == ViewMode::List});
-        m.push_back({L"详细信息", ID_VIEW_DETAILS, true, mode == ViewMode::Details});
+        items.push_back({L"刷新", ID_REFRESH, true, false, false, L"F5"});
+        items.push_back({L"", 0, false, false, true});
+        items.push_back({L"显示隐藏文件", ID_TOGGLE_HIDDEN, true, showHidden});
+        items.push_back({L"使用系统图标", ID_TOGGLE_SYSICONS, true, useSystemIcons});
+        items.push_back({L"", 0, false, false, true});
+        items.push_back({L"大图标", ID_VIEW_BIG, true, mode == ViewMode::Icons});
+        items.push_back({L"列表", ID_VIEW_LIST, true, mode == ViewMode::List});
+        items.push_back({L"详细信息", ID_VIEW_DETAILS, true, mode == ViewMode::Details});
     } else if (name == L"收藏") {
-        m.push_back({L"添加当前文件夹到收藏夹", ID_ADD_FAV_CURRENT, true});
+        items.push_back({L"添加当前文件夹到收藏夹", ID_ADD_FAV_CURRENT, true});
         auto favs = menuFavorites();
         if (!favs.empty()) {
-            m.push_back({L"", 0, false, false, true});
+            items.push_back({L"", 0, false, false, true});
             for (size_t i = 0; i < favs.size(); ++i)
-                m.push_back({fsx::fileName(favs[i]), (int)(ID_FAV_BASE + i), true});
+                items.push_back({fsx::fileName(favs[i]), (int)(ID_FAV_BASE + i), true});
         }
     } else if (name == L"工具") {
-        m.push_back({L"在命令提示符中打开", ID_OPEN_TERMINAL, true});
-        m.push_back({L"", 0, false, false, true});
-        m.push_back({L"右键菜单设置…", ID_SETTINGS, true});
+        items.push_back({L"在命令提示符中打开", ID_OPEN_TERMINAL, true});
+        items.push_back({L"", 0, false, false, true});
+        items.push_back({L"右键菜单设置…", ID_SETTINGS, true});
     } else if (name == L"帮助") {
-        m.push_back({L"关于 My Old Computer", ID_ABOUT, true});
+        items.push_back({L"关于 My Old Computer", ID_ABOUT, true});
     }
-    return m;
+    return items;
 }
 
 std::vector<MenuItem> App::contextMenu() const {
-    std::vector<MenuItem> m;
+    std::vector<MenuItem> items;
     const auto paths = selectedPaths();
     if (paths.empty()) {
         // Empty area of the current folder: view, sort, paste and folder tools.
-        m.push_back({L"大图标", ID_VIEW_BIG, true, mode == ViewMode::Icons});
-        m.push_back({L"列表", ID_VIEW_LIST, true, mode == ViewMode::List});
-        m.push_back({L"详细信息", ID_VIEW_DETAILS, true, mode == ViewMode::Details});
-        m.push_back({L"", 0, false, false, true});
-        m.push_back({L"按名称排序", ID_SORT_NAME, true, sortColumn == 0});
-        m.push_back({L"按大小排序", ID_SORT_SIZE, true, sortColumn == 1});
-        m.push_back({L"按类型排序", ID_SORT_TYPE, true, sortColumn == 2});
-        m.push_back({L"按修改日期排序", ID_SORT_DATE, true, sortColumn == 3});
-        m.push_back({L"", 0, false, false, true});
-        m.push_back({L"刷新", ID_REFRESH, true, false, false, L"F5"});
-        m.push_back({L"粘贴", ID_PASTE, fsx::clipboardHasFiles(), false, false, L"Ctrl+V"});
-        m.push_back({L"新建文件夹", ID_NEW_FOLDER, true});
-        m.push_back({L"", 0, false, false, true});
-        m.push_back({L"显示隐藏文件", ID_TOGGLE_HIDDEN, true, showHidden});
-        m.push_back({L"在命令提示符中打开", ID_OPEN_TERMINAL, true});
-        m.push_back({L"属性", ID_PROPERTIES, true});
-        return m;
+        items.push_back({L"大图标", ID_VIEW_BIG, true, mode == ViewMode::Icons});
+        items.push_back({L"列表", ID_VIEW_LIST, true, mode == ViewMode::List});
+        items.push_back({L"详细信息", ID_VIEW_DETAILS, true, mode == ViewMode::Details});
+        items.push_back({L"", 0, false, false, true});
+        items.push_back({L"按名称排序", ID_SORT_NAME, true, sortColumn == 0});
+        items.push_back({L"按大小排序", ID_SORT_SIZE, true, sortColumn == 1});
+        items.push_back({L"按类型排序", ID_SORT_TYPE, true, sortColumn == 2});
+        items.push_back({L"按修改日期排序", ID_SORT_DATE, true, sortColumn == 3});
+        items.push_back({L"", 0, false, false, true});
+        items.push_back({L"刷新", ID_REFRESH, true, false, false, L"F5"});
+        items.push_back({L"粘贴", ID_PASTE, fsx::clipboardHasFiles(), false, false, L"Ctrl+V"});
+        items.push_back({L"新建文件夹", ID_NEW_FOLDER, true});
+        items.push_back({L"", 0, false, false, true});
+        items.push_back({L"显示隐藏文件", ID_TOGGLE_HIDDEN, true, showHidden});
+        items.push_back({L"在命令提示符中打开", ID_OPEN_TERMINAL, true});
+        items.push_back({L"属性", ID_PROPERTIES, true});
+        return items;
     }
 
     const bool single = paths.size() == 1;
     const bool isDir = fsx::isDirectory(paths.front());
-    m.push_back({L"打开", ID_OPEN, true});
-    if (single && !isDir) m.push_back({L"打开方式…", ID_OPEN_WITH, true});
-    if (single && isDir) m.push_back({L"在新窗口中打开", ID_OPEN_NEW_WINDOW, true});
-    m.push_back({L"快速查看", ID_PREVIEW, single, false, false, L"Space"});
-    m.push_back({L"", 0, false, false, true});
-    m.push_back({L"剪切", ID_CUT, true, false, false, L"Ctrl+X"});
-    m.push_back({L"复制", ID_COPY, true, false, false, L"Ctrl+C"});
-    if (isDir) m.push_back({L"粘贴", ID_PASTE, fsx::clipboardHasFiles(), false, false, L"Ctrl+V"});
-    m.push_back({L"创建快捷方式", ID_CREATE_SHORTCUT, single});
-    m.push_back({L"", 0, false, false, true});
-    m.push_back({L"删除", ID_DELETE, true, false, false, L"Del"});
-    m.push_back({L"重命名", ID_RENAME, single, false, false, L"F2"});
-    m.push_back({L"", 0, false, false, true});
-    m.push_back({L"属性", ID_PROPERTIES, true});
-    m.push_back({L"在资源管理器中显示", ID_REVEAL, true});
-    m.push_back({L"复制路径", ID_COPY_PATH, true});
+    items.push_back({L"打开", ID_OPEN, true});
+    if (single && !isDir) items.push_back({L"打开方式…", ID_OPEN_WITH, true});
+    if (single && isDir) items.push_back({L"在新窗口中打开", ID_OPEN_NEW_WINDOW, true});
+    items.push_back({L"快速查看", ID_PREVIEW, single, false, false, L"Space"});
+    items.push_back({L"", 0, false, false, true});
+    items.push_back({L"剪切", ID_CUT, true, false, false, L"Ctrl+X"});
+    items.push_back({L"复制", ID_COPY, true, false, false, L"Ctrl+C"});
+    if (isDir) items.push_back({L"粘贴", ID_PASTE, fsx::clipboardHasFiles(), false, false, L"Ctrl+V"});
+    items.push_back({L"创建快捷方式", ID_CREATE_SHORTCUT, single});
+    items.push_back({L"", 0, false, false, true});
+    items.push_back({L"删除", ID_DELETE, true, false, false, L"Del"});
+    items.push_back({L"重命名", ID_RENAME, single, false, false, L"F2"});
+    items.push_back({L"", 0, false, false, true});
+    items.push_back({L"属性", ID_PROPERTIES, true});
+    items.push_back({L"在资源管理器中显示", ID_REVEAL, true});
+    items.push_back({L"复制路径", ID_COPY_PATH, true});
     if (isDir) {
-        m.push_back({L"", 0, false, false, true});
-        m.push_back({L"添加到收藏夹", ID_ADD_FAV, true});
-        if (contextIsFavorite) m.push_back({L"从收藏夹中移除", ID_REMOVE_FAV, true});
-        m.push_back({L"在命令提示符中打开", ID_OPEN_TERMINAL, true});
+        items.push_back({L"", 0, false, false, true});
+        items.push_back({L"添加到收藏夹", ID_ADD_FAV, true});
+        if (contextIsFavorite) items.push_back({L"从收藏夹中移除", ID_REMOVE_FAV, true});
+        items.push_back({L"在命令提示符中打开", ID_OPEN_TERMINAL, true});
     }
-    return m;
+    return items;
 }
 
 std::vector<MenuItem> App::placesMenu() const {
-    std::vector<MenuItem> m;
-    m.push_back({L"我的电脑", ID_FAV_BASE + 900, true});
-    m.push_back({L"个人文件夹", ID_FAV_BASE + 901, true});
-    m.push_back({L"", 0, false, false, true});
+    std::vector<MenuItem> items;
+    items.push_back({L"我的电脑", ID_FAV_BASE + 900, true});
+    items.push_back({L"个人文件夹", ID_FAV_BASE + 901, true});
+    items.push_back({L"", 0, false, false, true});
     struct Special { const wchar_t* title; REFKNOWNFOLDERID id; };
     const Special specials[] = {
         {L"桌面", FOLDERID_Desktop},       {L"我的文档", FOLDERID_Documents},
@@ -1277,9 +1295,9 @@ std::vector<MenuItem> App::placesMenu() const {
     };
     for (auto& s : specials) {
         std::wstring p = fsx::knownFolder(s.id);
-        if (!p.empty()) m.push_back({s.title, ID_FAV_BASE + 910 + (int)(&s - specials), true});
+        if (!p.empty()) items.push_back({s.title, ID_FAV_BASE + 910 + (int)(&s - specials), true});
     }
-    return m;
+    return items;
 }
 
 void App::performMenuAction(int id, const std::wstring& arg) {
@@ -1320,6 +1338,7 @@ void App::performMenuAction(int id, const std::wstring& arg) {
     case ID_TOGGLE_HIDDEN:
         showHidden = !showHidden;
         settings.showHidden = showHidden;
+        subdirCache.clear();  // the +/- answers depend on the hidden filter
         refreshTree();
         reload();
         break;
@@ -1336,6 +1355,11 @@ void App::performMenuAction(int id, const std::wstring& arg) {
     case ID_REMOVE_FAV: removeFavorite(contextFolder.empty() ? current : contextFolder); break;
     case ID_OPEN_TERMINAL: openTerminalForSelection(); break;
     case ID_SETTINGS: openMenuSettings(); break;
+    case ID_TREE_TOGGLE:
+        // Sidebar header menu (我的电脑 / 收藏夹): expand or collapse that row.
+        if (hoverTree >= 0 && hoverTree < (int)treeFlat.size())
+            toggleTreeNode(*treeFlat[hoverTree]);
+        break;
     case ID_ABOUT: showAbout(hwnd); break;
     default:
         if (id >= ID_FAV_BASE) {
@@ -1391,16 +1415,17 @@ void App::beginAddressEdit() {
                                    lay.addrField.right - lay.addrField.left - 4,
                                    lay.addrField.bottom - lay.addrField.top - 4, hwnd, nullptr,
                                    GetModuleHandleW(nullptr), nullptr);
-        SendMessageW(addrEdit, WM_SETFONT,
-                     (WPARAM)CreateFontW(-(int)(14.6667 * scale + 0.5), 0, 0, 0, FW_NORMAL, 0, 0, 0,
-                                         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                         CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Tahoma"),
-                     TRUE);
         SendMessageW(addrEdit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(2, 2));
         g_addrOwner = this;
         g_addrOldProc =
             (WNDPROC)SetWindowLongPtrW(addrEdit, GWLP_WNDPROC, (LONG_PTR)addrEditProc);
     }
+    if (!addrFont) {
+        addrFont = CreateFontW(-(int)(14.6667 * scale + 0.5), 0, 0, 0, FW_NORMAL, 0, 0, 0,
+                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                               CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Tahoma");
+    }
+    if (addrFont) SendMessageW(addrEdit, WM_SETFONT, (WPARAM)addrFont, TRUE);
     SetWindowPos(addrEdit, HWND_TOP, lay.addrField.left + 2, lay.addrField.top + 2,
                  lay.addrField.right - lay.addrField.left - 4,
                  lay.addrField.bottom - lay.addrField.top - 4, SWP_NOACTIVATE);

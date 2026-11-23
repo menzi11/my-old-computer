@@ -81,7 +81,6 @@ Badge badgeFor(const std::wstring& ext) {
 
 void page(Canvas& c, const RECT& r, const std::wstring& ext) {
     Grid g(c, r);
-    const double fold = 5;
     g.poly({{1.5, 0.5}, {11, 0.5}, {15.5, 5}, {15.5, 15.5}, {1.5, 15.5}}, Theme::white, false);
     g.poly({{1.5, 0.5}, {11, 0.5}, {15.5, 5}, {15.5, 15.5}, {1.5, 15.5}}, Theme::dark, true);
     g.line(11, 0.5, 11, 5, Theme::shadow);
@@ -306,7 +305,7 @@ void hidden(Canvas& c, const RECT& r) {
 }
 
 void sortArrow(Canvas& c, const RECT& r, bool up) {
-    const int w = r.right - r.left, h = r.bottom - r.top;
+    const int w = r.right - r.left;
     POINT p[3];
     if (up) {
         p[0] = {r.left, r.bottom - 1};

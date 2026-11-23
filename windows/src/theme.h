@@ -71,3 +71,18 @@ inline Metrics metricsFor(double scale) {
     m.minH      = px(440);
     return m;
 }
+
+// DPI scale of the window's monitor (96 dpi == 1.0).  GetDpiForWindow is
+// resolved at runtime so the exe still starts on early Windows 10 builds;
+// every dialog and popup that needs it goes through this one helper.
+inline double dpiScaleOfWindow(HWND hwnd) {
+    if (!hwnd) return 1.0;
+    typedef UINT(WINAPI * GetDpiForWindowFn)(HWND);
+    static auto getDpi =
+        (GetDpiForWindowFn)GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow");
+    if (getDpi) {
+        UINT dpi = getDpi(hwnd);
+        if (dpi >= 96) return dpi / 96.0;
+    }
+    return 1.0;
+}

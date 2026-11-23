@@ -39,5 +39,6 @@ enum MenuId {
     ID_SORT_TYPE,
     ID_SORT_DATE,
     ID_SETTINGS,
+    ID_TREE_TOGGLE,  // expand/collapse the sidebar row the context menu opened on
     ID_FAV_BASE = 1000,
 };

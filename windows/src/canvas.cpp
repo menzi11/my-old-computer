@@ -2,28 +2,50 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
+#include <utility>
+
+namespace {
+
+// Fonts and brushes for the Win98 palette are kept for the process lifetime:
+// a Canvas is built for every paint and per-row repaint, and creating two
+// fonts and a brush per fill made those paths allocation-heavy for no gain.
+HFONT cachedFont(int px, bool bold) {
+    static std::map<std::pair<int, bool>, HFONT> cache;
+    auto key = std::make_pair(px, bold);
+    auto it = cache.find(key);
+    if (it != cache.end()) return it->second;
+    HFONT f = CreateFontW(-px, 0, 0, 0, bold ? FW_BOLD : FW_NORMAL, FALSE, FALSE, FALSE,
+                          DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                          CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Tahoma");
+    cache.emplace(key, f);
+    return f;
+}
+
+HBRUSH cachedBrush(COLORREF c) {
+    static std::map<COLORREF, HBRUSH> cache;
+    auto it = cache.find(c);
+    if (it != cache.end()) return it->second;
+    HBRUSH b = CreateSolidBrush(c);
+    cache.emplace(c, b);
+    return b;
+}
+
+}  // namespace
 
 Canvas::Canvas(HDC dc, double scale) : dc_(dc), scale_(scale) {
-    oldFont_ = SelectObject(dc_, nullptr);
-    if (oldFont_) SelectObject(dc_, oldFont_);
     oldText_ = GetTextColor(dc_);
     oldBk_ = GetBkMode(dc_);
     SetBkMode(dc_, TRANSPARENT);
     SetTextAlign(dc_, TA_LEFT | TA_TOP);
     textHeight_ = (int)std::lround(14.6667 * scale_);
-    normal_ = CreateFontW(-textHeight_, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                          DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                          CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Tahoma");
-    bold_ = CreateFontW(-textHeight_, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Tahoma");
+    normal_ = cachedFont(textHeight_, false);
+    bold_ = cachedFont(textHeight_, true);
     oldFont_ = SelectObject(dc_, normal_);
 }
 
 Canvas::~Canvas() {
     if (oldFont_) SelectObject(dc_, oldFont_);
-    if (normal_) DeleteObject(normal_);
-    if (bold_) DeleteObject(bold_);
     SetTextColor(dc_, oldText_);
     SetBkMode(dc_, oldBk_);
 }
@@ -37,9 +59,7 @@ void Canvas::fill(const RECT& r, COLORREF c) {
 void Canvas::fill(int x, int y, int w, int h, COLORREF c) {
     if (w <= 0 || h <= 0) return;
     RECT r{x, y, x + w, y + h};
-    HBRUSH b = CreateSolidBrush(c);
-    ::FillRect(dc_, &r, b);
-    DeleteObject(b);
+    ::FillRect(dc_, &r, cachedBrush(c));
 }
 
 void Canvas::hline(int x, int y, int w, COLORREF c) { fill(x, y, w, 1, c); }
@@ -92,13 +112,12 @@ void Canvas::line(int x1, int y1, int x2, int y2, COLORREF c) {
 
 void Canvas::polygonFill(const POINT* pts, int n, COLORREF c) {
     if (n < 3) return;
-    HBRUSH b = CreateSolidBrush(c);
+    HBRUSH b = cachedBrush(c);
     HGDIOBJ ob = SelectObject(dc_, b);
     HGDIOBJ op = SelectObject(dc_, GetStockObject(NULL_PEN));
     Polygon(dc_, pts, n);
     SelectObject(dc_, op);
     SelectObject(dc_, ob);
-    DeleteObject(b);
 }
 
 void Canvas::polygonOutline(const POINT* pts, int n, COLORREF c) {
@@ -113,13 +132,12 @@ void Canvas::polygonOutline(const POINT* pts, int n, COLORREF c) {
 }
 
 void Canvas::ellipseFill(const RECT& r, COLORREF c) {
-    HBRUSH b = CreateSolidBrush(c);
+    HBRUSH b = cachedBrush(c);
     HGDIOBJ ob = SelectObject(dc_, b);
     HGDIOBJ op = SelectObject(dc_, GetStockObject(NULL_PEN));
     Ellipse(dc_, r.left, r.top, r.right, r.bottom);
     SelectObject(dc_, op);
     SelectObject(dc_, ob);
-    DeleteObject(b);
 }
 
 void Canvas::ellipseOutline(const RECT& r, COLORREF c) {
@@ -132,7 +150,8 @@ void Canvas::ellipseOutline(const RECT& r, COLORREF c) {
     DeleteObject(p);
 }
 
-int Canvas::textWidth(const std::wstring& s, bool bold) {    if (s.empty()) return 0;
+int Canvas::textWidth(const std::wstring& s, bool bold) {
+    if (s.empty()) return 0;
     HGDIOBJ of = SelectObject(dc_, pick(bold));
     SIZE sz{};
     GetTextExtentPoint32W(dc_, s.c_str(), (int)s.size(), &sz);

@@ -9,6 +9,7 @@
 #include "canvas.h"
 #include "icons.h"
 #include "theme.h"
+#include "version.h"
 
 namespace {
 
@@ -215,13 +216,8 @@ bool runDialog(HWND owner, const std::wstring& title, const std::wstring& label,
                const std::wstring& text, bool prompt, std::wstring* io) {
     ensureDialogClass();
 
+    const double scale = dpiScaleOfWindow(owner);
     HDC screen = GetDC(nullptr);
-    int dpi = 96;
-    typedef UINT(WINAPI * GetDpiForWindowFn)(HWND);
-    static auto getDpi = (GetDpiForWindowFn)GetProcAddress(GetModuleHandleW(L"user32.dll"),
-                                                           "GetDpiForWindow");
-    if (getDpi && owner) dpi = (int)getDpi(owner);
-    double scale = dpi / 96.0;
     HDC measureDc = CreateCompatibleDC(screen);
     int textW = 0;
     {
@@ -289,8 +285,13 @@ bool runDialog(HWND owner, const std::wstring& title, const std::wstring& label,
     }
 
     MSG msg;
-    while (!st.done && GetMessageW(&msg, nullptr, 0, 0)) {
-        if (msg.message == WM_QUIT) break;
+    while (!st.done) {
+        BOOL r = GetMessageW(&msg, nullptr, 0, 0);
+        if (r <= 0) {
+            // WM_QUIT must survive the dialog: put it back for the outer loop.
+            if (r == 0) PostQuitMessage((int)msg.wParam);
+            break;
+        }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
@@ -323,11 +324,11 @@ bool promptText(HWND owner, const std::wstring& title, const std::wstring& label
 
 void showAbout(HWND owner) {
     runDialog(owner, L"关于 My Old Computer", L"",
-              L"My Old Computer 2.0\n\n"
+              L"My Old Computer " MOC_VERSION_DISPLAY L"\n\n"
               L"Windows 98 风格的文件管理器。\n"
               L"原生 Win32 / C++，无第三方依赖，界面全部由代码绘制。\n\n"
               L"macOS 版：Swift / AppKit。\n"
-              L"MIT License.",
+              L"MIT License。",
               false, nullptr);
 }
 

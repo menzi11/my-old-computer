@@ -93,7 +93,7 @@ void dumpLayout(App& a) {
 
 void repaint(HWND hwnd) {
     g_app.paintDirty = true;
-    InvalidateRect(hwnd, nullptr, FALSE);
+    if (hwnd) InvalidateRect(hwnd, nullptr, FALSE);
 }
 
 // Rectangle covered by the rubber band, clipped to the file view.
@@ -310,14 +310,10 @@ void moveSelection(App& a, int dx, int dy) {
     int idx = cur;
     if (a.mode == ViewMode::Details) {
         idx = std::clamp(cur + dy, 0, n - 1);
-    } else if (a.mode == ViewMode::List) {
-        int cols = std::max(1, a.gridCols());
-        idx = cur + dx + dy * cols;
-        idx = std::clamp(idx, 0, n - 1);
     } else {
+        // List and icons share the same grid geometry.
         int cols = std::max(1, a.gridCols());
-        idx = cur + dx + dy * cols;
-        idx = std::clamp(idx, 0, n - 1);
+        idx = std::clamp(cur + dx + dy * cols, 0, n - 1);
     }
     selectOnly(a, idx);
     a.selAnchor = idx;
@@ -489,12 +485,30 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
         if (row >= 0) {
             TreeNode* n = a.treeFlat[row];
             a.hoverTree = row;
-            if (!n->path.empty()) {
-                a.selection.clear();
-                a.contextFolder = n->path;
-                paths.push_back(n->path);
-                folder = n->path;
+            if (n->path.empty()) {
+                // Headers without a folder (我的电脑, 收藏夹) get a small menu of
+                // their own instead of one borrowed from the current directory.
+                std::vector<MenuItem> items;
+                items.push_back({n->expanded ? L"折叠" : L"展开", ID_TREE_TOGGLE, n->hasChildren});
+                items.push_back({L"", 0, false, false, true});
+                items.push_back({L"刷新", ID_REFRESH, true});
+                POINT screen = p;
+                ClientToScreen(hwnd, &screen);
+                int id = showPopupMenu(hwnd, items, screen.x, screen.y, false);
+                if (id == ID_REFRESH) {
+                    a.refreshTree();  // re-enumerates drives too (USB plugged in, ...)
+                    a.reload();
+                } else if (id) {
+                    a.performMenuAction(id);
+                }
+                repaint(hwnd);
+                return;
             }
+            a.selection.clear();
+            a.contextFolder = n->path;
+            a.contextIsFavorite = (n->kind == TreeNode::Favorite);
+            paths.push_back(n->path);
+            folder = n->path;
         }
         fromTree = true;
     } else {
@@ -550,7 +564,7 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
         case shellmenu::Command::NewFolder: a.newFolder(); break;
         case shellmenu::Command::NewTextFile: a.newTextFile(); break;
         case shellmenu::Command::Preview:
-            if (std::wstring p = a.firstSelectedPath(); !p.empty()) preview::show(hwnd, p);
+            if (std::wstring sel = a.firstSelectedPath(); !sel.empty()) preview::show(hwnd, sel);
             break;
         case shellmenu::Command::Reveal: a.revealSelection(); break;
         case shellmenu::Command::CopyPath: a.copyPaths(); break;
@@ -617,6 +631,7 @@ void onMouseMove(HWND hwnd, App& a, POINT p) {
                 if (a.selection.count(e.path)) paths.push_back(e.path);
             if (paths.empty() && !a.dragPath.empty()) paths.push_back(a.dragPath);
             a.dragArmed = false;
+            a.pressSelectedRow = -1;  // a real drag started: keep the multi-selection
             a.dragging = true;
             if (GetCapture() == hwnd) ReleaseCapture();
             DWORD effect = 0;
@@ -663,6 +678,7 @@ void onLButtonDown(HWND hwnd, App& a, POINT p) {
     SetFocus(hwnd);
     a.pressTitle = -1;
     a.pressTool = -1;
+    a.pressSelectedRow = -1;
 
     for (int i = 0; i < 3; ++i) {
         RECT r = a.titleButtonRect(i);
@@ -706,8 +722,10 @@ void onLButtonDown(HWND hwnd, App& a, POINT p) {
         return;
     }
     if (PtInRect(&a.lay.addrGo, p)) {
-        if (a.addrEditing) a.endAddressEdit(true);
-        else a.reload();
+        // The Go button behaves like a toolbar button: press feedback first,
+        // the action on release inside the button.
+        a.pressTool = 100;
+        SetCapture(hwnd);
         repaint(hwnd);
         return;
     }
@@ -826,6 +844,10 @@ void onLButtonDown(HWND hwnd, App& a, POINT p) {
         } else if (!a.selection.count(path)) {
             selectOnly(a, itemIndex);
             a.selAnchor = itemIndex;
+        } else if (a.selection.size() > 1) {
+            // Plain click on one of several selected items: keep the selection
+            // for a possible drag; collapse it on release if no drag follows.
+            a.pressSelectedRow = itemIndex;
         }
         a.dragPath = path;
         a.dragArmed = true;
@@ -865,6 +887,15 @@ void onLButtonUp(HWND hwnd, App& a, POINT p) {
     if (a.pressTool >= 0) {
         int i = a.pressTool;
         a.pressTool = -1;
+        if (i == 100) {
+            // The address bar's Go button.
+            if (PtInRect(&a.lay.addrGo, p)) {
+                if (a.addrEditing) a.endAddressEdit(true);
+                else a.reload();
+            }
+            repaint(hwnd);
+            return;
+        }
         RECT r = a.toolbarItemRect(i);
         if (PtInRect(&r, p)) {
             switch (i) {
@@ -901,6 +932,13 @@ void onLButtonUp(HWND hwnd, App& a, POINT p) {
         return;
     }
     if (a.dragArmed || a.dragging) {
+        if (a.pressSelectedRow >= 0) {
+            // No drag followed the press: collapse to the clicked item, the
+            // way Explorer does.
+            selectOnly(a, a.pressSelectedRow);
+            a.selAnchor = a.pressSelectedRow;
+            a.pressSelectedRow = -1;
+        }
         a.dragArmed = false;
         a.dragging = false;
         a.dragPath.clear();
@@ -1004,12 +1042,7 @@ void onMouseWheel(HWND hwnd, App& a, POINT p, int delta) {
 }
 
 void onDropFiles(HWND hwnd, App& a, HDROP drop) {
-    UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
-    std::vector<std::wstring> paths;
-    for (UINT i = 0; i < count; ++i) {
-        wchar_t buf[32768];
-        if (DragQueryFileW(drop, i, buf, 32768)) paths.push_back(buf);
-    }
+    std::vector<std::wstring> paths = fsx::pathsFromHdrop(drop);
     POINT p;
     DragQueryPoint(drop, &p);
     DragFinish(drop);
@@ -1056,7 +1089,6 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         break;
     }
     case WM_NCHITTEST: {
-        LRESULT hit = DefWindowProcW(hwnd, msg, wp, lp);
         POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         ScreenToClient(hwnd, &p);
         const int grip = pxOf(a.scale, 4);
@@ -1138,8 +1170,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         repaint(hwnd);
         return 0;
     case WM_CAPTURECHANGED:
-        // Something stole the mouse: never leave a rubber band or a pending
-        // drag armed.
+        // Something stole the mouse: never leave a rubber band, a pending drag
+        // or a half-finished knob/splitter drag armed.
         if (a.marquee) {
             KillTimer(hwnd, kMarqueeTimer);
             eraseBand(hwnd);
@@ -1149,6 +1181,9 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             a.dragArmed = false;
             a.dragPath.clear();
         }
+        a.scrollDrag = 0;
+        a.splitterDrag = false;
+        a.pressSelectedRow = -1;
         return 0;
     case WM_MOUSEMOVE: {
         POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
@@ -1209,6 +1244,14 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_KEYDOWN:
         onKeyDown(hwnd, a, wp);
         return 0;
+    case WM_SYSKEYDOWN:
+        // With Alt held, arrow keys arrive here instead of WM_KEYDOWN; other
+        // system keys (Alt+F4, F10) still go to DefWindowProc.
+        if (wp == VK_LEFT || wp == VK_RIGHT || wp == VK_UP) {
+            onKeyDown(hwnd, a, wp);
+            return 0;
+        }
+        break;
     case WM_DROPFILES:
         onDropFiles(hwnd, a, (HDROP)wp);
         return 0;
@@ -1248,17 +1291,6 @@ void enableDpiAwareness() {
     } else {
         SetProcessDPIAware();
     }
-}
-
-double dpiScaleFor(HWND hwnd) {
-    typedef UINT(WINAPI * GetDpiForWindowFn)(HWND);
-    static auto getDpi = (GetDpiForWindowFn)GetProcAddress(GetModuleHandleW(L"user32.dll"),
-                                                           "GetDpiForWindow");
-    if (getDpi) {
-        UINT dpi = getDpi(hwnd);
-        if (dpi >= 96) return dpi / 96.0;
-    }
-    return 1.0;
 }
 
 std::wstring argValue(const std::vector<std::wstring>& args, const wchar_t* name) {
@@ -1742,6 +1774,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
     settings.load();
     int w = settings.w, h = settings.h;
     int x = settings.x, y = settings.y;
+    if (x >= 0 && y >= 0 && !MonitorFromPoint(POINT{x, y}, MONITOR_DEFAULTTONULL)) {
+        x = y = -1;  // saved position is no longer on any monitor (unplugged display)
+    }
     if (x < 0 || y < 0) {
         x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
         y = (GetSystemMetrics(SM_CYSCREEN) - h) / 2;
@@ -1753,7 +1788,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
     if (!hwnd) return 1;
 
     g_app.hwnd = hwnd;
-    g_app.scale = dpiScaleFor(hwnd);
+    g_app.scale = dpiScaleOfWindow(hwnd);
     g_app.init(hwnd);
     g_app.logicalW = w;
     g_app.logicalH = h;

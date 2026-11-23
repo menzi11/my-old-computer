@@ -30,9 +30,12 @@ std::wstring lower(std::wstring s) {
     return s;
 }
 
-// A key shared by all items that show the same icon.
+// A key shared by all items that show the same icon.  Drives keep their own
+// path as part of the key: HDD, USB, DVD and network drives all draw
+// differently, a single "<drive>" key used to give every volume the first
+// drive's icon.
 std::wstring keyFor(const std::wstring& path, bool isDir, bool isDrive) {
-    if (isDrive) return L"<drive>";
+    if (isDrive) return L"drv:" + path;
     if (isDir) return L"<dir>";
     std::wstring ext = PathFindExtensionW(path.c_str());
     if (ext.empty()) return L"<file>";
@@ -109,6 +112,10 @@ HICON icon(const std::wstring& path, bool isDir, bool isDrive, int px) {
     std::wstring key = keyFor(path, isDir, isDrive);
     auto it = cache.icons.find(key);
     if (it != cache.icons.end()) return it->second;
+    // .exe/.lnk/.ico items are cached per file; keep the cache bounded so a
+    // stroll through a directory of executables cannot accumulate GDI
+    // handles forever.
+    if (cache.icons.size() > 400) clear();
     HICON result = load(path, isDir, isDrive, shil);
     cache.icons[key] = result;
     return result;

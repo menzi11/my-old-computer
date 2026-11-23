@@ -109,6 +109,8 @@ bool bindItem(const std::wstring& path, BoundItem* out) {
     if (SUCCEEDED(hr) && child) {
         out->child = (PITEMID_CHILD)ILClone(child);
         out->parent = parent;
+    } else if (parent) {
+        parent->Release();  // bound but childless: nothing owns this reference
     }
     CoTaskMemFree(full);
     return out->child != nullptr;

@@ -354,7 +354,6 @@ void drawDetailsRow(Canvas& c, App& a, int i) {
 void drawDetails(Canvas& c, App& a) {
     RECT content = a.lay.content;
     const int contentW = content.right - content.left;
-    const int contentH = content.bottom - content.top;
     const int tableW = std::max(0, contentW - 4 - a.m.scrollerW);
 
     c.fill(content, Theme::face);
@@ -370,7 +369,6 @@ void drawDetails(Canvas& c, App& a) {
                   content.top + a.m.headerH - 1};
         c.fill(cell, Theme::face);
         c.bevelRaised(cell);
-        const int fontPx = c.px(14.6667);
         if (i == 1) {
             c.textClip(titles[i], RECT{cell.left, cell.top, cell.right - c.px(6), cell.bottom},
                        Theme::text, Align::Right);
@@ -453,7 +451,6 @@ void drawGridCell(Canvas& c, App& a, int i) {
 void drawGrid(Canvas& c, App& a) {
     RECT content = a.lay.content;
     const int contentW = content.right - content.left;
-    const int contentH = content.bottom - content.top;
     const int bodyW = std::max(0, contentW - 4 - a.m.scrollerW);
 
     c.fill(content, Theme::face);
@@ -484,14 +481,15 @@ void drawMarquee(Canvas& c, App& a) {
     r.right = std::min(r.right, (LONG)vp.right);
     r.bottom = std::min(r.bottom, (LONG)vp.bottom);
     if (r.right <= r.left || r.bottom <= r.top) return;
-    // Win98 drew a dotted rubber band by XOR.
+    // Win98 drew a dotted rubber band by XOR.  One pixel per dot, not a brush
+    // per dot.
     for (int x = r.left; x < r.right; x += 2) {
-        c.fill(x, r.top, 1, 1, Theme::dark);
-        c.fill(x, r.bottom - 1, 1, 1, Theme::dark);
+        SetPixelV(c.dc(), x, r.top, Theme::dark);
+        SetPixelV(c.dc(), x, r.bottom - 1, Theme::dark);
     }
     for (int y = r.top; y < r.bottom; y += 2) {
-        c.fill(r.left, y, 1, 1, Theme::dark);
-        c.fill(r.right - 1, y, 1, 1, Theme::dark);
+        SetPixelV(c.dc(), r.left, y, Theme::dark);
+        SetPixelV(c.dc(), r.right - 1, y, Theme::dark);
     }
 }
 

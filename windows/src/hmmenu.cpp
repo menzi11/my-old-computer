@@ -59,7 +59,7 @@ std::wstring itemText(HMENU menu, int index) {
     info.cch = 512;
     if (!GetMenuItemInfoW(menu, index, TRUE, &info)) return L"";
     std::wstring text = buffer;
-    // "鎵撳紑(&O)" -> "鎵撳紑": Win98 menus did not show accelerators.
+    // "打开(&O)" -> "打开"：Win98 菜单不显示快捷键提示。
     const size_t amp = text.find(L"(&");
     if (amp != std::wstring::npos && text.size() > amp + 3 && text.back() == L')')
         text = text.substr(0, amp);
@@ -361,16 +361,10 @@ int showHMenu(HWND owner, HMENU root, POINT point) {
     if (!root) return 0;
     ensureClass();
 
-    typedef UINT(WINAPI * GetDpiForWindowFn)(HWND);
-    static auto getDpi = (GetDpiForWindowFn)GetProcAddress(GetModuleHandleW(L"user32.dll"),
-                                                           "GetDpiForWindow");
-    UINT dpi = 96;
-    if (getDpi && owner) dpi = getDpi(owner);
-
     Node* node = new Node();
     node->menu = root;
     node->owner = owner;
-    node->scale = dpi / 96.0;
+    node->scale = dpiScaleOfWindow(owner);
     // Some extensions add items to the root itself on initialisation.
     SendMessageW(owner, WM_INITMENUPOPUP, (WPARAM)root, 0);
     parseMenu(node);
@@ -387,7 +381,13 @@ int showHMenu(HWND owner, HMENU root, POINT point) {
     SetFocus(node->hwnd);
 
     MSG msg;
-    while (!g_finished && GetMessageW(&msg, nullptr, 0, 0)) {
+    while (!g_finished) {
+        BOOL r = GetMessageW(&msg, nullptr, 0, 0);
+        if (r <= 0) {
+            // WM_QUIT must survive the menu: put it back for the outer loop.
+            if (r == 0) PostQuitMessage((int)msg.wParam);
+            break;
+        }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }

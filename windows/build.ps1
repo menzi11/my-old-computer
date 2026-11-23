@@ -30,11 +30,13 @@ if (-not (Test-Path $devCmd)) { throw "VsDevCmd.bat not found under $vsPath" }
 
 $sources = (Get-ChildItem $srcDir -Filter *.cpp | ForEach-Object { '"' + $_.FullName + '"' }) -join ' '
 $defines = '/DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00'
-$flags = if ($Debug) { '/Od /Zi /MDd /RTC1' } else { '/O2 /GS- /MD' }
+# Keep /GS on: the app hosts third-party shell extensions and reads filesystem
+# data, a few KB of buffer checks are worth it.
+$flags = if ($Debug) { '/Od /Zi /MDd /RTC1' } else { '/O2 /MD' }
 $libs = 'user32.lib gdi32.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib windowscodecs.lib shlwapi.lib msimg32.lib comdlg32.lib advapi32.lib'
 $link = "/SUBSYSTEM:WINDOWS /OUT:`"$outDir\MyOldComputer.exe`""
 
-$cmd = '"{0}" -arch=amd64 -host_arch=amd64 >nul && rc /nologo /I "{3}" /fo "{4}\app.res" "{3}\app.rc" && cl /nologo /std:c++17 /EHsc /W3 /utf-8 {1} {2} /Fo"{4}\\" {5} /link {6} {7} "{4}\app.res"' -f `
+$cmd = '"{0}" -arch=amd64 -host_arch=amd64 >nul && rc /nologo /I "{3}" /fo "{4}\app.res" "{3}\app.rc" && cl /nologo /std:c++17 /EHsc /W4 /utf-8 {1} {2} /Fo"{4}\\" {5} /link {6} {7} "{4}\app.res"' -f `
     $devCmd, $defines, $flags, $srcDir, $outDir, $sources, $link, $libs
 
 Write-Host "Building My Old Computer (Windows)..." -ForegroundColor Cyan

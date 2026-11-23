@@ -214,19 +214,9 @@ int showPopupMenu(HWND owner, const std::vector<MenuItem>& items, int x, int y, 
 
     MenuState st;
     st.items = &items;
-    st.scale = 1.0;
-    HDC screen = GetDC(nullptr);
-    int dpi = 96;
-    if (owner) {
-        HMONITOR mon = MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST);
-        // GetDpiForWindow is available on Windows 10 1607+.
-        typedef UINT(WINAPI * GetDpiForWindowFn)(HWND);
-        static auto getDpi = (GetDpiForWindowFn)GetProcAddress(GetModuleHandleW(L"user32.dll"),
-                                                               "GetDpiForWindow");
-        if (getDpi) dpi = (int)getDpi(owner);
-    }
-    st.scale = dpi / 96.0;
+    st.scale = dpiScaleOfWindow(owner);
 
+    HDC screen = GetDC(nullptr);
     HDC scaleDc = CreateCompatibleDC(screen);
     int w, h;
     {
@@ -261,7 +251,13 @@ int showPopupMenu(HWND owner, const std::vector<MenuItem>& items, int x, int y, 
     ++activeMenuCount;
 
     MSG msg;
-    while (st.hwnd && GetMessageW(&msg, nullptr, 0, 0)) {
+    while (st.hwnd) {
+        BOOL r = GetMessageW(&msg, nullptr, 0, 0);
+        if (r <= 0) {
+            // WM_QUIT must survive the menu: put it back for the outer loop.
+            if (r == 0) PostQuitMessage((int)msg.wParam);
+            break;
+        }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }

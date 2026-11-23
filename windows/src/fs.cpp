@@ -382,8 +382,10 @@ bool makeFolder(const std::wstring& dir, const std::wstring& name, std::wstring*
 
 bool renameItem(const std::wstring& path, const std::wstring& newName, std::wstring* error) {
     std::wstring dest = joinPath(parentPath(path), newName);
-    if (_wcsicmp(dest.c_str(), path.c_str()) == 0) return true;
-    if (exists(dest)) {
+    // Exact same path only: a case-only rename ("readme" -> "README") must go
+    // through to the filesystem, which NTFS handles fine.
+    if (dest == path) return true;
+    if (_wcsicmp(dest.c_str(), path.c_str()) != 0 && exists(dest)) {
         if (error) *error = L"已有同名文件或文件夹。";
         return false;
     }
@@ -487,6 +489,48 @@ bool hasAnySubdirectory(const std::wstring& dir, bool showHidden) {
     } while (FindNextFileW(h, &fd));
     FindClose(h);
     return found;
+}
+
+bool dropShouldMove(const std::vector<std::wstring>& paths, const std::wstring& dest) {
+    if (paths.empty()) return true;
+    return sameVolume(paths.front(), dest);
+}
+
+HGLOBAL makeHdropData(const std::vector<std::wstring>& paths) {
+    std::wstring list;
+    for (auto& p : paths) {
+        list += p;
+        list.push_back(L'\0');
+    }
+    list.push_back(L'\0');
+    const size_t bytes = (list.size() + 1) * sizeof(wchar_t);
+    HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, sizeof(DROPFILES) + bytes);
+    if (!mem) return nullptr;
+    auto* drop = (DROPFILES*)GlobalLock(mem);
+    if (!drop) {
+        GlobalFree(mem);
+        return nullptr;
+    }
+    drop->pFiles = sizeof(DROPFILES);
+    drop->fWide = TRUE;
+    memcpy((char*)drop + sizeof(DROPFILES), list.c_str(), bytes);
+    GlobalUnlock(mem);
+    return mem;
+}
+
+std::vector<std::wstring> pathsFromHdrop(HDROP drop) {
+    std::vector<std::wstring> out;
+    if (!drop) return out;
+    UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+    wchar_t buf[32768];
+    for (UINT i = 0; i < count; ++i)
+        if (DragQueryFileW(drop, i, buf, 32768)) out.push_back(buf);
+    return out;
+}
+
+UINT preferredDropEffectFormat() {
+    static const UINT fmt = RegisterClipboardFormatW(L"Preferred DropEffect");
+    return fmt;
 }
 
 std::wstring lastErrorText(DWORD code) {
