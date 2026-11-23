@@ -32,6 +32,8 @@ struct Node {
     POINT anchor{};
     // The pointer was last inside our submenu (it is on its way back out).
     bool childHadMouse = false;
+    // Row whose submenu is open (-1 while none is).
+    int openRow = -1;
 };
 
 Node* g_active = nullptr;
@@ -50,6 +52,11 @@ void destroyNode(Node* n) {
 void destroyChildren(Node* n) {
     for (auto* child : n->children) destroyNode(child);
     n->children.clear();
+    n->openRow = -1;
+    // The keyboard acted inside the submenus that are gone now; it belongs to
+    // this level again.  (Leaving it on a destroyed node made Esc, Enter and
+    // the arrow keys operate on freed memory.)
+    g_active = n;
 }
 
 int itemHeight(bool separator, double scale) {
@@ -207,12 +214,12 @@ int hitItem(Node* n, POINT p) {
 }
 
 void closeAll(Node* root) {
-    g_active = nullptr;
     destroyChildren(root);
     if (root->hwnd) {
         DestroyWindow(root->hwnd);
         root->hwnd = nullptr;
     }
+    g_active = nullptr;
     g_finished = true;
 }
 
@@ -253,9 +260,13 @@ void createNodeWindow(Node* n, int x, int y) {
 }
 
 void openChild(Node* n, int index) {
-    diagLog(L"openChild idx=%d", index);
     if (index < 0 || index >= (int)n->subs.size() || !n->subs[index] || !n->enabled[index]) return;
-    if (!n->children.empty() && n->children.size() == 1 && n->hover == index) return;
+    // Already showing this row's submenu.  This has to be checked against the
+    // row the open submenu belongs to, never against hover: every caller
+    // assigns hover first, so a hover comparison was always true and the
+    // first submenu shown could never be replaced by another row's.
+    if (!n->children.empty() && n->openRow == index) return;
+    diagLog(L"openChild idx=%d", index);
     const RECT& row = n->rects[index];
     if (n->anchor.y < row.top || n->anchor.y >= row.bottom)
         n->anchor = POINT{row.right, (row.top + row.bottom) / 2};
@@ -280,6 +291,7 @@ void openChild(Node* n, int index) {
         return;
     }
     n->children.push_back(child);
+    n->openRow = index;
     g_active = child;
 }
 
@@ -300,9 +312,7 @@ void choose(Node* n, int index) {
 
 void closeChild(Node* n) {
     if (!n->parent) return;
-    Node* parent = n->parent;
-    destroyChildren(parent);
-    g_active = parent;
+    destroyChildren(n->parent);  // also hands the keyboard back to the parent
 }
 
 LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {

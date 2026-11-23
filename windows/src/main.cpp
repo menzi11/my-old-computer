@@ -1430,6 +1430,166 @@ bool hasArg(const std::vector<std::wstring>& args, const wchar_t* name) {
     return false;
 }
 
+// ---------------------------------------------------------------- menu test
+// Drives a real popup menu - real windows, real posted mouse moves - and reads
+// back what is on screen: which submenu window exists, where it sits, and
+// which row is painted highlighted.  (Log lines and window counts once hid a
+// submenu that never switched to another row's; this cannot.)
+
+constexpr UINT_PTR kMenuTestTimer = 0x4D43;
+constexpr wchar_t kMenuTestClass[] = L"MyOldComputerMenuTest";
+
+struct MenuDrive {
+    struct Seen {
+        bool hasSub = false;
+        int subTop = 0, subHeight = 0;  // submenu top relative to the root's top
+        bool row0Hot = false, row1Hot = false;  // painted highlight at the row centres
+    };
+    HWND root = nullptr;
+    int step = 0;
+    int x0 = 10, yc0 = 0, yc1 = 0, yc2 = 0;  // probe points, client coords of the root
+    int itemH = 0, margin = 0;
+    Seen afterA, afterB, backA, diagonal, vertical, plain;
+};
+
+MenuDrive g_drive;
+
+BOOL CALLBACK collectMenuWindows(HWND h, LPARAM lp) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(h, &pid);
+    if (pid == GetCurrentProcessId()) {
+        wchar_t cls[64]{};
+        if (GetClassNameW(h, cls, 64) && lstrcmpW(cls, L"MyOldComputerHMenu") == 0)
+            ((std::vector<HWND>*)lp)->push_back(h);
+    }
+    return TRUE;
+}
+
+// The menu windows of this process; the root is the one on the left, since a
+// submenu opens to the right of its parent.
+std::vector<HWND> menuWindows(HWND* root) {
+    std::vector<HWND> wins;
+    EnumWindows(collectMenuWindows, (LPARAM)&wins);
+    *root = nullptr;
+    for (HWND w : wins) {
+        if (!*root) {
+            *root = w;
+            continue;
+        }
+        RECT a{}, b{};
+        GetWindowRect(w, &a);
+        GetWindowRect(*root, &b);
+        if (a.left < b.left) *root = w;
+    }
+    return wins;
+}
+
+// True when the pixel the root menu shows at client (x, y) is on screen as
+// its highlight colour.  Read from the display itself: the menu is a topmost
+// popup, so this is literally what the user sees.
+bool menuRowHot(HWND root, int x, int y) {
+    POINT p{x, y};
+    ClientToScreen(root, &p);
+    HDC screen = GetDC(nullptr);
+    const COLORREF px = GetPixel(screen, p.x, p.y);
+    ReleaseDC(nullptr, screen);
+    diagLog(L"menutest probe %d,%d = 0x%08lX (select 0x%08lX)", x, y, (unsigned long)px,
+            (unsigned long)Theme::select);
+    return (px & 0x00FFFFFF) == Theme::select;
+}
+
+MenuDrive::Seen menuTestLook() {
+    MenuDrive::Seen seen;
+    HWND root = nullptr;
+    const std::vector<HWND> wins = menuWindows(&root);
+    if (!root) return seen;  // the menu is gone
+    RECT rr{};
+    GetWindowRect(root, &rr);
+    for (HWND w : wins) {
+        if (w == root) continue;
+        RECT wr{};
+        GetWindowRect(w, &wr);
+        seen.hasSub = true;
+        seen.subTop = wr.top - rr.top;
+        seen.subHeight = wr.bottom - wr.top;
+    }
+    seen.row0Hot = menuRowHot(root, g_drive.x0, g_drive.yc0);
+    seen.row1Hot = menuRowHot(root, g_drive.x0, g_drive.yc1);
+    return seen;
+}
+
+// One timer tick = one posted input, so every move is processed like a real
+// one before the next step looks at the screen.
+void menuTestStep(HWND owner) {
+    MenuDrive& d = g_drive;
+    auto post = [](HWND w, UINT msg, int x, int y) {
+        PostMessageW(w, msg, 0, MAKELPARAM((short)x, (short)y));
+    };
+    auto next = [owner](int delay) { SetTimer(owner, kMenuTestTimer, delay, nullptr); };
+    if (!d.root) {
+        HWND root = nullptr;
+        menuWindows(&root);
+        d.root = root;
+        if (!d.root) return;  // menu already closed
+    }
+    switch (d.step++) {
+    case 0:
+        post(d.root, WM_MOUSEMOVE, d.x0, d.yc0);  // hover A
+        next(80);
+        break;
+    case 1:
+        d.afterA = menuTestLook();
+        post(d.root, WM_MOUSEMOVE, d.x0, d.yc1);  // straight down to B
+        next(80);
+        break;
+    case 2:
+        d.afterB = menuTestLook();
+        post(d.root, WM_MOUSEMOVE, d.x0, d.yc0);  // back up to A
+        next(80);
+        break;
+    case 3: {
+        d.backA = menuTestLook();
+        // Diagonal from A toward the lower part of its own submenu: the path
+        // crosses B's band on its way.
+        RECT rc{};
+        GetClientRect(d.root, &rc);
+        const int xe = rc.right - d.margin - 1;
+        const int ye = d.yc0 + d.itemH / 2 + 10;
+        for (int k = 1; k <= 4; ++k)
+            post(d.root, WM_MOUSEMOVE, d.x0 + (xe - d.x0) * k / 4, d.yc0 + (ye - d.yc0) * k / 4);
+        next(120);
+        break;
+    }
+    case 4:
+        d.diagonal = menuTestLook();
+        post(d.root, WM_MOUSEMOVE, d.x0, d.yc1);  // straight down to B again
+        next(80);
+        break;
+    case 5:
+        d.vertical = menuTestLook();
+        post(d.root, WM_MOUSEMOVE, d.x0, d.yc2);  // down to the plain item
+        next(80);
+        break;
+    case 6:
+        d.plain = menuTestLook();
+        PostMessageW(d.root, WM_KEYDOWN, VK_ESCAPE, 0);
+        next(150);
+        break;
+    default:
+        menuClose();  // Escape did not close it: end this now, the check fails
+        break;
+    }
+}
+
+LRESULT CALLBACK menuTestProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_TIMER && wp == kMenuTestTimer) {
+        KillTimer(hwnd, kMenuTestTimer);
+        menuTestStep(hwnd);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
 // Drives the same input handlers the window procedure uses, with synthesized
 // points, so click/selection behaviour can be checked without touching the
 // mouse or a real window.
@@ -1836,6 +1996,83 @@ int runUiTest(App& app) {
     app.marquee = false;
     std::wstring dragLabel = L"1200 项框选40次 " + std::to_wstring(dragMs) + L"ms";
     check(dragLabel.c_str(), dragMs < 400);
+
+    // The popup menu, with real windows: hover A, go down to B, back to A,
+    // travel the diagonal toward A's submenu, straight down to B once more,
+    // then on to a plain item.  What matters is the submenu that is actually
+    // on screen (A's has three rows, B's one) and the row actually painted.
+    {
+        WNDCLASSEXW wc{sizeof(WNDCLASSEXW)};
+        wc.lpfnWndProc = menuTestProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = kMenuTestClass;
+        RegisterClassExW(&wc);
+        HWND owner = CreateWindowExW(0, kMenuTestClass, L"", WS_OVERLAPPED, 0, 0, 100, 100,
+                                     nullptr, nullptr, wc.hInstance, nullptr);
+        HMENU menu = CreatePopupMenu();
+        HMENU subA = CreatePopupMenu();
+        AppendMenuW(subA, MF_STRING, 201, L"a1");
+        AppendMenuW(subA, MF_STRING, 202, L"a2");
+        AppendMenuW(subA, MF_STRING, 203, L"a3");
+        AppendMenuW(menu, MF_POPUP, (UINT_PTR)subA, L"A");
+        HMENU subB = CreatePopupMenu();
+        AppendMenuW(subB, MF_STRING, 211, L"b1");
+        AppendMenuW(menu, MF_POPUP, (UINT_PTR)subB, L"B");
+        AppendMenuW(menu, MF_STRING, 221, L"C");
+
+        MenuDrive& d = g_drive;
+        const double s = dpiScaleOfWindow(owner);
+        const int margin = (int)(3 * s + 0.5);
+        const int itemH = (int)(22 * s + 0.5);
+        RECT work{};
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+        // A click anywhere else closes the menu; then the run is simply repeated.
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            d = MenuDrive{};
+            d.margin = margin;
+            d.itemH = itemH;
+            d.yc0 = margin + itemH / 2;
+            d.yc1 = d.yc0 + itemH;
+            d.yc2 = d.yc1 + itemH;
+            const HWND foreground = GetForegroundWindow();
+            SetTimer(owner, kMenuTestTimer, 150, nullptr);
+            showHMenu(owner, menu, POINT{work.left + 40, work.top + 40});
+            if (foreground) SetForegroundWindow(foreground);
+            KillTimer(owner, kMenuTestTimer);
+            if (d.step >= 7) break;
+        }
+        DestroyMenu(menu);
+        DestroyWindow(owner);
+
+        const int topA = 0, heightA = 2 * d.margin + 3 * d.itemH;
+        const int topB = d.itemH, heightB = 2 * d.margin + d.itemH;
+        // Measured values go into the label of a failed check.
+        auto look = [](const MenuDrive::Seen& v) {
+            return L"（实测 top=" + std::to_wstring(v.subTop) + L" h=" +
+                   std::to_wstring(v.subHeight) + L" 行0=" + std::to_wstring((int)v.row0Hot) +
+                   L" 行1=" + std::to_wstring((int)v.row1Hot) + L"）";
+        };
+        auto expect = [&check, &look](const wchar_t* name, const MenuDrive::Seen& v, int top,
+                                      int height, bool row0, bool row1) {
+            std::wstring label = name;
+            if (!(v.hasSub && v.subTop == top && v.subHeight == height && v.row0Hot == row0 &&
+                  v.row1Hot == row1))
+                label += look(v);
+            check(label.c_str(), label == name);
+        };
+        const auto& A = d.afterA;
+        const auto& B = d.afterB;
+        const auto& R = d.backA;
+        const auto& G = d.diagonal;
+        const auto& V = d.vertical;
+        const auto& P = d.plain;
+        expect(L"悬停A弹出A的子菜单", A, topA, heightA, true, false);
+        expect(L"垂直移到B切换为B的子菜单", B, topB, heightB, false, true);
+        expect(L"回到A切回A的子菜单", R, topA, heightA, true, false);
+        expect(L"斜线穿过B行去子菜单保持A", G, topA, heightA, true, false);
+        expect(L"子菜单开着时垂直下移立即到B", V, topB, heightB, false, true);
+        check(L"移到普通项关闭子菜单", !P.hasSub && !P.row0Hot && !P.row1Hot);
+    }
 
     // Paint benchmark: catches accidental full-window repaint storms.
     app.setViewMode(ViewMode::Details);
