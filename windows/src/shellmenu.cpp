@@ -4,6 +4,7 @@
 #include <shlwapi.h>
 #include <shobjidl.h>
 
+#include <algorithm>
 #include <cwchar>
 #include <initializer_list>
 #include <string>
@@ -11,6 +12,7 @@
 
 #include "debug.h"
 #include "fs.h"
+#include "hmmenu.h"
 #include "settings.h"
 
 namespace shellmenu {
@@ -53,7 +55,15 @@ bool startsWith(const std::wstring& text, const wchar_t* prefix) {
 std::wstring itemText(HMENU menu, int pos) {
     wchar_t buf[512]{};
     GetMenuStringW(menu, pos, buf, 512, MF_BYPOSITION);
-    return buf;
+    std::wstring text = buf;
+    const size_t amp = text.find(L"(&");
+    if (amp != std::wstring::npos) {
+        const size_t close = text.find(L')', amp);
+        if (close != std::wstring::npos) text.erase(amp, close - amp + 1);
+    }
+    // Some extensions mark accelerators with a bare "&".
+    text.erase(std::remove(text.begin(), text.end(), L'&'), text.end());
+    return text;
 }
 
 bool menuHasText(HMENU menu, const wchar_t* needle) {
@@ -200,8 +210,21 @@ struct BuiltMenu {
     }
 };
 
+void applyHidden(HMENU menu, const std::vector<std::wstring>& hidden) {
+    if (hidden.empty()) return;
+    for (int i = GetMenuItemCount(menu) - 1; i >= 0; --i) {
+        const std::wstring text = itemText(menu, i);
+        if (text.empty()) continue;
+        for (auto& hide : hidden)
+            if (_wcsicmp(text.c_str(), hide.c_str()) == 0) {
+                DeleteMenu(menu, i, MF_BYPOSITION);
+                break;
+            }
+    }
+}
+
 bool buildMenu(HWND owner, const std::wstring& folderPath, const std::vector<std::wstring>& paths,
-               const ViewState& state, BuiltMenu* out) {
+               const ViewState& state, BuiltMenu* out, bool withExtras) {
     const bool background = paths.empty();
     IShellFolder* psf = nullptr;
     IContextMenu* pcm = nullptr;
@@ -241,6 +264,8 @@ bool buildMenu(HWND owner, const std::wstring& folderPath, const std::vector<std
     out->menu = CreatePopupMenu();
     if (!out->menu) return false;
     if (FAILED(pcm->QueryContextMenu(out->menu, 0, kIdFirst, kIdLast, CMF_NORMAL))) return false;
+
+    if (!withExtras) return true;
 
     if (background) {
         // The shell's own view/sort/refresh/new items talk to Explorer's view
@@ -312,8 +337,8 @@ bool buildMenu(HWND owner, const std::wstring& folderPath, const std::vector<std
 }
 
 bool buildFor(HWND owner, const std::wstring& folderPath, const std::vector<std::wstring>& paths,
-              const ViewState& state, BuiltMenu* out) {
-    return buildMenu(owner, folderPath, paths, state, out);
+              const ViewState& state, BuiltMenu* out, bool withExtras = true) {
+    return buildMenu(owner, folderPath, paths, state, out, withExtras);
 }
 
 }  // namespace
@@ -332,6 +357,7 @@ Result show(HWND owner, const std::wstring& folder, const std::vector<std::wstri
     Result result;
     BuiltMenu built;
     if (!buildFor(owner, folder, paths, state, &built)) return result;
+    applyHidden(built.menu, state.hidden);
 
     g_menu2 = nullptr;
     g_menu3 = nullptr;
@@ -339,9 +365,9 @@ Result show(HWND owner, const std::wstring& folder, const std::vector<std::wstri
     if (!g_menu3 && FAILED(built.pcm->QueryInterface(IID_IContextMenu2, (void**)&g_menu2)))
         g_menu2 = nullptr;
 
-    const UINT chosen = TrackPopupMenuEx(
-        built.menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN, point.x, point.y, owner,
-        nullptr);
+    // The menu is drawn by our own Win98-style popup; the shell only supplies
+    // the items and runs the command that gets picked.
+    const int chosen = showHMenu(owner, built.menu, point);
     result.shown = true;
 
     if (g_menu3) {
@@ -353,9 +379,9 @@ Result show(HWND owner, const std::wstring& folder, const std::vector<std::wstri
         g_menu2 = nullptr;
     }
 
-    if (chosen >= kCustomBase) {
+    if (chosen >= (int)kCustomBase) {
         result.command = commandFor(chosen);
-    } else if (chosen >= kIdFirst && chosen <= kIdLast) {
+    } else if (chosen >= (int)kIdFirst && chosen <= (int)kIdLast) {
         CMINVOKECOMMANDINFOEX info{};
         info.cbSize = sizeof(info);
         info.hwnd = owner;
@@ -377,6 +403,22 @@ std::vector<std::wstring> labels(const std::wstring& folder, const std::vector<s
     if (!buildFor(nullptr, folder, paths, state, &built)) return out;
     const int count = GetMenuItemCount(built.menu);
     for (int i = 0; i < count; ++i) {
+        const std::wstring text = itemText(built.menu, i);
+        if (!text.empty()) out.push_back(text);
+    }
+    return out;
+}
+
+std::vector<std::wstring> shellLabels(const std::wstring& folder,
+                                      const std::vector<std::wstring>& paths, bool background) {
+    std::vector<std::wstring> out;
+    BuiltMenu built;
+    if (background) {
+        if (!buildFor(nullptr, folder, {}, ViewState{}, &built, false)) return out;
+    } else if (!buildFor(nullptr, folder, paths, ViewState{}, &built, false)) {
+        return out;
+    }
+    for (int i = 0; i < GetMenuItemCount(built.menu); ++i) {
         const std::wstring text = itemText(built.menu, i);
         if (!text.empty()) out.push_back(text);
     }

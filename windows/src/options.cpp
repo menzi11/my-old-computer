@@ -12,15 +12,24 @@
 
 namespace {
 
-struct OptionRow {
+struct Row {
+    std::wstring label;
+    unsigned bits = 0;
+    int shellIndex = -1;
+    bool header = false;
+    int column = 0;
+    RECT rect{};
+};
+
+struct OwnOption {
     const wchar_t* label;
     unsigned bits;
     bool header;
 };
 
-const OptionRow kRows[] = {
+const OwnOption kOwn[] = {
     {L"文件和文件夹右键菜单", 0, true},
-    {L"使用 Windows 原生菜单（含 7-Zip、Git 等所有扩展）", kMenuShell, false},
+    {L"使用 Windows 原生菜单（含所有扩展）", kMenuShell, false},
     {L"快速查看", kMenuItemPreview, false},
     {L"在新窗口中打开", kMenuItemNewWindow, false},
     {L"在资源管理器中显示", kMenuItemReveal, false},
@@ -36,46 +45,92 @@ const OptionRow kRows[] = {
     {L"设置…", kMenuBgSettings, false},
 };
 
-constexpr int kRowCount = (int)(sizeof(kRows) / sizeof(kRows[0]));
-
-struct OptionsState {
+struct State {
     HWND hwnd = nullptr;
     HWND owner = nullptr;
     double scale = 1.0;
     unsigned mask = kMenuDefaults;
+    std::vector<std::wstring> shellItems;
+    std::vector<bool> shellVisible;
+    std::vector<Row> rows;
+    int leftW = 260;
+    int rightW = 260;
     bool done = false;
     bool accepted = false;
     int hover = -1;
     int press = -1;
-    RECT rows[kRowCount]{};
     RECT okRect{}, cancelRect{}, closeRect{};
 };
 
-OptionsState* g_options = nullptr;
+State* g_state = nullptr;
 
 int rowHeight(bool header, double scale) {
-    return (int)((header ? 26 : 24) * scale + 0.5);
+    return (int)((header ? 22 : 20) * scale + 0.5);
 }
 
-void layout(OptionsState& st) {
-    RECT rc;
-    GetClientRect(st.hwnd, &rc);
-    const int left = (int)(16 * st.scale + 0.5);
-    const int right = rc.right - (int)(16 * st.scale + 0.5);
+void buildRows(State& st) {
+    st.rows.clear();
     int y = (int)(3 * st.scale + 0.5) + (int)(22 * st.scale + 0.5) + (int)(10 * st.scale + 0.5) +
             (int)(18 * st.scale + 0.5);
-    for (int i = 0; i < kRowCount; ++i) {
-        const int h = rowHeight(kRows[i].header, st.scale);
-        st.rows[i] = RECT{left, y, right, y + h};
-        y += h;
+    for (const auto& own : kOwn) {
+        Row row;
+        row.label = own.label;
+        row.bits = own.bits;
+        row.header = own.header;
+        row.column = 0;
+        st.rows.push_back(row);
+        (void)y;
     }
+    Row header;
+    header.label = L"系统菜单项（来自注册表）";
+    header.header = true;
+    header.column = 1;
+    st.rows.push_back(header);
+    for (size_t i = 0; i < st.shellItems.size(); ++i) {
+        Row row;
+        row.label = st.shellItems[i];
+        row.shellIndex = (int)i;
+        row.column = 1;
+        st.rows.push_back(row);
+    }
+}
+
+void layout(State& st) {
+    RECT rc;
+    GetClientRect(st.hwnd, &rc);
+    const int margin = (int)(16 * st.scale + 0.5);
+    const int gap = (int)(28 * st.scale + 0.5);
+    const int left = margin;
+    const int right = rc.right - margin;
+    int leftWidth = st.leftW;
+    int rightX = left + leftWidth + gap;
+    if (st.shellItems.empty()) {
+        leftWidth = right - left;
+        rightX = right;
+    }
+
+    int y0 = (int)(3 * st.scale + 0.5) + (int)(22 * st.scale + 0.5) + (int)(10 * st.scale + 0.5) +
+             (int)(18 * st.scale + 0.5);
+    int yLeft = y0;
+    int yRight = y0;
+    for (auto& row : st.rows) {
+        const int h = rowHeight(row.header, st.scale);
+        if (row.column == 0) {
+            row.rect = RECT{left, yLeft, left + leftWidth, yLeft + h};
+            yLeft += h;
+        } else {
+            row.rect = RECT{rightX, yRight, right, yRight + h};
+            yRight += h;
+        }
+    }
+
     const int bh = (int)(23 * st.scale + 0.5);
     const int bw = (int)(75 * st.scale + 0.5);
-    const int gap = (int)(6 * st.scale + 0.5);
+    const int buttonGap = (int)(6 * st.scale + 0.5);
     const int by = rc.bottom - (int)(10 * st.scale + 0.5) - bh;
     const int cancelX = rc.right - (int)(10 * st.scale + 0.5) - bw;
     st.cancelRect = RECT{cancelX, by, cancelX + bw, by + bh};
-    st.okRect = RECT{cancelX - bw - gap, by, cancelX - gap, by + bh};
+    st.okRect = RECT{cancelX - bw - buttonGap, by, cancelX - buttonGap, by + bh};
     st.closeRect = RECT{rc.right - (int)(20 * st.scale + 0.5), (int)(4 * st.scale + 0.5),
                         rc.right - (int)(4 * st.scale + 0.5), (int)(20 * st.scale + 0.5)};
 }
@@ -90,7 +145,13 @@ void drawCheck(Canvas& c, int x, int y, bool checked, double scale) {
     c.line(x + c.px(6), y + c.px(10), x + c.px(11), y + c.px(3), Theme::dark);
 }
 
-void drawDialog(Canvas& c, HWND hwnd, OptionsState& st) {
+bool rowChecked(const State& st, const Row& row) {
+    if (row.shellIndex >= 0)
+        return row.shellIndex < (int)st.shellVisible.size() && st.shellVisible[row.shellIndex];
+    return (st.mask & row.bits) == row.bits;
+}
+
+void drawDialog(Canvas& c, HWND hwnd, State& st) {
     RECT rc;
     GetClientRect(hwnd, &rc);
     c.fill(rc, Theme::face);
@@ -106,7 +167,7 @@ void drawDialog(Canvas& c, HWND hwnd, OptionsState& st) {
     GRADIENT_RECT gr{0, 1};
     GradientFill(c.dc(), v, 2, &gr, 1, GRADIENT_FILL_RECT_H);
     c.text(L"右键菜单设置", bar.left + c.px(4), bar.top + c.px(3), Theme::white, true);
-    c.text(L"勾选要显示的项目；7-Zip、Git 等 shell 扩展由 Windows 控制",
+    c.text(L"勾选要显示的项目；系统项来自注册表，可逐项隐藏",
            bar.left + c.px(6), bar.bottom + c.px(3), Theme::dim);
 
     RECT close = st.closeRect;
@@ -117,17 +178,17 @@ void drawDialog(Canvas& c, HWND hwnd, OptionsState& st) {
     c.line(close.right - c.px(4), close.top + c.px(4), close.left + c.px(4), close.bottom - c.px(4),
            Theme::dark);
 
-    for (int i = 0; i < kRowCount; ++i) {
-        const OptionRow& row = kRows[i];
-        RECT r = st.rows[i];
+    for (size_t i = 0; i < st.rows.size(); ++i) {
+        const Row& row = st.rows[i];
+        RECT r = row.rect;
         if (row.header) {
-            c.text(row.label, r.left, r.top + c.px(6), Theme::text, true);
+            c.textClip(row.label, RECT{r.left, r.top, r.right, r.top + c.px(22)}, Theme::text,
+                       Align::Left, true);
             c.hline(r.left, r.top + c.px(22), r.right - r.left, Theme::shadow);
             continue;
         }
-        if (st.hover == i) c.fill(r, Theme::faceHi);
-        const bool on = (st.mask & row.bits) == row.bits;
-        drawCheck(c, r.left, r.top + c.px(5), on, st.scale);
+        if (st.hover == (int)i) c.fill(r, Theme::faceHi);
+        drawCheck(c, r.left, r.top + c.px(5), rowChecked(st, row), st.scale);
         c.textClip(row.label, RECT{r.left + c.px(22), r.top, r.right, r.bottom}, Theme::text,
                    Align::Left);
     }
@@ -142,7 +203,7 @@ void drawDialog(Canvas& c, HWND hwnd, OptionsState& st) {
 }
 
 void paint(HWND hwnd) {
-    OptionsState* st = (OptionsState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    State* st = (State*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     if (!st) return;
     PAINTSTRUCT ps;
     HDC dc = BeginPaint(hwnd, &ps);
@@ -151,28 +212,33 @@ void paint(HWND hwnd) {
     EndPaint(hwnd, &ps);
 }
 
-void finish(OptionsState& st, bool accepted) {
+void finish(State& st, bool accepted) {
     st.accepted = accepted;
     st.done = true;
     DestroyWindow(st.hwnd);
 }
 
-void toggle(OptionsState& st, int row) {
-    const unsigned bits = kRows[row].bits;
-    if ((st.mask & bits) == bits) st.mask &= ~bits;
-    else st.mask |= bits;
-}
-
-int rowAt(OptionsState& st, POINT p) {
-    for (int i = 0; i < kRowCount; ++i) {
-        if (kRows[i].header) continue;
-        if (PtInRect(&st.rows[i], p)) return i;
+int rowAt(State& st, POINT p) {
+    for (size_t i = 0; i < st.rows.size(); ++i) {
+        if (st.rows[i].header) continue;
+        if (PtInRect(&st.rows[i].rect, p)) return (int)i;
     }
     return -1;
 }
 
+void toggle(State& st, int index) {
+    Row& row = st.rows[index];
+    if (row.shellIndex >= 0) {
+        if (row.shellIndex < (int)st.shellVisible.size())
+            st.shellVisible[row.shellIndex] = !st.shellVisible[row.shellIndex];
+        return;
+    }
+    if ((st.mask & row.bits) == row.bits) st.mask &= ~row.bits;
+    else st.mask |= row.bits;
+}
+
 LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    OptionsState* st = (OptionsState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    State* st = (State*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     switch (msg) {
     case WM_ERASEBKGND:
         return 1;
@@ -261,7 +327,8 @@ void ensureClass() {
 
 }  // namespace
 
-bool showMenuOptions(HWND owner, unsigned* mask) {
+bool showMenuOptions(HWND owner, unsigned* mask, const std::vector<std::wstring>& shellItems,
+                     std::vector<std::wstring>& hidden) {
     ensureClass();
 
     typedef UINT(WINAPI * GetDpiForWindowFn)(HWND);
@@ -271,33 +338,60 @@ bool showMenuOptions(HWND owner, unsigned* mask) {
     if (getDpi && owner) dpi = getDpi(owner);
     const double scale = dpi / 96.0;
 
+    State st;
+    st.owner = owner;
+    st.scale = scale;
+    st.mask = mask ? *mask : kMenuDefaults;
+    st.shellItems = shellItems;
+    st.shellVisible.assign(shellItems.size(), true);
+    for (size_t i = 0; i < shellItems.size(); ++i)
+        for (auto& h : hidden)
+            if (_wcsicmp(h.c_str(), shellItems[i].c_str()) == 0) st.shellVisible[i] = false;
+    buildRows(st);
+
     HDC screen = GetDC(nullptr);
     HDC measureDc = CreateCompatibleDC(screen);
-    int textW = 0;
+    int ownW = 0, shellW = 0;
     {
         Canvas c(measureDc, scale);
-        for (const auto& row : kRows) textW = std::max(textW, c.textWidth(row.label));
+        for (const auto& own : kOwn) ownW = std::max(ownW, c.textWidth(own.label) + (int)(30 * scale));
+        for (const auto& item : st.shellItems)
+            shellW = std::max(shellW, c.textWidth(item) + (int)(30 * scale));
     }
     DeleteDC(measureDc);
     ReleaseDC(nullptr, screen);
 
-    int w = std::max((int)(480 * scale), textW + (int)(110 * scale));
-    int h = (int)(3 * scale) + (int)(22 * scale) + (int)(10 * scale);
-    for (const auto& row : kRows) h += rowHeight(row.header, scale);
+    st.leftW = std::max((int)(300 * scale), ownW);
+    st.rightW = std::max((int)(240 * scale), shellW);
+    int w = (int)(2 * 16 * scale) + st.leftW + (int)(28 * scale) +
+            (st.shellItems.empty() ? 0 : st.rightW);
+    int h = (int)(3 * scale) + (int)(22 * scale) + (int)(10 * scale) + (int)(18 * scale);
+    int ownRows = 0, shellRows = st.shellItems.empty() ? 0 : (int)(22 * scale + 0.5);
+    for (const auto& own : kOwn) ownRows += rowHeight(own.header, scale);
+    for (const auto& item : st.shellItems) {
+        (void)item;
+        shellRows += rowHeight(false, scale);
+    }
+    h += std::max(ownRows, shellRows);
     h += (int)(10 * scale) + (int)(23 * scale) + (int)(10 * scale);
 
     RECT ownerRect{};
     if (owner) GetWindowRect(owner, &ownerRect);
-    const int x = owner ? ownerRect.left + ((ownerRect.right - ownerRect.left) - w) / 2 : 120;
-    const int y = owner ? ownerRect.top + ((ownerRect.bottom - ownerRect.top) - h) / 2 : 120;
+    int x = owner ? ownerRect.left + ((ownerRect.right - ownerRect.left) - w) / 2 : 120;
+    int y = owner ? ownerRect.top + ((ownerRect.bottom - ownerRect.top) - h) / 2 : 120;
+    MONITORINFO mi{sizeof(mi)};
+    if (GetMonitorInfoW(MonitorFromWindow(owner ? owner : GetDesktopWindow(),
+                                          MONITOR_DEFAULTTONEAREST),
+                        &mi)) {
+        if (h > mi.rcWork.bottom - mi.rcWork.top) h = mi.rcWork.bottom - mi.rcWork.top;
+        if (w > mi.rcWork.right - mi.rcWork.left) w = mi.rcWork.right - mi.rcWork.left;
+        x = std::clamp(x, (int)mi.rcWork.left, (int)mi.rcWork.right - w);
+        y = std::clamp(y, (int)mi.rcWork.top, (int)mi.rcWork.bottom - h);
+    }
 
-    OptionsState st;
-    st.owner = owner;
-    st.scale = scale;
-    st.mask = mask ? *mask : kMenuDefaults;
-    st.hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"MyOldComputerMenuOptions",
-                              L"右键菜单设置", WS_POPUP, x, y, w, h, owner, nullptr,
-                              GetModuleHandleW(nullptr), nullptr);
+    st.hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"MyOldComputerMenuOptions", L"右键菜单设置",
+                              WS_POPUP, x, y, w, h, owner, nullptr, GetModuleHandleW(nullptr),
+                              nullptr);
     if (!st.hwnd) return false;
     SetWindowLongPtrW(st.hwnd, GWLP_USERDATA, (LONG_PTR)&st);
     layout(st);
@@ -318,6 +412,12 @@ bool showMenuOptions(HWND owner, unsigned* mask) {
     if (owner) EnableWindow(owner, TRUE);
     if (prevFocus) SetFocus(prevFocus);
     else if (owner) SetForegroundWindow(owner);
-    if (st.accepted && mask) *mask = st.mask;
+    if (st.accepted) {
+        if (mask) *mask = st.mask;
+        hidden.clear();
+        for (size_t i = 0; i < st.shellItems.size(); ++i)
+            if (i < st.shellVisible.size() && !st.shellVisible[i])
+                hidden.push_back(st.shellItems[i]);
+    }
     return st.accepted;
 }

@@ -38,6 +38,7 @@ struct Settings {
     bool showHidden = false;
     bool useSystemIcons = true;
     unsigned menuMask = kMenuDefaults;
+    std::vector<std::wstring> hiddenMenuItems;  // shell menu labels the user hid
     std::vector<std::wstring> favorites;
 
     void load();

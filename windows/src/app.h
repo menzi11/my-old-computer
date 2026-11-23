@@ -175,6 +175,7 @@ public:
     void createShortcutForSelection();
     void showSelectionProperties();
     void sortBy(int column);
+    void openMenuSettings();
     bool performDrop(const std::vector<std::wstring>& paths, const std::wstring& folder);
 
     // Favorites

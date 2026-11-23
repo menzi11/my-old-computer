@@ -41,6 +41,7 @@ struct ViewState {
     int sortColumn = 0;
     bool showHidden = false;
     unsigned menuMask = kMenuDefaults;  // MenuOption flags from settings.h
+    std::vector<std::wstring> hidden;   // top-level labels to leave out
 };
 
 struct Result {
@@ -60,6 +61,10 @@ bool forwardMessage(UINT msg, WPARAM wp, LPARAM lp);
 // Used by --uitest: the final top-level labels of the menu that would be shown.
 std::vector<std::wstring> labels(const std::wstring& folder,
                                  const std::vector<std::wstring>& paths, const ViewState& state);
+
+// Top-level labels the shell itself contributes, for the settings dialog.
+std::vector<std::wstring> shellLabels(const std::wstring& folder,
+                                      const std::vector<std::wstring>& paths, bool background);
 
 // Used by --uitest: can the shell produce a menu for this path?
 bool canBuildItemMenu(const std::wstring& path);

@@ -13,6 +13,7 @@
 #include "dialog.h"
 #include "ids.h"
 #include "preview.h"
+#include "shellmenu.h"
 
 namespace {
 
@@ -345,6 +346,39 @@ void App::sortBy(int column) {
     fsx::sortEntries(entries, sortColumn, sortAsc);
     rebuildNameWidths();
     clampScroll();
+}
+
+void App::openMenuSettings() {
+    // Offer the shell's own labels (read from the registry by the shell) so
+    // they can be hidden individually, plus our own toggles.
+    std::vector<std::wstring> labels;
+    auto add = [&labels](const std::vector<std::wstring>& items) {
+        for (auto& text : items) {
+            if (text.empty()) continue;
+            if (text == L"查看" || text == L"排序方式" || text == L"分组依据" || text == L"刷新" ||
+                text == L"新建")
+                continue;  // replaced by our own working entries
+            if (std::find(labels.begin(), labels.end(), text) == labels.end())
+                labels.push_back(text);
+        }
+    };
+    add(shellmenu::shellLabels(current, {}, true));
+    const std::wstring parent = fsx::parentPath(current);
+    if (!parent.empty() && _wcsicmp(parent.c_str(), current.c_str()) != 0)
+        add(shellmenu::shellLabels(parent, {current}, false));
+    for (auto& e : entries) {
+        if (e.isDir) continue;
+        add(shellmenu::shellLabels(current, {e.path}, false));
+        break;
+    }
+    for (auto& e : entries) {
+        if (!selection.count(e.path)) continue;
+        add(shellmenu::shellLabels(current, {e.path}, false));
+        break;
+    }
+    std::sort(labels.begin(), labels.end());
+    if (showMenuOptions(hwnd, &settings.menuMask, labels, settings.hiddenMenuItems))
+        settings.save();
 }
 
 void App::newFolder() {
@@ -1246,9 +1280,7 @@ void App::performMenuAction(int id, const std::wstring& arg) {
     case ID_ADD_FAV_CURRENT: addFavorite(current); break;
     case ID_REMOVE_FAV: removeFavorite(contextFolder.empty() ? current : contextFolder); break;
     case ID_OPEN_TERMINAL: openTerminalForSelection(); break;
-    case ID_SETTINGS:
-        if (showMenuOptions(hwnd, &settings.menuMask)) settings.save();
-        break;
+    case ID_SETTINGS: openMenuSettings(); break;
     case ID_ABOUT: showAbout(hwnd); break;
     default:
         if (id >= ID_FAV_BASE) {

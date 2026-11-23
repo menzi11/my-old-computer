@@ -43,6 +43,13 @@ void Settings::load() {
     menuMask = (unsigned)wcstoul(
         iniRead(path, L"menu", L"mask", L"").c_str(), nullptr, 0);
     if (menuMask == 0) menuMask = kMenuDefaults;
+    hiddenMenuItems.clear();
+    for (int i = 0; i < 64; ++i) {
+        wchar_t key[16];
+        swprintf_s(key, L"hide%d", i);
+        std::wstring v = iniRead(path, L"menu", key, L"");
+        if (!v.empty()) hiddenMenuItems.push_back(v);
+    }
     favorites.clear();
     for (int i = 0; i < 64; ++i) {
         wchar_t key[16];
@@ -71,6 +78,14 @@ void Settings::save() const {
     WritePrivateProfileStringW(L"view", L"sysicons", useSystemIcons ? L"1" : L"0", path.c_str());
     swprintf_s(buf, L"0x%X", menuMask);
     WritePrivateProfileStringW(L"menu", L"mask", buf, path.c_str());
+    for (int i = 0; i < 64; ++i) {
+        wchar_t key[16];
+        swprintf_s(key, L"hide%d", i);
+        if (i < (int)hiddenMenuItems.size())
+            WritePrivateProfileStringW(L"menu", key, hiddenMenuItems[i].c_str(), path.c_str());
+        else
+            WritePrivateProfileStringW(L"menu", key, nullptr, path.c_str());
+    }
     WritePrivateProfileStringW(L"favorites", nullptr, nullptr, path.c_str());
     for (size_t i = 0; i < favorites.size() && i < 64; ++i) {
         wchar_t key[16];

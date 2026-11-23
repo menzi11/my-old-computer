@@ -203,14 +203,12 @@ void paintWindow(HWND hwnd) {
             g_app.paintDirty = false;
         }
         BitBlt(dc, 0, 0, rc.right, rc.bottom, g_paint.mem, 0, 0, SRCCOPY);
-        if (g_app.marquee) {
-            // Keep the rubber band on top of whatever area was repainted.
-            g_band = marqueeBand(g_app);
-            drawBandDots(dc, g_band);
-            g_bandVisible = true;
-        }
     }
     EndPaint(hwnd, &ps);
+    // The band must stay complete: after any repaint, erase it as a whole and
+    // draw it again from the current state (a partial redraw used to leave
+    // fragments of the previous rectangle behind).
+    if (g_app.marquee && g_paint.mem) drawBand(hwnd, g_app);
 }
 
 // Repaints individual rows: update the cached frame for those rows and let the
@@ -457,6 +455,7 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
     state.sortColumn = a.sortColumn;
     state.showHidden = a.showHidden;
     state.menuMask = a.settings.menuMask;
+    state.hidden = a.settings.hiddenMenuItems;
     shellmenu::Result result;
     if (a.settings.menuMask & kMenuShell)
         result = shellmenu::show(hwnd, folder, paths, screen, state);
@@ -489,9 +488,7 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
             break;
         case shellmenu::Command::Reveal: a.revealSelection(); break;
         case shellmenu::Command::CopyPath: a.copyPaths(); break;
-        case shellmenu::Command::Settings:
-            if (showMenuOptions(hwnd, &a.settings.menuMask)) a.settings.save();
-            break;
+        case shellmenu::Command::Settings: a.openMenuSettings(); break;
         case shellmenu::Command::None: break;
         }
         if (result.invokedShell) a.reload();

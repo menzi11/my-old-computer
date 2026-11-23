@@ -74,14 +74,15 @@ Switching views keeps the selection. Details rows have no full-row select: only
 clicking the icon or the file name picks the row, so the Size / Type / Date
 columns stay free for scrolling and rubber-band selection.
 
-**The real Explorer context menu** — right-clicking a file or folder hosts
-Windows' own shell menu, so 7-Zip, Git, your editors, Send To, Previous Versions
-and every other installed extension appears exactly as it does in Explorer.
-On top of that it adds this app's own commands (Quick View, Open in new window,
-Reveal in Explorer, Copy path, a terminal here, reliable Rename).  The tree
-opens the same menu for the folder under the pointer; the empty area keeps
-working View / Sort / Refresh / New commands.  Tools → Context menu settings
-lets you pick exactly which of these entries appear.
+**Explorer's commands in a Windows 98 menu** — right-clicking a file or folder
+asks the shell for its menu, then draws it with this app's own Win98 popup, so
+7-Zip, Git, your editors, Send To, Previous Versions and every other installed
+extension is there without the modern Windows look.  This app adds Quick View,
+Open in new window, Reveal in Explorer, Copy path, a terminal here and a
+reliable Rename.  The tree opens the same menu for the folder under the pointer;
+the empty area keeps working View / Sort / Refresh / New commands.  Tools →
+Context menu settings lists every entry - the app's own and the shell's, straight
+from the registry - and each one can be hidden.
 
 **A sidebar that knows the machine** — My Computer with every drive or mounted
 volume, folders that expand with `+` / `−`, a Favorites group, a draggable splitter
