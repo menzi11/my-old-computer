@@ -568,6 +568,7 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
     std::vector<std::wstring> paths;
     std::wstring folder = a.current;
     bool fromTree = false;
+    bool selectionChanged = false;
     if (a.sidebarVisible && PtInRect(&a.lay.sidebar, p)) {
         // The tree shows the very same shell menu as the file list does for
         // that folder, so the commands behave identically in both places.
@@ -575,6 +576,7 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
         if (row >= 0) {
             TreeNode* n = a.treeFlat[row];
             a.hoverTree = row;
+            selectionChanged = true;
             if (n->path.empty()) {
                 // Headers without a folder (我的电脑, 收藏夹) get a small menu of
                 // their own instead of one borrowed from the current directory.
@@ -607,15 +609,29 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
         // of a cell) is the folder background, not a neighbouring file.
         int row = -1;
         if (a.hitTestItem(p, &row)) {
-            if (!a.selection.count(a.entries[row].path)) selectOnly(a, row);
+            if (!a.selection.count(a.entries[row].path)) {
+                selectOnly(a, row);
+                selectionChanged = true;
+            }
             for (auto& e : a.entries)
                 if (a.selection.count(e.path)) paths.push_back(e.path);
             a.contextFolder = a.entries[row].isDir ? a.entries[row].path : L"";
         } else {
-            a.selection.clear();
+            if (!a.selection.empty()) {
+                a.selection.clear();
+                selectionChanged = true;
+            }
             a.contextFolder.clear();
         }
         a.contextIsFavorite = false;
+    }
+
+    if (selectionChanged) {
+        // The highlight must be on screen *under* the menu while it is up:
+        // the menu runs its own message loop, and without a fresh frame the
+        // paint handler would keep blitting the stale cache.
+        repaint(hwnd);
+        if (hwnd) UpdateWindow(hwnd);
     }
 
     POINT screen = p;
