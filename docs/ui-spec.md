@@ -108,8 +108,15 @@ the hand-drawn set.  macOS draws the icons in `Icons.swift` per extension.
   without an extension, one group per file extension); each is hidden in that
   group only, in the `[menu-bg]`, `[menu-folder]`, `[menu-file]` and
   `[menu-ext.<ext>]` sections of settings.ini.
-- New Folder and New Text Document are flat items of the empty-area menu: one
-  click, no submenu.
+- The empty-area menu starts with View, Sort by and Refresh, then **New** as
+  a submenu holding Folder and Text Document - Explorer's order, nothing flat.
+- F2 (and Rename) edits the name in place: the name's selection box becomes a
+  white field with a 1 px black frame, the name stays on exactly its pixels,
+  the base name is selected (a folder's whole name), Enter commits, Escape
+  cancels, losing focus commits. The field follows its row when the list
+  scrolls and is clipped like the row.
+- In every view the selection box is painted under the icon, never over it: a
+  selected row keeps its icon.
 
 ## Responsiveness contract
 
@@ -120,11 +127,10 @@ Lag is never traded for anything. For menus and hover feedback in particular:
   timer, grace period or delay stands between the pointer and the screen.
 - A submenu opens the moment its row is hovered and closes the moment the
   pointer leaves that row.
-- The one exception is the diagonal path from the opening row to its submenu:
-  while the straight line from the pointer's last position in that row to its
-  current position meets the submenu, the selection is held so the submenu can
-  be reached. Moving straight up or down selects the row under the pointer on
-  its first pixel; a corridor must never reach into the neighbouring rows.
+- There is no exception: no corridor, safe triangle or grace period. The row
+  under the pointer is the selected row, always. A pointer that crosses other
+  rows on its diagonal way to a submenu selects them; a submenu is reached by
+  moving right into it.
 
 ## Platform mapping
 

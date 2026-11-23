@@ -1183,6 +1183,15 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         renderApp(canvas, g_app);
         return 0;
     }
+    case WM_CTLCOLOREDIT:
+        // The rename field is white with black text like the list it sits in,
+        // whatever the system's window colours are.
+        if ((HWND)lp == a.renameEdit) {
+            SetTextColor((HDC)wp, Theme::text);
+            SetBkColor((HDC)wp, Theme::white);
+            return (LRESULT)GetStockObject(WHITE_BRUSH);
+        }
+        break;
     case WM_SETCURSOR: {
         if (LOWORD(lp) == HTCLIENT) {
             POINT p;
@@ -1449,7 +1458,7 @@ struct MenuDrive {
     int step = 0;
     int x0 = 10, yc0 = 0, yc1 = 0, yc2 = 0;  // probe points, client coords of the root
     int itemH = 0, margin = 0;
-    Seen afterA, afterB, backA, diagonal, vertical, plain;
+    Seen afterA, afterB, backA, diagonal, backAgain, vertical, plain;
 };
 
 MenuDrive g_drive;
@@ -1549,8 +1558,8 @@ void menuTestStep(HWND owner) {
         break;
     case 3: {
         d.backA = menuTestLook();
-        // Diagonal from A toward the lower part of its own submenu: the path
-        // crosses B's band on its way.
+        // Diagonal from A toward the lower part of its own submenu.  The path
+        // crosses B's band, and the last point is in B: no corridor holds A.
         RECT rc{};
         GetClientRect(d.root, &rc);
         const int xe = rc.right - d.margin - 1;
@@ -1562,15 +1571,20 @@ void menuTestStep(HWND owner) {
     }
     case 4:
         d.diagonal = menuTestLook();
-        post(d.root, WM_MOUSEMOVE, d.x0, d.yc1);  // straight down to B again
+        post(d.root, WM_MOUSEMOVE, d.x0, d.yc0);  // straight back up to A
         next(80);
         break;
     case 5:
+        d.backAgain = menuTestLook();
+        post(d.root, WM_MOUSEMOVE, d.x0, d.yc1);  // straight down to B again
+        next(80);
+        break;
+    case 6:
         d.vertical = menuTestLook();
         post(d.root, WM_MOUSEMOVE, d.x0, d.yc2);  // down to the plain item
         next(80);
         break;
-    case 6:
+    case 7:
         d.plain = menuTestLook();
         PostMessageW(d.root, WM_KEYDOWN, VK_ESCAPE, 0);
         next(150);
@@ -1588,6 +1602,143 @@ LRESULT CALLBACK menuTestProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+// --------------------------------------------------------- rename field test
+// A row painted into a bitmap, the row's origin at (0, 0): what the renderer
+// really drew, readable pixel by pixel.
+constexpr wchar_t kRenameTestClass[] = L"MyOldComputerRenameTest";
+constexpr COLORREF kSeen = RGB(255, 0, 255);  // the test window's background
+
+// The edit control's parent in this test: one flat colour, so that colour on
+// screen proves nothing is covering the window.
+LRESULT CALLBACK renameTestProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_ERASEBKGND) {
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        HBRUSH brush = CreateSolidBrush(kSeen);
+        FillRect((HDC)wp, &rc, brush);
+        DeleteObject(brush);
+        return 1;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+struct RowBitmap {
+    HDC dc = nullptr;
+    HBITMAP bmp = nullptr;
+    HGDIOBJ old = nullptr;
+    RECT rect{};  // the row's rect in window coordinates, 1 px larger all round
+    int width = 0, height = 0;
+
+    RowBitmap(const App& app, int row) {
+        RECT r = app.mode == ViewMode::Details ? app.listRowRect(row) : app.gridCellRect(row);
+        // One pixel of the neighbourhood all round: anything the row paints
+        // out there is painting over another row.
+        rect = RECT{r.left - 1, r.top - 1, r.right + 1, r.bottom + 1};
+        width = (int)(rect.right - rect.left);
+        height = (int)(rect.bottom - rect.top);
+        BITMAPINFOHEADER info{sizeof(BITMAPINFOHEADER)};
+        info.biWidth = width;
+        info.biHeight = -height;  // top-down
+        info.biPlanes = 1;
+        info.biBitCount = 32;
+        void* bits = nullptr;
+        bmp = CreateDIBSection(nullptr, (BITMAPINFO*)&info, DIB_RGB_COLORS, &bits, nullptr, 0);
+        dc = CreateCompatibleDC(nullptr);
+        old = SelectObject(dc, bmp);
+    }
+    RowBitmap(const RowBitmap&) = delete;
+    RowBitmap& operator=(const RowBitmap&) = delete;
+    ~RowBitmap() {
+        if (old) SelectObject(dc, old);
+        if (bmp) DeleteObject(bmp);
+        if (dc) DeleteDC(dc);
+    }
+
+    // The row as it is painted right now.
+    void paint(App& app, int row) {
+        RECT all{0, 0, width, height};
+        FillRect(dc, &all, (HBRUSH)GetStockObject(WHITE_BRUSH));
+        SetViewportOrgEx(dc, -rect.left, -rect.top, nullptr);
+        {
+            Canvas c(dc, app.scale);
+            renderItemRow(c, app, row);
+        }
+        SetViewportOrgEx(dc, 0, 0, nullptr);
+    }
+
+    // What the screen shows in the window rect `at`, copied over the row at
+    // that place.  The edit control is read this way: without visual styles a
+    // classic EDIT paints nothing on WM_PRINTCLIENT, so the display is the
+    // only honest copy of it.
+    void capture(const RECT& at, const POINT& screen) {
+        HDC display = GetDC(nullptr);
+        BitBlt(dc, at.left - rect.left, at.top - rect.top, (int)(at.right - at.left),
+               (int)(at.bottom - at.top), display, screen.x, screen.y, SRCCOPY);
+        ReleaseDC(nullptr, display);
+    }
+};
+
+struct PixelBox {
+    int left = 0, top = 0, right = 0, bottom = 0;  // right and bottom exclusive
+    int count = 0;                                  // matching pixels; 0 = none
+};
+
+bool sameBox(const PixelBox& a, const PixelBox& b) {
+    return a.count && b.count && a.left == b.left && a.top == b.top && a.right == b.right &&
+           a.bottom == b.bottom;
+}
+
+bool isNavy(COLORREF px) { return (px & 0xFFFFFF) == (Theme::select & 0xFFFFFF); }
+bool isBlack(COLORREF px) { return (px & 0xFFFFFF) == (Theme::dark & 0xFFFFFF); }
+
+// Ink of a name: a pixel at least 78% covered on every subpixel - the same
+// for the row the renderer painted and for the edit control read from the
+// screen, both black on white.
+bool blackInk(COLORREF px) {
+    return GetRValue(px) <= 56 && GetGValue(px) <= 56 && GetBValue(px) <= 56;
+}
+bool notWhite(COLORREF px) { return (px & 0xFFFFFF) != 0xFFFFFF; }
+
+// A pixel of an icon: anything but the selection blue, white and black, the
+// only colours a selection box that has swallowed its icon can be made of.
+bool iconInk(COLORREF px) {
+    return !isNavy(px) && !isBlack(px) && (px & 0xFFFFFF) != 0xFFFFFF;
+}
+
+// Bounding box of the pixels of `area` (bitmap coordinates) that `take` takes.
+PixelBox pixels(HDC dc, const RECT& area, bool (*take)(COLORREF)) {
+    PixelBox box;
+    for (int y = area.top; y < area.bottom; ++y) {
+        for (int x = area.left; x < area.right; ++x) {
+            const COLORREF px = GetPixel(dc, x, y);
+            if (px == CLR_INVALID || !take(px)) continue;
+            if (box.count++ == 0) {
+                box.left = x;
+                box.top = y;
+            } else {
+                if (x < box.left) box.left = x;
+                if (y < box.top) box.top = y;
+            }
+            if (x + 1 > box.right) box.right = x + 1;
+            if (y + 1 > box.bottom) box.bottom = y + 1;
+        }
+    }
+    return box;
+}
+
+// The same for a painted row, with `area` given in window coordinates; the
+// box comes back in window coordinates too.
+PixelBox find(const RowBitmap& bmp, const RECT& area, bool (*take)(COLORREF)) {
+    PixelBox box = pixels(bmp.dc, RECT{area.left - bmp.rect.left, area.top - bmp.rect.top,
+                                       area.right - bmp.rect.left, area.bottom - bmp.rect.top},
+                          take);
+    box.left += bmp.rect.left;
+    box.right += bmp.rect.left;
+    box.top += bmp.rect.top;
+    box.bottom += bmp.rect.top;
+    return box;
 }
 
 // Drives the same input handlers the window procedure uses, with synthesized
@@ -1692,6 +1843,21 @@ int runUiTest(App& app) {
     for (auto& it : background)
         if (it.id == ID_NEW_FOLDER) hasNewFolder = true;
     check(L"空白右键有新建文件夹", hasNewFolder);
+    // The real background menu, in Explorer's order, with New as a submenu.
+    {
+        shellmenu::ViewState state;
+        state.menuMask = kMenuDefaults;
+        std::vector<std::wstring> subs;
+        const std::vector<std::wstring> top = shellmenu::labels(app.current, {}, state, &subs);
+        const bool flat = std::find(top.begin(), top.end(), L"新建文件夹") != top.end() ||
+                          std::find(top.begin(), top.end(), L"新建文本文档") != top.end();
+        check(L"空白菜单依次为 查看/排序方式/刷新/新建",
+              top.size() >= 4 && top[0] == L"查看" && top[1] == L"排序方式" &&
+                  top[2] == L"刷新" && top[3] == L"新建");
+        check(L"新建是子菜单，里面是 文件夹 和 文本文档",
+              !flat && std::find(subs.begin(), subs.end(), L"新建/文件夹") != subs.end() &&
+                  std::find(subs.begin(), subs.end(), L"新建/文本文档") != subs.end());
+    }
     app.selection.clear();
 
     // List view: the seam to the right of a short name is blank canvas, the
@@ -1965,14 +2131,31 @@ int runUiTest(App& app) {
         app.clampScroll();
         { Canvas c(full, app.scale); renderApp(c, app); }  // reference render
         scrollFrame(slid, app, app.lay.listViewport, app.lay.listBar, jump);
-        bool same = true;
-        for (int y = 0; y < app.height && same; y += 2)
-            for (int x = 0; x < app.width; x += 2)
-                if (GetPixel(full, x, y) != GetPixel(slid, x, y)) {
-                    same = false;
-                    break;
+        // Measured values go into the label of a failed check.
+        int differing = 0, firstX = -1, firstY = -1;
+        COLORREF fullAt = 0, slidAt = 0;
+        for (int y = 0; y < app.height; y += 2)
+            for (int x = 0; x < app.width; x += 2) {
+                const COLORREF a = GetPixel(full, x, y), b = GetPixel(slid, x, y);
+                if (a == b) continue;
+                if (firstX < 0) {
+                    firstX = x;
+                    firstY = y;
+                    fullAt = a;
+                    slidAt = b;
                 }
-        check(L"滚动快路径与整帧一致", same);
+                ++differing;
+            }
+        const wchar_t* scrollFastName = L"滚动快路径与整帧一致";
+        const std::wstring scrollFastLabel =
+            differing
+                ? scrollFastName + std::wstring(L"：") + std::to_wstring(differing) +
+                      L" 处不同，首处在 " + std::to_wstring(firstX) + L"," +
+                      std::to_wstring(firstY) + L" 整帧 " +
+                      std::to_wstring(fullAt & 0xFFFFFF) + L" 滑动 " +
+                      std::to_wstring(slidAt & 0xFFFFFF)
+                : std::wstring(scrollFastName);
+        check(scrollFastLabel.c_str(), !differing);
         SelectObject(full, fullOld);
         SelectObject(slid, slidOld);
         DeleteObject(fullBmp);
@@ -1998,9 +2181,10 @@ int runUiTest(App& app) {
     check(dragLabel.c_str(), dragMs < 400);
 
     // The popup menu, with real windows: hover A, go down to B, back to A,
-    // travel the diagonal toward A's submenu, straight down to B once more,
-    // then on to a plain item.  What matters is the submenu that is actually
-    // on screen (A's has three rows, B's one) and the row actually painted.
+    // travel the diagonal that crosses B's row, back up to A, down to B once
+    // more, then on to a plain item.  What matters is the submenu that is
+    // actually on screen (A's has three rows, B's one) and the row actually
+    // painted.  The row under the pointer wins every time.
     {
         WNDCLASSEXW wc{sizeof(WNDCLASSEXW)};
         wc.lpfnWndProc = menuTestProc;
@@ -2039,7 +2223,7 @@ int runUiTest(App& app) {
             showHMenu(owner, menu, POINT{work.left + 40, work.top + 40});
             if (foreground) SetForegroundWindow(foreground);
             KillTimer(owner, kMenuTestTimer);
-            if (d.step >= 7) break;
+            if (d.step >= 8) break;
         }
         DestroyMenu(menu);
         DestroyWindow(owner);
@@ -2064,14 +2248,287 @@ int runUiTest(App& app) {
         const auto& B = d.afterB;
         const auto& R = d.backA;
         const auto& G = d.diagonal;
+        const auto& R2 = d.backAgain;
         const auto& V = d.vertical;
         const auto& P = d.plain;
         expect(L"悬停A弹出A的子菜单", A, topA, heightA, true, false);
         expect(L"垂直移到B切换为B的子菜单", B, topB, heightB, false, true);
         expect(L"回到A切回A的子菜单", R, topA, heightA, true, false);
-        expect(L"斜线穿过B行去子菜单保持A", G, topA, heightA, true, false);
+        expect(L"斜线划过B行就是B行，没有走廊", G, topB, heightB, false, true);
+        expect(L"再回到A仍是A的子菜单", R2, topA, heightA, true, false);
         expect(L"子菜单开着时垂直下移立即到B", V, topB, heightB, false, true);
         check(L"移到普通项关闭子菜单", !P.hasSub && !P.row0Hot && !P.row1Hot);
+    }
+
+    // The rename field, against what the row really paints.  Every view draws
+    // its row into a bitmap twice - selected, and while the name is edited -
+    // and the real edit control is read back from the screen into the second
+    // one.  The field must sit exactly on the name's selection box, and the
+    // name must leave the same ink as before F2, pixel for pixel.
+    {
+        // An Asian name as well: its glyphs come from a linked font.
+        HANDLE rf = CreateFileW((base + L"\\rename.txt").c_str(), GENERIC_WRITE, 0, nullptr,
+                                CREATE_ALWAYS, 0, nullptr);
+        if (rf != INVALID_HANDLE_VALUE) CloseHandle(rf);
+        CreateDirectoryW((base + L"\\重命名测试").c_str(), nullptr);
+        app.loadDirectory(base, false);  // earlier checks may have navigated away
+        WNDCLASSEXW wc{sizeof(WNDCLASSEXW)};
+        wc.lpfnWndProc = renameTestProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = kRenameTestClass;
+        RegisterClassExW(&wc);
+        // The edit control's parent: a small topmost window, put on screen
+        // for each capture and hidden again, its background the "not covered"
+        // colour.
+        HWND owner = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, kRenameTestClass, L"",
+                                     WS_POPUP, 0, 0, 10, 10, nullptr, nullptr, wc.hInstance,
+                                     nullptr);
+        app.hwnd = owner;
+        RECT work{};
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+        const POINT spot{work.left + 16, work.top + 16};  // where the edit is shown
+        auto editRect = [owner, &app]() {
+            RECT e{};
+            GetWindowRect(app.renameEdit, &e);
+            MapWindowPoints(nullptr, owner, (LPPOINT)&e, 2);
+            return e;
+        };
+        // Shows the edit in the owner near the screen corner and copies what
+        // the screen shows there into `into`, at the edit's own place `e`.
+        // (Where the edit sits on screen is no part of what it paints.)
+        // False when another window covers it: the ring around the edit is
+        // then not the owner's colour.
+        auto readEdit = [&](RowBitmap& into, const RECT& e) {
+            const int w = (int)(e.right - e.left), h = (int)(e.bottom - e.top);
+            const int pad = 20;
+            for (int attempt = 0; attempt < 5; ++attempt) {
+                SetWindowPos(owner, HWND_TOPMOST, spot.x - pad, spot.y - pad, w + 2 * pad,
+                             h + 2 * pad, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                SetWindowPos(app.renameEdit, nullptr, pad, pad, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+                HideCaret(app.renameEdit);  // a black bar is not part of the name
+                RedrawWindow(owner, nullptr, nullptr,
+                             RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+                HDC screen = GetDC(nullptr);
+                const bool seen = GetPixel(screen, spot.x - 2, spot.y - 2) == kSeen &&
+                                  GetPixel(screen, spot.x + w + 1, spot.y - 2) == kSeen &&
+                                  GetPixel(screen, spot.x - 2, spot.y + h + 1) == kSeen &&
+                                  GetPixel(screen, spot.x + w + 1, spot.y + h + 1) == kSeen;
+                if (seen) into.capture(e, spot);
+                ReleaseDC(nullptr, screen);
+                if (seen) return true;
+                Sleep(40);
+            }
+            return false;
+        };
+        auto boxOf = [](const PixelBox& b) {
+            return std::to_wstring(b.left) + L"," + std::to_wstring(b.top) + L"-" +
+                   std::to_wstring(b.right) + L"," + std::to_wstring(b.bottom);
+        };
+        auto rectOf = [](const RECT& r) {
+            return std::to_wstring(r.left) + L"," + std::to_wstring(r.top) + L"-" +
+                   std::to_wstring(r.right) + L"," + std::to_wstring(r.bottom);
+        };
+        std::wstring onBox, band, ink, line, kept, outside, icon;  // first failure of each
+        auto note = [](std::wstring& into, const std::wstring& what) {
+            if (into.empty()) into = what;
+        };
+        for (double scale : {1.0, 1.5}) {
+            app.setScale(scale);
+            app.relayout((int)(1100 * scale), (int)(760 * scale));
+            int lineHeight = 0;
+            {
+                HDC dc = CreateCompatibleDC(nullptr);
+                Canvas c(dc, scale);
+                lineHeight = c.lineHeight();
+                DeleteDC(dc);
+            }
+            const auto px = [scale](double v) { return (int)(v * scale + 0.5); };
+            const ViewMode views[] = {ViewMode::Details, ViewMode::List, ViewMode::Icons};
+            for (ViewMode view : views) {
+                app.setViewMode(view);
+                const bool icons = view == ViewMode::Icons;
+                // A details or list row is 19 px for an 18 px line at 100%
+                // scale: no pixel above and below the name for the frame's
+                // top and bottom lines, so they are left out there.
+                const bool framed = icons || app.m.rowH - lineHeight >= 2;
+                for (const wchar_t* name : {L"rename.txt", L"重命名测试"}) {
+                    const std::wstring path = base + L"\\" + name;
+                    int row = -1;
+                    for (int i = 0; i < (int)app.entries.size(); ++i)
+                        if (app.entries[i].path == path) row = i;
+                    if (row < 0) {
+                        note(onBox, L"missing " + path);
+                        continue;
+                    }
+                    const std::wstring where = std::to_wstring((int)(scale * 100)) + L"% 视图" +
+                                              std::to_wstring((int)view) + L" " + name + L"：";
+                    app.selection.clear();
+                    app.selection.insert(path);
+
+                    RowBitmap a(app, row);
+                    a.paint(app, row);
+                    const RECT r{a.rect.left + 1, a.rect.top + 1, a.rect.right - 1, a.rect.bottom - 1};
+                    // Where the name starts, by the renderer's own numbers;
+                    // the icon-view label is the only selection blue there.
+                    int nameX = r.left, scanTop = r.top;
+                    if (view == ViewMode::Details) nameX = r.left + px(22);
+                    else if (view == ViewMode::List) nameX = r.left + px(2) + px(16) + px(4);
+                    else scanTop = r.top + px(53);
+                    const RECT blueArea{r.left, scanTop, r.right, r.bottom};
+                    const PixelBox box = find(a, blueArea, isNavy);  // the selection box
+                    const int tw = row < (int)app.textWidths.size() ? app.textWidths[row] : 0;
+                    const RECT inkArea = icons ? RECT{box.left, box.top, box.right, box.bottom}
+                                               : RECT{nameX - 1, r.top, nameX + tw + 1, r.bottom};
+                    // The name as an unselected row paints it: black on white,
+                    // the edit's own colours.  (ClearType's fringes depend on
+                    // the colours, so the white-on-blue ink of the selected
+                    // row is not what the edit can be held to.)
+                    app.selection.clear();
+                    RowBitmap p(app, row);
+                    p.paint(app, row);
+                    const PixelBox inkP = find(p, inkArea, blackInk);
+
+                    app.beginRename(row);
+                    RowBitmap b(app, row);
+                    b.paint(app, row);
+                    // 1. The field is the selection box: 1 px of white and the
+                    //    frame before the name, the frame right after the box.
+                    //    (The scan stops at the box: the other columns' text
+                    //    is black too.)
+                    const RECT frameArea =
+                        icons ? blueArea
+                              : RECT{nameX - 3, r.top, std::min((int)r.right, box.right + 2), r.bottom};
+                    const PixelBox frame = find(b, frameArea, isBlack);
+                    const int wantLeft = icons ? box.left - 1 : nameX - 2;
+                    if (!(box.count && frame.count && frame.left == wantLeft &&
+                          frame.right == box.right + 1))
+                        note(onBox, where + L"选中框 " + boxOf(box) + L" 输入框 " + boxOf(frame) +
+                                        L"（应在 " + std::to_wstring(wantLeft) + L"-" +
+                                        std::to_wstring(box.right + 1) + L"）");
+                    // 2. Top and bottom lines exactly when the row has room,
+                    //    and nothing else between the two sides.
+                    const RECT e = editRect();
+                    if (frame.count) {
+                        // From scanTop: above an icon-view label sits the icon,
+                        // which has black of its own.
+                        const PixelBox inside =
+                            find(b, RECT{frame.left + 1, scanTop, frame.right - 1, r.bottom}, isBlack);
+                        const int lineW = frame.right - frame.left - 2;
+                        const bool right = framed ? inside.count == 2 * lineW &&
+                                                     inside.top == frame.top &&
+                                                     inside.bottom == frame.bottom
+                                                   : inside.count == 0;
+                        if (!(right && (frame.top < e.top) == framed))
+                            note(band, where + L"框 " + boxOf(frame) + L" 内部黑像素 " +
+                                            std::to_wstring(inside.count) + L" 文字顶=" +
+                                            std::to_wstring(e.top) + L" 上下边线应为" +
+                                            (framed ? L"有" : L"无"));
+                    }
+                    // 6. Nothing of it is painted over the neighbouring rows:
+                    //    the pixel ring around the row stays white.
+                    int spilled = 0;
+                    for (const RECT& strip :
+                         {RECT{r.left - 1, r.top - 1, r.right + 1, r.top},
+                          RECT{r.left - 1, r.bottom, r.right + 1, r.bottom + 1},
+                          RECT{r.left - 1, r.top, r.left, r.bottom},
+                          RECT{r.right, r.top, r.right + 1, r.bottom}})
+                        spilled += pixels(b.dc, RECT{strip.left - r.left + 1, strip.top - r.top + 1,
+                                                      strip.right - r.left + 1, strip.bottom - r.top + 1},
+                                          notWhite).count;
+                    if (spilled)
+                        note(outside, where + L"行外画了 " + std::to_wstring(spilled) + L" 像素");
+                    // 4. The edit fills the frame from side to side and is
+                    //    one text line tall, never more.
+                    if (!(frame.count && e.left == frame.left + 1 && e.right == frame.right - 1 &&
+                          e.bottom - e.top == lineHeight))
+                        note(line, where + L"输入框 " + rectOf(e) + L" 高 " +
+                                       std::to_wstring((int)(e.bottom - e.top)) + L"，框 " +
+                                       boxOf(frame) + L" 一行 " + std::to_wstring(lineHeight));
+                    // 5. The icon keeps its selection blue, and only the
+                    //    icon: none of it is left under or beside the field.
+                    //    An icon-view label is the field now.
+                    const PixelBox blue = find(b, blueArea, isNavy);
+                    const bool iconKept =
+                        icons ? blue.count == 0
+                              : blue.count && blue.left == box.left && blue.right == frame.left;
+                    if (!iconKept)
+                        note(kept, where + L"选中蓝 " + boxOf(blue) + L"（图标到 " +
+                                        std::to_wstring(frame.left) + L" 为止）");
+
+                    // 7. The icon is still there: the selection box goes
+                    //    under it, so a selected row is not a bare blue box.
+                    if (!icons) {
+                        const int x = r.left + px(view == ViewMode::Details ? 3 : 2);
+                        const RECT iconRect{x, r.top + px(2), x + px(16), r.top + px(2) + px(16)};
+                        if (!find(b, iconRect, iconInk).count)
+                            note(icon, where + L"选中行的图标被选中框盖住了");
+                    }
+
+                    // 3. The name stays on its pixels.  No selection
+                    //    highlight: black on white, like the reference.
+                    SendMessageW(app.renameEdit, EM_SETSEL, 0, 0);
+                    const bool shown = readEdit(b, e);
+                    const PixelBox inkB = find(b, e, blackInk);
+                    app.endRename(false);
+                    if (!shown)
+                        note(ink, where + L"测试窗口被别的窗口挡住");
+                    else if (!sameBox(inkP, inkB))
+                        note(ink, where + L"原名墨迹 " + boxOf(inkP) + L" 输入框 " + rectOf(e) +
+                                       L" 内 " + boxOf(inkB));
+                }
+            }
+        }
+        ShowWindow(owner, SW_HIDE);
+        auto verdict = [&check](const wchar_t* name, const std::wstring& failure) {
+            std::wstring label = name;
+            if (!failure.empty()) label += L"：" + failure;
+            check(label.c_str(), label == name);
+        };
+        verdict(L"重命名框正好盖住名称的选中框", onBox);
+        verdict(L"重命名框的上下边线只在行里有空像素时画", band);
+        verdict(L"输入框里的名字和原名逐像素重合", ink);
+        verdict(L"输入框填满框内，恰好一行高", line);
+        verdict(L"图标的选中高亮保留", kept);
+        verdict(L"重命名框不画到自己那一行以外", outside);
+        verdict(L"选中行的图标还在", icon);
+
+        // Scrolling moves the field with its row, and clips it like the row.
+        app.setScale(1.0);
+        app.relayout(1100, 300);  // a few rows fit
+        app.setViewMode(ViewMode::Details);
+        auto regionType = [&app]() {
+            HRGN rgn = CreateRectRgn(0, 0, 0, 0);
+            const int type = GetWindowRgn(app.renameEdit, rgn);
+            DeleteObject(rgn);
+            return type;
+        };
+        app.beginRename(2);
+        const RECT before = editRect();
+        app.scrollListBy(app.m.rowH * 2);  // the row is cut at the top of the list
+        const RECT cut = editRect();
+        const int cutType = regionType();
+        app.scrollListBy(app.m.rowH * 2);  // and gone
+        const int goneType = regionType();
+        app.scrollListBy(-app.m.rowH * 4);
+        const RECT back = editRect();
+        const int backType = regionType();
+        app.endRename(false);
+        const bool follows = before.top - cut.top == 2 * app.m.rowH;
+        const bool clips = cutType == SIMPLEREGION && goneType == NULLREGION &&
+                           backType == SIMPLEREGION && EqualRect(&back, &before);
+        const wchar_t* scrollName = L"重命名框跟着行滚动，行滚出列表它就不见，滚回来复原";
+        const std::wstring scrollLabel =
+            follows && clips
+                ? std::wstring(scrollName)
+                : scrollName + std::wstring(L"：位移 ") +
+                      std::to_wstring(before.top - cut.top) + L" 区域 " +
+                      std::to_wstring(cutType) + L"/" + std::to_wstring(goneType) + L"/" +
+                      std::to_wstring(backType) + L" 复位=" +
+                      std::to_wstring(EqualRect(&back, &before));
+        check(scrollLabel.c_str(), follows && clips);
+
+        app.hwnd = nullptr;
+        DestroyWindow(owner);
     }
 
     // Paint benchmark: catches accidental full-window repaint storms.

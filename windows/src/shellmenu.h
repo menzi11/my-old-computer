@@ -59,8 +59,10 @@ Result show(HWND owner, const std::wstring& folder, const std::vector<std::wstri
 bool forwardMessage(UINT msg, WPARAM wp, LPARAM lp);
 
 // Used by --uitest: the final top-level labels of the menu that would be shown.
+// With `subMenus`, also the entries of every submenu, as "submenu/entry".
 std::vector<std::wstring> labels(const std::wstring& folder,
-                                 const std::vector<std::wstring>& paths, const ViewState& state);
+                                 const std::vector<std::wstring>& paths, const ViewState& state,
+                                 std::vector<std::wstring>* subMenus = nullptr);
 
 // Top-level labels the shell itself contributes, for the settings dialog.
 std::vector<std::wstring> shellLabels(const std::wstring& folder,

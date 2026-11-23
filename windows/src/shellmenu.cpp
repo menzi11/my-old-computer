@@ -153,15 +153,19 @@ void addViewAndSort(HMENU menu, const ViewState& state) {
                            MF_BYCOMMAND);
     }
 
+    HMENU newMenu = nullptr;
+    if (wantNew) {
+        // Laid out like Explorer's: a "New" submenu holding the folder and the
+        // text document.  The shell's own New command needs Explorer's view to
+        // finish the rename, so these create the item themselves.
+        newMenu = CreatePopupMenu();
+        AppendMenuW(newMenu, MF_STRING, kNewFolder, L"文件夹");
+        AppendMenuW(newMenu, MF_STRING, kNewTextFile, L"文本文档");
+    }
+
     // Insert from the bottom up: each insert lands at position 0.
     InsertMenuW(menu, 0, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
-    if (wantNew) {
-        // Flat items, no submenu: one click, nothing to hover into.  The
-        // shell's New command needs Explorer's view to finish the rename, so
-        // these create the item themselves.
-        InsertMenuW(menu, 0, MF_BYPOSITION | MF_STRING, kNewTextFile, L"新建文本文档");
-        InsertMenuW(menu, 0, MF_BYPOSITION | MF_STRING, kNewFolder, L"新建文件夹");
-    }
+    if (newMenu) InsertMenuW(menu, 0, MF_BYPOSITION | MF_POPUP, (UINT_PTR)newMenu, L"新建");
     if (wantRefresh) InsertMenuW(menu, 0, MF_BYPOSITION | MF_STRING, kRefresh, L"刷新");
     if (sort) InsertMenuW(menu, 0, MF_BYPOSITION | MF_POPUP, (UINT_PTR)sort, L"排序方式");
     if (view) InsertMenuW(menu, 0, MF_BYPOSITION | MF_POPUP, (UINT_PTR)view, L"查看");
@@ -396,7 +400,7 @@ Result show(HWND owner, const std::wstring& folder, const std::vector<std::wstri
 }
 
 std::vector<std::wstring> labels(const std::wstring& folder, const std::vector<std::wstring>& paths,
-                                 const ViewState& state) {
+                                 const ViewState& state, std::vector<std::wstring>* subMenus) {
     std::vector<std::wstring> out;
     BuiltMenu built;
     if (!buildFor(nullptr, folder, paths, state, &built)) return out;
@@ -404,6 +408,13 @@ std::vector<std::wstring> labels(const std::wstring& folder, const std::vector<s
     for (int i = 0; i < count; ++i) {
         const std::wstring text = itemText(built.menu, i);
         if (!text.empty()) out.push_back(text);
+        if (!subMenus) continue;
+        // The entries of each submenu, as "submenu/entry".
+        const HMENU sub = GetSubMenu(built.menu, i);
+        for (int j = 0; sub && j < GetMenuItemCount(sub); ++j) {
+            const std::wstring child = itemText(sub, j);
+            if (!child.empty()) subMenus->push_back(text + L"/" + child);
+        }
     }
     return out;
 }

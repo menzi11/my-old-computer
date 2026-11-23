@@ -3,11 +3,11 @@
 #ifndef MOC_VERSION_H
 #define MOC_VERSION_H
 
-#define MOC_VERSION_QUAD 2, 9, 11, 0
-#define MOC_VERSION_TEXT "2.9.11.0"
+#define MOC_VERSION_QUAD 2, 9, 12, 0
+#define MOC_VERSION_TEXT "2.9.12.0"
 
 #ifndef RC_INVOKED
-#define MOC_VERSION_DISPLAY L"2.9.11"
+#define MOC_VERSION_DISPLAY L"2.9.12"
 #endif
 
 #endif  // MOC_VERSION_H

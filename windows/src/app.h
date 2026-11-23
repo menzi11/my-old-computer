@@ -51,6 +51,13 @@ struct MenuItem {
     std::wstring shortcut;
 };
 
+// A name being edited in place (see App::renameField).
+struct RenameField {
+    RECT frame{};   // the white field and its 1 px frame, over the name's selection box
+    RECT edit{};    // the edit control: exactly the line the row paints its name on
+    int inset = 0;  // white between the frame and the name, so the name does not move
+};
+
 class App {
 public:
     HWND hwnd = nullptr;
@@ -204,7 +211,8 @@ public:
     // name pre-selected.  commit=false restores the old name.
     void beginRename(int row);
     void endRename(bool commit);
-    RECT renameRect(int row) const;  // where the edit sits, per view mode
+    RenameField renameField(int row) const;
+    void placeRenameEdit();
 
     // Favorites
     void addFavorite(const std::wstring& path);

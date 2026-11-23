@@ -85,6 +85,12 @@ void App::setScale(double s) {
                      lay.addrField.right - lay.addrField.left - 4,
                      lay.addrField.bottom - lay.addrField.top - 4, SWP_NOACTIVATE);
     }
+    // The rename edit makes its own font at the current size: drop the old
+    // one, or the next rename shows the previous DPI's smaller text.
+    if (renameFont) {
+        DeleteObject(renameFont);
+        renameFont = nullptr;
+    }
 }
 
 void App::relayout(int w, int h) {
@@ -401,7 +407,7 @@ void App::openMenuSettings() {
             if (t.empty()) continue;
             if (background) {
                 if (t == L"查看" || t == L"排序方式" || t == L"分组依据" || t == L"刷新" ||
-                    t == L"新建" || t == L"新建文件夹" || t == L"新建文本文档")
+                    t == L"新建")
                     continue;
             } else if (t == L"重命名") {
                 continue;
@@ -987,10 +993,12 @@ void App::refreshAfterChange() {
 
 // ---------------------------------------------------------------- geometry
 
+namespace {
+
 // Text measurement for the custom chrome.  Geometry and hit testing stay
-// identical to what the renderer draws; the measurement DC and font are kept
-// for the process lifetime so hit tests cost one GetTextExtentPoint32 call.
-int measureUiText(const std::wstring& s, int fontPx) {
+// identical to what the renderer draws: the same font the Canvas selects, on
+// a memory DC kept for the process lifetime so a measurement costs one call.
+HDC uiTextDc(int fontPx) {
     static HDC dc = nullptr;
     static HFONT font = nullptr;
     static int px = -1;
@@ -1009,7 +1017,22 @@ int measureUiText(const std::wstring& s, int fontPx) {
             px = fontPx;
         }
     }
-    if (!dc || !font) return (int)s.size() * fontPx / 2;
+    return font ? dc : nullptr;
+}
+
+// One line of UI text: the height DrawText centres in a row, and the height
+// the rename edit is given so its line lands exactly there.
+int uiLineHeight(int fontPx) {
+    TEXTMETRICW tm{};
+    if (!GetTextMetricsW(uiTextDc(fontPx), &tm)) return fontPx;
+    return tm.tmHeight;
+}
+
+}  // namespace
+
+int measureUiText(const std::wstring& s, int fontPx) {
+    const HDC dc = uiTextDc(fontPx);
+    if (!dc) return (int)s.size() * fontPx / 2;
     SIZE sz{};
     GetTextExtentPoint32W(dc, s.c_str(), (int)s.size(), &sz);
     return sz.cx;
@@ -1216,11 +1239,7 @@ void App::clampScroll() {
     clamp(gridScroll, gridContentHeight(), gridView);
     clamp(treeScroll, treeContentHeight(), treeView);
     // Scrolling moves the row; keep the in-place editor on top of its name.
-    if (renaming && renameEdit) {
-        RECT r = renameRect(renameRow);
-        SetWindowPos(renameEdit, HWND_TOP, r.left, r.top, std::max(60L, r.right - r.left),
-                     r.bottom - r.top, SWP_NOACTIVATE);
-    }
+    if (renaming) placeRenameEdit();
 }
 
 void App::scrollListBy(int delta) {
@@ -1553,47 +1572,104 @@ LRESULT CALLBACK renameEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 }  // namespace
 
-// Where the edit control sits: exactly over the row's name, in every view.
-RECT App::renameRect(int row) const {
+// The field a name is edited in: the box the selection paints behind that
+// name (the same numbers drawDetailsRow / drawGridCell use), 1 px larger all
+// round for its frame and never narrower than a name can be typed into.  So
+// F2 swaps the name's blue box for a white field and nothing else moves.
+RenameField App::renameField(int row) const {
+    const int tw = row >= 0 && row < (int)textWidths.size() ? textWidths[row] : 0;
+    const int lh = uiLineHeight((int)(14.6667 * scale + 0.5));
+    const int minW = (int)(64 * scale + 0.5);
+    RECT room{};  // the field never leaves the row (or the cell) it belongs to
+    int nameX = 0, lineTop = 0, left = 0, right = 0, inset = 1;
+    const auto rise = [](const RECT& r) { return (int)(r.bottom - r.top); };
     if (mode == ViewMode::Details) {
-        RECT r = listRowRect(row);
-        return RECT{r.left + (int)(22 * scale + 0.5), r.top + 1,
-                    std::min(r.left + lay.nameW - 4, r.right - 2), r.bottom - 1};
+        const RECT r = listRowRect(row);
+        nameX = r.left + (int)(22 * scale + 0.5);
+        lineTop = r.top + std::max(0, (rise(r) - lh) / 2);
+        right = r.left + std::min((int)lay.nameW, nameExtent(row)) + 1;
+        room = RECT{r.left, r.top, r.left + lay.nameW, r.bottom};
+    } else if (mode == ViewMode::List) {
+        const RECT r = gridCellRect(row);
+        nameX = r.left + (int)(2 * scale + 0.5) + (int)(16 * scale + 0.5) + (int)(4 * scale + 0.5);
+        lineTop = r.top + std::max(0, (rise(r) - lh) / 2);
+        right = nameX + tw + (int)(3 * scale + 0.5) + 1;
+        room = RECT{r.left, r.top, r.right - (int)(4 * scale + 0.5), r.bottom};
+    } else {
+        // Icons: the label under the icon, centred in the cell.
+        const RECT r = gridCellRect(row);
+        const int bandTop = r.top + (int)(54 * scale + 0.5);
+        const int bandH = std::max(0, (int)(r.bottom - (int)(2 * scale + 0.5)) - bandTop);
+        const int labelW = std::min(tw, (int)(r.right - r.left) - (int)(10 * scale + 0.5));
+        nameX = (r.left + r.right - labelW) / 2;
+        lineTop = bandTop + std::max(0, (bandH - lh) / 2);
+        inset = (int)(3 * scale + 0.5);
+        right = nameX + labelW + inset + 1;
+        room = r;
     }
-    RECT r = gridCellRect(row);
-    if (mode == ViewMode::List) {
-        const int s16 = (int)(16 * scale + 0.5);
-        const int left = r.left + (int)(2 * scale + 0.5) + s16 + (int)(4 * scale + 0.5);
-        const int tw = row < (int)textWidths.size() ? textWidths[row] : 0;
-        return RECT{left, r.top + 1, left + tw + (int)(40 * scale + 0.5), r.bottom - 1};
+    left = nameX - inset - 1;
+    if (right - left < minW) {
+        if (mode == ViewMode::Icons) left = (room.left + room.right) / 2 - minW / 2;  // still under the icon
+        right = left + minW;
     }
-    // Icons: the label band under the icon.
-    return RECT{r.left + (int)(2 * scale + 0.5), r.top + (int)(54 * scale + 0.5),
-                r.right - (int)(2 * scale + 0.5), r.bottom - 1};
+    left = std::max(left, (int)room.left);
+    right = std::min(right, (int)room.right);
+
+    RenameField f;
+    f.edit = RECT{left + 1, lineTop, right - 1, lineTop + lh};
+    // The frame's top and bottom lines need a pixel above and below the name
+    // line.  A row without them gets the two sides only, running the row's
+    // full height like its selection box - never a pixel of its neighbours.
+    const bool band = lineTop > room.top && lineTop + lh < room.bottom;
+    f.frame = band ? RECT{left, lineTop - 1, right, lineTop + lh + 1}
+                   : RECT{left, room.top, right, room.bottom};
+    f.inset = nameX - f.edit.left;
+    return f;
+}
+
+// Puts the edit on its name's line and keeps it inside the list like the row
+// it belongs to: scrolling moves it with the row and clips it at the edge.
+void App::placeRenameEdit() {
+    if (!renameEdit) return;
+    const RECT e = renameField(renameRow).edit;
+    const int w = std::max(1, (int)(e.right - e.left));
+    const int h = std::max(1, (int)(e.bottom - e.top));
+    SetWindowPos(renameEdit, HWND_TOP, e.left, e.top, w, h, SWP_NOACTIVATE);
+    const RECT vp = mode == ViewMode::Details ? lay.listViewport : lay.gridViewport;
+    // The list clips its rows to its viewport; the edit is a child window, so
+    // it is clipped the same way instead of floating over the header.
+    const int top = std::max(0, (int)(vp.top - e.top));
+    const int bottom = std::min(h, (int)(vp.bottom - e.top));
+    HRGN region =
+        top < bottom ? CreateRectRgn(0, top, w, bottom) : CreateRectRgn(0, 0, 0, 0);  // scrolled out
+    SetWindowRgn(renameEdit, region, TRUE);  // the system owns the region from here
 }
 
 void App::beginRename(int row) {
     if (renaming) endRename(false);
     if (row < 0 || row >= (int)entries.size()) return;
+    const RenameField f = renameField(row);
+    const RECT& r = f.edit;
+    if (r.right - r.left < 8 || r.bottom - r.top < 4) return;  // no room to type in
     renaming = true;
     renameRow = row;
     // Keep the row highlighted while its name is edited.
     selection.clear();
     selection.insert(entries[row].path);
     selAnchor = row;
-    RECT r = renameRect(row);
     renameEdit = CreateWindowExW(
         0, L"EDIT", entries[row].name.c_str(),
-        WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, r.left, r.top,
-        std::max(60L, r.right - r.left), r.bottom - r.top, hwnd, nullptr,
-        GetModuleHandleW(nullptr), nullptr);
+        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, r.left, r.top, r.right - r.left,
+        r.bottom - r.top, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
     if (!renameFont)
         renameFont = CreateFontW(-(int)(14.6667 * scale + 0.5), 0, 0, 0, FW_NORMAL, 0, 0, 0,
                                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                  CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Tahoma");
     if (renameEdit) {
         if (renameFont) SendMessageW(renameEdit, WM_SETFONT, (WPARAM)renameFont, TRUE);
-        SendMessageW(renameEdit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(1, 1));
+        SendMessageW(renameEdit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN,
+                     MAKELPARAM(f.inset, f.inset));
+        placeRenameEdit();  // a row half scrolled out gets a half edit, not one over the header
         g_renameOwner = this;
         g_renameOldProc =
             (WNDPROC)SetWindowLongPtrW(renameEdit, GWLP_WNDPROC, (LONG_PTR)renameEditProc);

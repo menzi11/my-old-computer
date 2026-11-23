@@ -284,12 +284,30 @@ void drawStatusBar(Canvas& c, App& a) {
 
 // ---------------------------------------------------------------- content
 
+// True for the row whose name is being edited in place.
+bool renamingRow(const App& a, int i) { return a.renaming && a.renameRow == i; }
+
+// The rename field (App::renameField): white, over the name's selection box,
+// framed in black - all round when the row has a pixel to spare above and
+// below the name, down its two sides only when it has not.
+void drawRenameField(Canvas& c, const App& a, int i) {
+    const RenameField f = a.renameField(i);
+    c.fill(f.frame, Theme::white);
+    if (f.frame.top < f.edit.top) {
+        c.frame(f.frame, Theme::dark);
+    } else {
+        c.vline(f.frame.left, f.frame.top, f.frame.bottom - f.frame.top, Theme::dark);
+        c.vline(f.frame.right - 1, f.frame.top, f.frame.bottom - f.frame.top, Theme::dark);
+    }
+}
+
 // One list row; also used to repaint a single row while a rubber band is
 // dragged, so selection feedback costs one row instead of the whole window.
 void drawDetailsRow(Canvas& c, App& a, int i) {
     RECT r = a.listRowRect(i);
     const Entry& e = a.entries[i];
     const bool sel = a.selection.count(e.path) > 0;
+    const bool editing = renamingRow(a, i);
     c.fill(r, Theme::white);
     const int extent = std::min(a.lay.nameW, a.nameExtent(i));
     if (sel) c.fill(RECT{r.left, r.top, r.left + extent, r.bottom}, Theme::select);
@@ -304,7 +322,7 @@ void drawDetailsRow(Canvas& c, App& a, int i) {
         }
     }
     RECT nameRect{r.left + c.px(22), r.top, r.left + a.lay.nameW - c.px(4), r.bottom};
-    c.textClip(e.name, nameRect, sel ? Theme::white : Theme::text, Align::Left);
+    if (!editing) c.textClip(e.name, nameRect, sel ? Theme::white : Theme::text, Align::Left);
     if (e.hasSize)
         c.textClip(fsx::formatSize(e.size),
                    RECT{a.lay.colX[1], r.top, a.lay.colX[1] + a.lay.colW[1] - c.px(8), r.bottom},
@@ -316,6 +334,7 @@ void drawDetailsRow(Canvas& c, App& a, int i) {
         c.textClip(fsx::formatDate(e.mtime),
                    RECT{a.lay.colX[3] + c.px(5), r.top, a.lay.colX[3] + a.lay.colW[3], r.bottom},
                    Theme::text, Align::Left);
+    if (editing) drawRenameField(c, a, i);
 }
 
 void drawDetails(Canvas& c, App& a) {
@@ -375,16 +394,21 @@ void drawGridCell(Canvas& c, App& a, int i) {
     if (a.mode == ViewMode::List) {
         RECT iconRect{r.left + c.px(2), r.top + c.px(2), r.left + c.px(2) + s16,
                       r.top + c.px(2) + s16};
-        if (!drawShellIcon(c, a, iconRect, e.path, e.isDir)) {
-            if (e.isDir) Icon::folder(c, iconRect);
-            else Icon::file(c, iconRect, fsx::extensionLower(e.name));
-        }
         const int textLeft = iconRect.right + c.px(4);
         std::wstring label = ellipsize(c, e.name, (int)(r.right - c.px(4)) - textLeft);
+        // The selection box goes under the icon, never over it.
         if (sel) {
             int tw = c.textWidth(label);
             c.fill(RECT{r.left + c.px(1), r.top, textLeft + tw + c.px(3), r.bottom},
                    Theme::select);
+        }
+        if (!drawShellIcon(c, a, iconRect, e.path, e.isDir)) {
+            if (e.isDir) Icon::folder(c, iconRect);
+            else Icon::file(c, iconRect, fsx::extensionLower(e.name));
+        }
+        if (renamingRow(a, i)) {
+            drawRenameField(c, a, i);
+            return;
         }
         c.textClip(label, RECT{textLeft, r.top, r.right - c.px(2), r.bottom},
                    sel ? Theme::white : Theme::text, Align::Left);
@@ -412,6 +436,10 @@ void drawGridCell(Canvas& c, App& a, int i) {
     const int lx = (r.left + r.right - tw) / 2;
     const int ly = bandTop + std::max(0, (bandH - lh) / 2);
     if (sel) c.fill(RECT{lx - c.px(3), ly, lx + tw + c.px(3), ly + lh}, Theme::select);
+    if (renamingRow(a, i)) {
+        drawRenameField(c, a, i);
+        return;
+    }
     c.text(label, lx, ly, sel ? Theme::white : Theme::text);
 }
 
