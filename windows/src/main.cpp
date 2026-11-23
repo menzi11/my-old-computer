@@ -218,37 +218,121 @@ void paintWindow(HWND hwnd) {
     if (g_app.marquee && g_paint.mem) drawBand(hwnd, g_app);
 }
 
-// Repaints individual rows: update the cached frame for those rows and let the
-// paint handler blit them, instead of re-rendering the whole window.
-void repaintRows(HWND hwnd, App& a, const std::vector<int>& rows) {
-    if (rows.empty()) return;
+// Re-renders one rectangle of the cached frame from the current state and
+// shows it at once: the general dirty-rect primitive.  Cheap because
+// renderApp clipped to r only rasterizes r's pixels, and correct because
+// renderApp is a pure function of App's state.
+void repaintRegion(HWND hwnd, App& a, const RECT& r) {
+    if (r.right <= r.left || r.bottom <= r.top) return;
     if (!g_paint.mem) {
         repaint(hwnd);
         return;
     }
-    HDC window = hwnd ? GetDC(hwnd) : nullptr;
+    const int saved = SaveDC(g_paint.mem);
+    IntersectClipRect(g_paint.mem, r.left, r.top, r.right, r.bottom);
+    {
+        Canvas c(g_paint.mem, a.scale);
+        renderApp(c, a);
+    }
+    RestoreDC(g_paint.mem, saved);
+    if (hwnd) {
+        // Blit immediately: while the mouse keeps moving, WM_PAINT is starved.
+        HDC dc = GetDC(hwnd);
+        if (dc) {
+            BitBlt(dc, r.left, r.top, r.right - r.left, r.bottom - r.top, g_paint.mem, r.left,
+                   r.top, SRCCOPY);
+            ReleaseDC(hwnd, dc);
+        }
+    }
+}
+
+// Repaints individual rows: update the cached frame for those rows and let the
+// paint handler blit them, instead of re-rendering the whole window.
+void repaintRows(HWND hwnd, App& a, const std::vector<int>& rows) {
+    if (rows.empty()) return;
     const RECT& vp = a.mode == ViewMode::Details ? a.lay.listViewport : a.lay.gridViewport;
     for (int i : rows) {
         RECT r = a.mode == ViewMode::Details ? a.listRowRect(i) : a.gridCellRect(i);
         RECT clip{};
         if (!IntersectRect(&clip, &r, &vp)) continue;
-        const int saved = SaveDC(g_paint.mem);
-        IntersectClipRect(g_paint.mem, clip.left, clip.top, clip.right, clip.bottom);
-        {
-            Canvas c(g_paint.mem, a.scale);
-            renderItemRow(c, a, i);
-        }
-        RestoreDC(g_paint.mem, saved);
-        if (window) {
-            // Blit immediately: while the mouse keeps moving, WM_PAINT is
-            // starved, so waiting for it left the rows unhighlighted.
-            BitBlt(window, clip.left, clip.top, clip.right - clip.left, clip.bottom - clip.top,
-                   g_paint.mem, clip.left, clip.top, SRCCOPY);
-        } else if (hwnd) {
-            InvalidateRect(hwnd, &clip, FALSE);
+        repaintRegion(hwnd, a, clip);
+    }
+}
+
+// ---------------------------------------------------------------- scrolling
+
+// The scroll fast path, kept free of window state so tests can verify it
+// against a full render: slides the cached viewport content by dy pixels and
+// re-renders only the exposed strip (plus extra rects such as the scrollbar,
+// whose knob moved).  Rows are position-independent, so the slid band is
+// pixel-identical to a full re-render.
+void scrollFrame(HDC dc, App& a, const RECT& vp, const RECT& extra, int dy) {
+    const int viewH = vp.bottom - vp.top;
+    BitBlt(dc, vp.left, vp.top + std::max(0, -dy), vp.right - vp.left, viewH - std::abs(dy), dc,
+           vp.left, vp.top + std::max(0, dy), SRCCOPY);
+    const RECT strip = dy > 0 ? RECT{vp.left, vp.bottom - dy, vp.right, vp.bottom}
+                              : RECT{vp.left, vp.top, vp.right, vp.top - dy};
+    HRGN rgn = CreateRectRgn(strip.left, strip.top, strip.right, strip.bottom);
+    HRGN more = CreateRectRgn(extra.left, extra.top, extra.right, extra.bottom);
+    CombineRgn(rgn, rgn, more, RGN_OR);
+    DeleteObject(more);
+    const int saved = SaveDC(dc);
+    SelectClipRgn(dc, rgn);
+    DeleteObject(rgn);
+    {
+        Canvas c(dc, a.scale);
+        renderApp(c, a);
+    }
+    RestoreDC(dc, saved);
+}
+
+// Scrolls one pane (1 list, 2 grid, 3 tree) by delta and repaints through the
+// cached frame instead of re-rendering the whole window - the difference
+// between a wheel notch costing one strip and costing a 4K frame.
+void scrollPaneAndRepaint(HWND hwnd, App& a, int pane, int delta) {
+    const int before = pane == 1 ? a.listScroll : pane == 2 ? a.gridScroll : a.treeScroll;
+    if (pane == 1) a.scrollListBy(delta);
+    else if (pane == 2) a.scrollGridBy(delta);
+    else a.scrollTreeBy(delta);
+    const int after = pane == 1 ? a.listScroll : pane == 2 ? a.gridScroll : a.treeScroll;
+    const int dy = after - before;
+    if (dy == 0) return;  // already at the end (or a zero-length wheel step)
+    const RECT vp = pane == 1   ? a.lay.listViewport
+                    : pane == 2 ? a.lay.gridViewport
+                                : a.lay.treeViewport;
+    const RECT bar = pane == 1   ? a.lay.listBar
+                     : pane == 2 ? a.lay.gridBar
+                                 : a.lay.treeBar;
+    const int viewH = vp.bottom - vp.top;
+    if (!g_paint.mem || a.paintDirty || std::abs(dy) >= viewH) {
+        repaint(hwnd);
+        return;
+    }
+    scrollFrame(g_paint.mem, a, vp, bar, dy);
+    if (hwnd) {
+        HDC dc = GetDC(hwnd);
+        if (dc) {
+            BitBlt(dc, vp.left, vp.top, vp.right - vp.left, viewH, g_paint.mem, vp.left, vp.top,
+                   SRCCOPY);
+            BitBlt(dc, bar.left, bar.top, bar.right - bar.left, bar.bottom - bar.top, g_paint.mem,
+                   bar.left, bar.top, SRCCOPY);
+            ReleaseDC(hwnd, dc);
         }
     }
-    if (window) ReleaseDC(hwnd, window);
+}
+
+// Repaints the rows whose selection state changed plus the status panel that
+// counts them - a click must not cost a full-window render.
+void repaintSelectionChange(HWND hwnd, App& a, const std::set<std::wstring>& before) {
+    std::vector<int> rows;
+    for (int i = 0; i < (int)a.entries.size(); ++i) {
+        const bool was = before.count(a.entries[i].path) != 0;
+        const bool now = a.selection.count(a.entries[i].path) != 0;
+        if (was != now) rows.push_back(i);
+    }
+    if (rows.empty()) return;  // nothing visible changed
+    repaintRows(hwnd, a, rows);
+    repaintRegion(hwnd, a, a.lay.statusLeft);
 }
 
 // ---------------------------------------------------------------- selection
@@ -590,8 +674,6 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
 // ---------------------------------------------------------------- input
 
 void onMouseMove(HWND hwnd, App& a, POINT p) {
-    bool changed = false;
-
     if (a.splitterDrag) {
         int dx = (int)((p.x - a.splitterStartX) / std::max(0.01, a.scale));
         int minSw = 120;
@@ -605,19 +687,21 @@ void onMouseMove(HWND hwnd, App& a, POINT p) {
     if (a.scrollDrag) {
         int delta = p.y - a.scrollDragStartY;
         if (a.scrollDrag == 1) {
-            a.listScroll = scrollbar::positionFromDrag(a.lay.listBar, a.m, a.listContentHeight(),
-                                                      a.lay.listViewport.bottom - a.lay.listViewport.top,
-                                                      a.scrollDragStartPos, delta);
+            int pos = scrollbar::positionFromDrag(a.lay.listBar, a.m, a.listContentHeight(),
+                                                  a.lay.listViewport.bottom - a.lay.listViewport.top,
+                                                  a.scrollDragStartPos, delta);
+            scrollPaneAndRepaint(hwnd, a, 1, pos - a.listScroll);
         } else if (a.scrollDrag == 2) {
-            a.gridScroll = scrollbar::positionFromDrag(a.lay.gridBar, a.m, a.gridContentHeight(),
-                                                      a.lay.gridViewport.bottom - a.lay.gridViewport.top,
-                                                      a.scrollDragStartPos, delta);
+            int pos = scrollbar::positionFromDrag(a.lay.gridBar, a.m, a.gridContentHeight(),
+                                                  a.lay.gridViewport.bottom - a.lay.gridViewport.top,
+                                                  a.scrollDragStartPos, delta);
+            scrollPaneAndRepaint(hwnd, a, 2, pos - a.gridScroll);
         } else {
-            a.treeScroll = scrollbar::positionFromDrag(a.lay.treeBar, a.m, a.treeContentHeight(),
-                                                      a.lay.treeViewport.bottom - a.lay.treeViewport.top,
-                                                      a.scrollDragStartPos, delta);
+            int pos = scrollbar::positionFromDrag(a.lay.treeBar, a.m, a.treeContentHeight(),
+                                                  a.lay.treeViewport.bottom - a.lay.treeViewport.top,
+                                                  a.scrollDragStartPos, delta);
+            scrollPaneAndRepaint(hwnd, a, 3, pos - a.treeScroll);
         }
-        repaint(hwnd);
         return;
     }
 
@@ -666,12 +750,19 @@ void onMouseMove(HWND hwnd, App& a, POINT p) {
     int hoverTool = PtInRect(&a.lay.tool, p) ? a.toolbarIndexAt(p) : -1;
     int hoverMenu = PtInRect(&a.lay.menu, p) ? a.menuItemAt(p) : -1;
     if (hoverTree != a.hoverTree || hoverTool != a.hoverTool || hoverMenu != a.hoverMenu) {
+        // Only the two rows/buttons involved change their look: repaint those
+        // rects, not the window.
+        const int oldTree = a.hoverTree, oldTool = a.hoverTool, oldMenu = a.hoverMenu;
         a.hoverTree = hoverTree;
         a.hoverTool = hoverTool;
         a.hoverMenu = hoverMenu;
-        changed = true;
+        if (oldTree >= 0) repaintRegion(hwnd, a, a.treeRowRect(oldTree));
+        if (oldTool >= 0) repaintRegion(hwnd, a, a.toolbarItemRect(oldTool));
+        if (oldMenu >= 0) repaintRegion(hwnd, a, a.menuItemRect(oldMenu));
+        if (hoverTree >= 0) repaintRegion(hwnd, a, a.treeRowRect(hoverTree));
+        if (hoverTool >= 0) repaintRegion(hwnd, a, a.toolbarItemRect(hoverTool));
+        if (hoverMenu >= 0) repaintRegion(hwnd, a, a.menuItemRect(hoverMenu));
     }
-    if (changed) repaint(hwnd);
 }
 
 void onLButtonDown(HWND hwnd, App& a, POINT p) {
@@ -735,17 +826,16 @@ void onLButtonDown(HWND hwnd, App& a, POINT p) {
         int view = a.lay.treeViewport.bottom - a.lay.treeViewport.top;
         auto part = scrollbar::hitTest(a.lay.treeBar, p, a.m, content, view, a.treeScroll);
         int page = std::max(a.m.rowH, view - a.m.rowH);
-        if (part == scrollbar::Part::Decrement) a.scrollTreeBy(-3 * a.m.rowH);
-        else if (part == scrollbar::Part::Increment) a.scrollTreeBy(3 * a.m.rowH);
-        else if (part == scrollbar::Part::PageUp) a.scrollTreeBy(-page);
-        else if (part == scrollbar::Part::PageDown) a.scrollTreeBy(page);
+        if (part == scrollbar::Part::Decrement) scrollPaneAndRepaint(hwnd, a, 3, -3 * a.m.rowH);
+        else if (part == scrollbar::Part::Increment) scrollPaneAndRepaint(hwnd, a, 3, 3 * a.m.rowH);
+        else if (part == scrollbar::Part::PageUp) scrollPaneAndRepaint(hwnd, a, 3, -page);
+        else if (part == scrollbar::Part::PageDown) scrollPaneAndRepaint(hwnd, a, 3, page);
         else if (part == scrollbar::Part::Knob) {
             a.scrollDrag = 3;
             a.scrollDragStartY = p.y;
             a.scrollDragStartPos = a.treeScroll;
             SetCapture(hwnd);
         }
-        repaint(hwnd);
         return;
     }
 
@@ -781,17 +871,17 @@ void onLButtonDown(HWND hwnd, App& a, POINT p) {
             int view = a.lay.listViewport.bottom - a.lay.listViewport.top;
             auto part = scrollbar::hitTest(a.lay.listBar, p, a.m, content, view, a.listScroll);
             int page = std::max(a.m.rowH, view - a.m.rowH);
-            if (part == scrollbar::Part::Decrement) a.scrollListBy(-3 * a.m.rowH);
-            else if (part == scrollbar::Part::Increment) a.scrollListBy(3 * a.m.rowH);
-            else if (part == scrollbar::Part::PageUp) a.scrollListBy(-page);
-            else if (part == scrollbar::Part::PageDown) a.scrollListBy(page);
+            if (part == scrollbar::Part::Decrement) scrollPaneAndRepaint(hwnd, a, 1, -3 * a.m.rowH);
+            else if (part == scrollbar::Part::Increment)
+                scrollPaneAndRepaint(hwnd, a, 1, 3 * a.m.rowH);
+            else if (part == scrollbar::Part::PageUp) scrollPaneAndRepaint(hwnd, a, 1, -page);
+            else if (part == scrollbar::Part::PageDown) scrollPaneAndRepaint(hwnd, a, 1, page);
             else if (part == scrollbar::Part::Knob) {
                 a.scrollDrag = 1;
                 a.scrollDragStartY = p.y;
                 a.scrollDragStartPos = a.listScroll;
                 SetCapture(hwnd);
             }
-            repaint(hwnd);
             return;
         }
         if (PtInRect(&a.lay.listHeader, p)) {
@@ -815,17 +905,16 @@ void onLButtonDown(HWND hwnd, App& a, POINT p) {
         int view = a.lay.gridViewport.bottom - a.lay.gridViewport.top;
         auto part = scrollbar::hitTest(a.lay.gridBar, p, a.m, content, view, a.gridScroll);
         int page = std::max(a.m.rowH, view - a.m.rowH);
-        if (part == scrollbar::Part::Decrement) a.scrollGridBy(-3 * a.m.rowH);
-        else if (part == scrollbar::Part::Increment) a.scrollGridBy(3 * a.m.rowH);
-        else if (part == scrollbar::Part::PageUp) a.scrollGridBy(-page);
-        else if (part == scrollbar::Part::PageDown) a.scrollGridBy(page);
+        if (part == scrollbar::Part::Decrement) scrollPaneAndRepaint(hwnd, a, 2, -3 * a.m.rowH);
+        else if (part == scrollbar::Part::Increment) scrollPaneAndRepaint(hwnd, a, 2, 3 * a.m.rowH);
+        else if (part == scrollbar::Part::PageUp) scrollPaneAndRepaint(hwnd, a, 2, -page);
+        else if (part == scrollbar::Part::PageDown) scrollPaneAndRepaint(hwnd, a, 2, page);
         else if (part == scrollbar::Part::Knob) {
             a.scrollDrag = 2;
             a.scrollDragStartY = p.y;
             a.scrollDragStartPos = a.gridScroll;
             SetCapture(hwnd);
         }
-        repaint(hwnd);
         return;
     }
 
@@ -834,6 +923,7 @@ void onLButtonDown(HWND hwnd, App& a, POINT p) {
         const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         const std::wstring& path = a.entries[itemIndex].path;
+        const std::set<std::wstring> selBefore = a.selection;
         if (ctrl) {
             if (a.selection.count(path)) a.selection.erase(path);
             else a.selection.insert(path);
@@ -853,7 +943,7 @@ void onLButtonDown(HWND hwnd, App& a, POINT p) {
         a.dragArmed = true;
         a.marqueeStart = p;
         SetCapture(hwnd);
-        repaint(hwnd);
+        repaintSelectionChange(hwnd, a, selBefore);
         return;
     }
 
@@ -932,6 +1022,7 @@ void onLButtonUp(HWND hwnd, App& a, POINT p) {
         return;
     }
     if (a.dragArmed || a.dragging) {
+        const std::set<std::wstring> selBefore = a.selection;
         if (a.pressSelectedRow >= 0) {
             // No drag followed the press: collapse to the clicked item, the
             // way Explorer does.
@@ -942,7 +1033,7 @@ void onLButtonUp(HWND hwnd, App& a, POINT p) {
         a.dragArmed = false;
         a.dragging = false;
         a.dragPath.clear();
-        repaint(hwnd);
+        repaintSelectionChange(hwnd, a, selBefore);
     }
 }
 
@@ -1031,14 +1122,13 @@ void onMouseWheel(HWND hwnd, App& a, POINT p, int delta) {
     ScreenToClient(hwnd, &client);
     int steps = delta / WHEEL_DELTA;
     if (a.sidebarVisible && PtInRect(&a.lay.sidebar, client)) {
-        a.scrollTreeBy(-steps * 3 * a.m.rowH);
+        scrollPaneAndRepaint(hwnd, a, 3, -steps * 3 * a.m.rowH);
     } else if (a.mode == ViewMode::Details) {
-        a.scrollListBy(-steps * 3 * a.m.rowH);
+        scrollPaneAndRepaint(hwnd, a, 1, -steps * 3 * a.m.rowH);
     } else {
         int rows = a.mode == ViewMode::Icons ? 2 : 3;
-        a.scrollGridBy(-steps * rows * a.gridCellH());
+        scrollPaneAndRepaint(hwnd, a, 2, -steps * rows * a.gridCellH());
     }
-    repaint(hwnd);
 }
 
 void onDropFiles(HWND hwnd, App& a, HDROP drop) {
@@ -1162,12 +1252,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_SETFOCUS:
+        // Nothing in the chrome depends on focus (the flag is kept for
+        // parity with the macOS build), so no repaint is needed.
         a.windowActive = true;
-        repaint(hwnd);
         return 0;
     case WM_KILLFOCUS:
         a.windowActive = false;
-        repaint(hwnd);
         return 0;
     case WM_CAPTURECHANGED:
         // Something stole the mouse: never leave a rubber band, a pending drag
@@ -1194,12 +1284,20 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         onMouseMove(hwnd, a, p);
         return 0;
     }
-    case WM_MOUSELEAVE:
+    case WM_MOUSELEAVE: {
+        // Same region treatment as a hover change: only the highlighted
+        // rows/buttons need redrawing.
+        const RECT tree = a.hoverTree >= 0 ? a.treeRowRect(a.hoverTree) : RECT{};
+        const RECT tool = a.hoverTool >= 0 ? a.toolbarItemRect(a.hoverTool) : RECT{};
+        const RECT menu = a.hoverMenu >= 0 ? a.menuItemRect(a.hoverMenu) : RECT{};
         if (a.hoverTree != -1 || a.hoverTool != -1 || a.hoverMenu != -1) {
             a.hoverTree = a.hoverTool = a.hoverMenu = -1;
-            repaint(hwnd);
+            if (tree.right > tree.left) repaintRegion(hwnd, a, tree);
+            if (tool.right > tool.left) repaintRegion(hwnd, a, tool);
+            if (menu.right > menu.left) repaintRegion(hwnd, a, menu);
         }
         return 0;
+    }
     case WM_LBUTTONDOWN: {
         POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         if (menuIsOpen()) {
@@ -1535,6 +1633,43 @@ int runUiTest(App& app) {
     app.loadDirectory(bigDir, false);
     app.setViewMode(ViewMode::Details);
     app.relayout(1100, 760);
+
+    // The scroll fast path (slide the cached frame, re-render the exposed
+    // strip) must land on exactly the pixels a full render makes.
+    {
+        HDC screen2 = GetDC(nullptr);
+        HDC full = CreateCompatibleDC(screen2);
+        HDC slid = CreateCompatibleDC(screen2);
+        HBITMAP fullBmp = CreateCompatibleBitmap(screen2, app.width, app.height);
+        HBITMAP slidBmp = CreateCompatibleBitmap(screen2, app.width, app.height);
+        HGDIOBJ fullOld = SelectObject(full, fullBmp);
+        HGDIOBJ slidOld = SelectObject(slid, slidBmp);
+        app.listScroll = 0;
+        app.clampScroll();
+        { Canvas c(slid, app.scale); renderApp(c, app); }  // the cached frame at top
+        const int jump = 7 * app.m.rowH + 5;               // deliberately not row-aligned
+        app.listScroll = jump;
+        app.clampScroll();
+        { Canvas c(full, app.scale); renderApp(c, app); }  // reference render
+        scrollFrame(slid, app, app.lay.listViewport, app.lay.listBar, jump);
+        bool same = true;
+        for (int y = 0; y < app.height && same; y += 2)
+            for (int x = 0; x < app.width; x += 2)
+                if (GetPixel(full, x, y) != GetPixel(slid, x, y)) {
+                    same = false;
+                    break;
+                }
+        check(L"滚动快路径与整帧一致", same);
+        SelectObject(full, fullOld);
+        SelectObject(slid, slidOld);
+        DeleteObject(fullBmp);
+        DeleteObject(slidBmp);
+        DeleteDC(full);
+        DeleteDC(slid);
+        ReleaseDC(nullptr, screen2);
+        app.listScroll = 0;
+    }
+
     app.marquee = true;
     app.marqueeStart = POINT{app.lay.listViewport.left + 30, app.lay.listViewport.top + 10};
     const ULONGLONG dragStart = GetTickCount64();
