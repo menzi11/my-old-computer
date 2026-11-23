@@ -29,6 +29,10 @@ struct Node {
     double scale = 1.0;
     // Row whose submenu is open (-1 while none is).
     int openRow = -1;
+    // Where the pointer leaves that row: where the path to its submenu starts.
+    POINT leave{};
+    // The pointer was last inside our submenu (it is on its way back out).
+    bool childHadMouse = false;
 };
 
 Node* g_active = nullptr;
@@ -168,9 +172,20 @@ void paintNode(HWND hwnd) {
 
 // Responsiveness rule for this menu: a hover change puts its highlight on
 // screen before anything else runs, and no timer stands between the pointer
-// and what the user sees.  Submenus open and close on the spot, and there is
-// no corridor, grace period or other exception: the row under the pointer is
-// the selected row, always.
+// and what the user sees.  Submenus open and close on the spot.
+//
+// The row under the pointer is the selected row, with one exception, and it
+// is a matter of place, not of time.  A submenu lies beside the rows below
+// its own, so a pointer on its way there crosses them; if each of them took
+// the selection the moment the pointer entered it, the submenu would be gone
+// before the pointer arrived.  So while the pointer is on the path from the
+// row it left to the submenu, that row keeps the selection and its submenu.
+// The path is a funnel: as wide as the row where the pointer left it, as
+// wide as the submenu plus a row of slack above and below where it meets the
+// submenu - and never further than three rows from its own row, or a tall
+// submenu would hold its row against every row beside it.  (Its far rows are
+// reached by going right into it first.)  Moving along the menu leaves the
+// funnel at once.
 
 void repaintRow(HWND hwnd, const Node* n, int index) {
     if (index < 0 || index >= (int)n->rects.size()) return;
@@ -181,6 +196,41 @@ int hitItem(Node* n, POINT p) {
     for (size_t i = 0; i < n->rects.size(); ++i)
         if (p.y >= n->rects[i].top && p.y < n->rects[i].bottom) return (int)i;
     return -1;
+}
+
+// True while p (client coordinates of n) is on that path: the pointer has
+// left the row whose submenu is open, is to the right of where it left it,
+// and is inside the funnel from the row to the submenu.
+bool onTheWayToSubmenu(const Node* n, POINT p) {
+    if (n->children.empty() || n->hover < 0 || n->hover != n->openRow) return false;
+    const Node* child = n->children.front();
+    if (!child->hwnd) return false;
+    RECT sub{};
+    GetWindowRect(child->hwnd, &sub);
+    MapWindowPoints(nullptr, n->hwnd, (LPPOINT)&sub, 2);
+    const RECT& row = n->rects[n->openRow];
+    const POINT from = n->leave;
+    // A submenu opens to the right of its row.  One that had to open to the
+    // left lies over the row itself, so the pointer is in it as soon as it
+    // moves: nothing to hold.
+    if (sub.left <= from.x || p.x <= from.x || p.x >= sub.left) return false;
+    const int rowH = row.bottom - row.top;
+    // Where the path meets the submenu: as wide as the submenu plus a row of
+    // slack above and below, but no further than three rows from the row.
+    const int reach = 3 * rowH;
+    const LONG top = std::max(sub.top - rowH, row.top - reach);
+    const LONG bottom = std::min(sub.bottom + rowH, row.bottom + reach);
+    const double t = (double)(p.x - from.x) / (double)(sub.left - from.x);
+    return p.y >= row.top + (double)(top - row.top) * t &&
+           p.y < row.bottom + (double)(bottom - row.bottom) * t;
+}
+
+// The path starts here when the submenu was opened by the keyboard or a
+// click, not by the pointer resting in the row: the row's right edge, which
+// no pointer position in this menu is ever to the right of.
+POINT rowEdge(const Node* n, int index) {
+    const RECT& r = n->rects[index];
+    return POINT{r.right, (r.top + r.bottom) / 2};
 }
 
 void closeAll(Node* root) {
@@ -229,7 +279,7 @@ void createNodeWindow(Node* n, int x, int y) {
     UpdateWindow(n->hwnd);
 }
 
-void openChild(Node* n, int index) {
+void openChild(Node* n, int index, POINT from) {
     if (index < 0 || index >= (int)n->subs.size() || !n->subs[index] || !n->enabled[index]) return;
     // Already showing this row's submenu.  This has to be checked against the
     // row the open submenu belongs to, never against hover: every caller
@@ -237,6 +287,7 @@ void openChild(Node* n, int index) {
     // first submenu shown could never be replaced by another row's.
     if (!n->children.empty() && n->openRow == index) return;
     diagLog(L"openChild idx=%d", index);
+    n->leave = from;
     destroyChildren(n);
     HMENU sub = GetSubMenu(n->menu, index);
     if (!sub) return;
@@ -267,7 +318,7 @@ void choose(Node* n, int index) {
     if (n->subs[index]) {
         n->hover = index;
         InvalidateRect(n->hwnd, nullptr, FALSE);
-        openChild(n, index);
+        openChild(n, index, rowEdge(n, index));
         return;
     }
     Node* root = n;
@@ -293,12 +344,20 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSEMOVE:
         if (n) {
             POINT p{(short)LOWORD(lp), (short)HIWORD(lp)};
+            // Coming back out of the submenu, the pointer is on its way to
+            // wherever it is now - which is never toward the submenu.
+            const bool fromSubmenu = n->childHadMouse;
+            n->childHadMouse = false;
+            if (n->parent) n->parent->childHadMouse = true;
             int index = hitItem(n, p);
             if (index >= 0 && n->seps[index]) index = -1;
             const bool hasSub = index >= 0 && index < (int)n->subs.size() && n->subs[index];
             diagLog(L"hmmenu move %d,%d idx=%d hover=%d sub=%d", p.x, p.y, index, n->hover,
                     (int)hasSub);
-            if (index != n->hover) {
+            if (index == n->hover) {
+                n->leave = p;  // still on the row: this is where it would leave it
+            } else {
+                if (!fromSubmenu && onTheWayToSubmenu(n, p)) return 0;
                 const int previous = n->hover;
                 n->hover = index;
                 // Highlight first and on screen before any submenu work, so a
@@ -307,7 +366,7 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 repaintRow(hwnd, n, index);
                 UpdateWindow(hwnd);
                 if (hasSub)
-                    openChild(n, index);
+                    openChild(n, index, p);
                 else
                     destroyChildren(n);
             }
@@ -351,11 +410,13 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 }
                 target->hover = index;
                 InvalidateRect(target->hwnd, nullptr, FALSE);
-                if (index >= 0 && target->subs[index]) openChild(target, index);
-                else destroyChildren(target);
+                if (index >= 0 && target->subs[index])
+                    openChild(target, index, rowEdge(target, index));
+                else
+                    destroyChildren(target);
             } else if (wp == VK_RIGHT) {
                 if (target->hover >= 0 && target->subs[target->hover])
-                    openChild(target, target->hover);
+                    openChild(target, target->hover, rowEdge(target, target->hover));
             } else if (wp == VK_LEFT && target->parent) {
                 closeChild(target);
                 InvalidateRect(g_active->hwnd, nullptr, FALSE);

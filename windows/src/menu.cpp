@@ -142,6 +142,9 @@ LRESULT CALLBACK menuProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
         }
         return 0;
+    // A quick second click arrives as a double-click; to this menu it is
+    // the click it looks like (clicking the menu bar's title again closes it).
+    case WM_LBUTTONDBLCLK:
     case WM_LBUTTONDOWN: {
         if (!st) return 0;
         POINT p{(short)LOWORD(lp), (short)HIWORD(lp)};

@@ -1063,6 +1063,12 @@ void onLButtonUp(HWND hwnd, App& a, POINT p) {
     }
 }
 
+// A second click that comes fast enough arrives as WM_LBUTTONDBLCLK instead
+// of a button-down.  An item and a tree row mean something special by it;
+// everywhere else - the toolbar, the menu bar, a title button, a scrollbar, a
+// column header, blank canvas - it is just another click, and the first
+// click's action has already run.  Dropping it there made a quick second
+// click on the toolbar's View button do nothing.
 void onDoubleClick(HWND hwnd, App& a, POINT p) {
     if (a.sidebarVisible && PtInRect(&a.lay.sidebar, p)) {
         int row = a.treeRowAt(p);
@@ -1071,8 +1077,8 @@ void onDoubleClick(HWND hwnd, App& a, POINT p) {
             TreeNode* n = a.treeFlat[row];
             if (n->hasChildren) a.toggleTreeNode(*n);
             repaint(hwnd);
+            return;
         }
-        return;
     }
     // Only the icon and the name open an item - the same hit rule as a
     // single click.  Double-clicking a row's blank part (size/type/date)
@@ -1082,7 +1088,9 @@ void onDoubleClick(HWND hwnd, App& a, POINT p) {
         diagLog(L"DBLCLK %d,%d idx=%d", p.x, p.y, idx);
         a.openEntry(a.entries[idx]);
         repaint(hwnd);
+        return;
     }
+    onLButtonDown(hwnd, a, p);
 }
 
 void onKeyDown(HWND hwnd, App& a, WPARAM key) {
@@ -1446,6 +1454,7 @@ bool hasArg(const std::vector<std::wstring>& args, const wchar_t* name) {
 // submenu that never switched to another row's; this cannot.)
 
 constexpr UINT_PTR kMenuTestTimer = 0x4D43;
+constexpr UINT_PTR kPopupTestTimer = 0x4D44;
 constexpr wchar_t kMenuTestClass[] = L"MyOldComputerMenuTest";
 
 struct MenuDrive {
@@ -1453,24 +1462,33 @@ struct MenuDrive {
         bool hasSub = false;
         int subTop = 0, subHeight = 0;  // submenu top relative to the root's top
         bool row0Hot = false, row1Hot = false;  // painted highlight at the row centres
+        bool row3Hot = false;                  // ... and at the fourth row's
     };
     HWND root = nullptr;
+    int phase = 0;        // which drive this is (see menuTestStep)
     int step = 0;
-    int x0 = 10, yc0 = 0, yc1 = 0, yc2 = 0;  // probe points, client coords of the root
+    int chosen = 0;       // what the menu returned when a submenu row was clicked
+    bool subHot = false;  // the submenu's own row, painted highlighted
+    int x0 = 10, yc0 = 0, yc1 = 0, yc2 = 0, yc3 = 0;  // probe points, client coords of the root
     int itemH = 0, margin = 0;
-    Seen afterA, afterB, backA, diagonal, backAgain, vertical, plain;
+    Seen afterA, afterB, backA, diagonal, downToB, curved, vertical, plain, returned;
+    Seen tall, belowTall;  // a submenu far taller than the menu beside it
 };
 
 MenuDrive g_drive;
+HWND g_popup = nullptr;       // the menu bar's popup, while its own test drives it
+bool g_popupClicked = false;  // the double-click was posted to it
+bool g_popupEscaped = false;  // ... and did not close it: Escape had to
 
 BOOL CALLBACK collectMenuWindows(HWND h, LPARAM lp) {
     DWORD pid = 0;
     GetWindowThreadProcessId(h, &pid);
-    if (pid == GetCurrentProcessId()) {
-        wchar_t cls[64]{};
-        if (GetClassNameW(h, cls, 64) && lstrcmpW(cls, L"MyOldComputerHMenu") == 0)
-            ((std::vector<HWND>*)lp)->push_back(h);
-    }
+    wchar_t cls[64]{};
+    if (pid != GetCurrentProcessId() || !GetClassNameW(h, cls, 64)) return TRUE;
+    if (lstrcmpW(cls, L"MyOldComputerHMenu") == 0)
+        ((std::vector<HWND>*)lp)->push_back(h);
+    else if (lstrcmpW(cls, L"MyOldComputerMenu") == 0)
+        g_popup = h;
     return TRUE;
 }
 
@@ -1478,6 +1496,7 @@ BOOL CALLBACK collectMenuWindows(HWND h, LPARAM lp) {
 // submenu opens to the right of its parent.
 std::vector<HWND> menuWindows(HWND* root) {
     std::vector<HWND> wins;
+    g_popup = nullptr;
     EnumWindows(collectMenuWindows, (LPARAM)&wins);
     *root = nullptr;
     for (HWND w : wins) {
@@ -1493,12 +1512,12 @@ std::vector<HWND> menuWindows(HWND* root) {
     return wins;
 }
 
-// True when the pixel the root menu shows at client (x, y) is on screen as
+// True when the pixel the menu window shows at client (x, y) is on screen as
 // its highlight colour.  Read from the display itself: the menu is a topmost
 // popup, so this is literally what the user sees.
-bool menuRowHot(HWND root, int x, int y) {
+bool menuRowHot(HWND menu, int x, int y) {
     POINT p{x, y};
-    ClientToScreen(root, &p);
+    ClientToScreen(menu, &p);
     HDC screen = GetDC(nullptr);
     const COLORREF px = GetPixel(screen, p.x, p.y);
     ReleaseDC(nullptr, screen);
@@ -1541,56 +1560,197 @@ void menuTestStep(HWND owner) {
         d.root = root;
         if (!d.root) return;  // menu already closed
     }
-    switch (d.step++) {
-    case 0:
-        post(d.root, WM_MOUSEMOVE, d.x0, d.yc0);  // hover A
-        next(80);
+    RECT rc{};
+    GetClientRect(d.root, &rc);
+    const int xe = rc.right - d.margin - 2;  // the root's right edge, just inside
+    // Leaves the row at about 25 degrees for 40 px, then goes flat: the way a
+    // hand really travels, and not a straight line to anything.
+    auto curved = [&](int yFlat) {
+        for (int k = 1; k <= 5; ++k) post(d.root, WM_MOUSEMOVE, d.x0 + 8 * k, d.yc0 + 4 * k);
+        for (int x = d.x0 + 48; x <= xe; x += 8) post(d.root, WM_MOUSEMOVE, x, yFlat);
+    };
+    // The submenu window, and where its top left corner lies in the root's
+    // client coordinates.
+    auto submenu = [&](POINT* at) {
+        HWND root = nullptr;
+        for (HWND w : menuWindows(&root)) {
+            if (w == root) continue;
+            RECT a{}, b{};
+            GetWindowRect(w, &a);
+            GetWindowRect(root, &b);
+            *at = POINT{a.left - b.left, a.top - b.top};
+            return w;
+        }
+        return (HWND)nullptr;
+    };
+    switch (d.phase) {
+    case 1:  // switching rows, with the path to the submenu crossing them
+        switch (d.step++) {
+        case 0:
+            post(d.root, WM_MOUSEMOVE, d.x0, d.yc0);  // hover A
+            next(80);
+            break;
+        case 1:
+            d.afterA = menuTestLook();
+            post(d.root, WM_MOUSEMOVE, d.x0, d.yc1);  // straight down to B
+            next(80);
+            break;
+        case 2:
+            d.afterB = menuTestLook();
+            post(d.root, WM_MOUSEMOVE, d.x0, d.yc0);  // back up to A
+            next(80);
+            break;
+        case 3:
+            d.backA = menuTestLook();
+            // Diagonal from A toward the lower part of its own submenu: the
+            // path crosses B's band on its way and ends in it.
+            for (int k = 1; k <= 4; ++k)
+                post(d.root, WM_MOUSEMOVE, d.x0 + (xe - d.x0) * k / 4,
+                     d.yc0 + (d.itemH / 2 + 8) * k / 4);
+            next(120);
+            break;
+        case 4:
+            d.diagonal = menuTestLook();
+            post(d.root, WM_MOUSEMOVE, d.x0, d.yc1);  // back to the labels, at B
+            next(80);
+            break;
+        case 5:
+            d.downToB = menuTestLook();
+            post(d.root, WM_MOUSEMOVE, d.x0, d.yc0);  // back up to A, along the labels
+            next(80);
+            break;
+        case 6:
+            curved(d.yc0 + 22);
+            next(120);
+            break;
+        case 7:
+            d.curved = menuTestLook();
+            post(d.root, WM_MOUSEMOVE, d.x0, d.yc1);  // back to the labels, at B
+            next(80);
+            break;
+        case 8:
+            d.vertical = menuTestLook();
+            post(d.root, WM_MOUSEMOVE, d.x0, d.yc2);  // down to the plain item
+            next(80);
+            break;
+        case 9:
+            d.plain = menuTestLook();
+            PostMessageW(d.root, WM_KEYDOWN, VK_ESCAPE, 0);
+            next(150);
+            break;
+        default:
+            menuClose();  // Escape did not close it: end this now, the check fails
+            break;
+        }
         break;
-    case 1:
-        d.afterA = menuTestLook();
-        post(d.root, WM_MOUSEMOVE, d.x0, d.yc1);  // straight down to B
-        next(80);
+    case 2:  // all the way into the submenu, and a click in it
+        switch (d.step++) {
+        case 0:
+            post(d.root, WM_MOUSEMOVE, d.x0, d.yc0);
+            next(80);
+            break;
+        case 1: {
+            POINT at{};
+            const HWND sub = submenu(&at);
+            if (!sub) {
+                menuClose();
+                break;
+            }
+            curved(d.yc0 + 22);
+            // On into the submenu, to its third row.
+            const int y3 = d.margin + 2 * d.itemH + d.itemH / 2;
+            for (int k = 1; k <= 5; ++k) {
+                const int x = xe + (at.x + 36 - xe) * k / 5;
+                const int y = d.yc0 + 22 + (at.y + y3 - (d.yc0 + 22)) * k / 5;
+                if (x < at.x)
+                    post(d.root, WM_MOUSEMOVE, x, y);
+                else
+                    post(sub, WM_MOUSEMOVE, x - at.x, y - at.y);
+            }
+            next(120);
+            break;
+        }
+        case 2: {
+            POINT at{};
+            const HWND sub = submenu(&at);
+            if (!sub) {
+                menuClose();
+                break;
+            }
+            const int y3 = d.margin + 2 * d.itemH + d.itemH / 2;
+            d.subHot = menuRowHot(sub, 12, y3);
+            post(sub, WM_LBUTTONUP, 36, y3);  // click a3
+            next(150);
+            break;
+        }
+        default:
+            menuClose();
+            break;
+        }
         break;
-    case 2:
-        d.afterB = menuTestLook();
-        post(d.root, WM_MOUSEMOVE, d.x0, d.yc0);  // back up to A
-        next(80);
+    case 3:  // into the submenu and back out into another row
+        switch (d.step++) {
+        case 0:
+            post(d.root, WM_MOUSEMOVE, d.x0, d.yc0);
+            next(80);
+            break;
+        case 1: {
+            POINT at{};
+            const HWND sub = submenu(&at);
+            if (!sub) {
+                menuClose();
+                break;
+            }
+            const int y1 = d.margin + d.itemH / 2;
+            post(d.root, WM_MOUSEMOVE, xe - 4, d.yc0);
+            post(sub, WM_MOUSEMOVE, 6, y1);
+            post(sub, WM_MOUSEMOVE, 40, y1);
+            next(120);
+            break;
+        }
+        case 2: {
+            POINT at{};
+            const HWND sub = submenu(&at);
+            if (sub) d.subHot = menuRowHot(sub, 12, d.margin + d.itemH / 2);
+            // Back out into the root, in B's band and to the right of where
+            // the pointer left A: inside the path to A's submenu.
+            post(d.root, WM_MOUSEMOVE, xe - 2, d.yc1);
+            next(100);
+            break;
+        }
+        case 3:
+            d.returned = menuTestLook();
+            PostMessageW(d.root, WM_KEYDOWN, VK_ESCAPE, 0);
+            next(150);
+            break;
+        default:
+            menuClose();
+            break;
+        }
         break;
-    case 3: {
-        d.backA = menuTestLook();
-        // Diagonal from A toward the lower part of its own submenu.  The path
-        // crosses B's band, and the last point is in B: no corridor holds A.
-        RECT rc{};
-        GetClientRect(d.root, &rc);
-        const int xe = rc.right - d.margin - 1;
-        const int ye = d.yc0 + d.itemH / 2 + 10;
-        for (int k = 1; k <= 4; ++k)
-            post(d.root, WM_MOUSEMOVE, d.x0 + (xe - d.x0) * k / 4, d.yc0 + (ye - d.yc0) * k / 4);
-        next(120);
-        break;
-    }
-    case 4:
-        d.diagonal = menuTestLook();
-        post(d.root, WM_MOUSEMOVE, d.x0, d.yc0);  // straight back up to A
-        next(80);
-        break;
-    case 5:
-        d.backAgain = menuTestLook();
-        post(d.root, WM_MOUSEMOVE, d.x0, d.yc1);  // straight down to B again
-        next(80);
-        break;
-    case 6:
-        d.vertical = menuTestLook();
-        post(d.root, WM_MOUSEMOVE, d.x0, d.yc2);  // down to the plain item
-        next(80);
-        break;
-    case 7:
-        d.plain = menuTestLook();
-        PostMessageW(d.root, WM_KEYDOWN, VK_ESCAPE, 0);
-        next(150);
-        break;
-    default:
-        menuClose();  // Escape did not close it: end this now, the check fails
+    default:  // 4: a submenu far taller than the menu must not hold its row against the rows beside it
+        switch (d.step++) {
+        case 0:
+            post(d.root, WM_MOUSEMOVE, d.x0, d.yc3);  // hover D
+            next(80);
+            break;
+        case 1:
+            d.tall = menuTestLook();
+            d.tall.row3Hot = menuRowHot(d.root, d.x0, d.yc3);
+            // Down and a little to the right, out of D: along the menu.
+            post(d.root, WM_MOUSEMOVE, d.x0 + 6, d.yc3 + d.itemH / 2 + 12);
+            next(100);
+            break;
+        case 2:
+            d.belowTall = menuTestLook();
+            d.belowTall.row3Hot = menuRowHot(d.root, d.x0, d.yc3);
+            PostMessageW(d.root, WM_KEYDOWN, VK_ESCAPE, 0);
+            next(150);
+            break;
+        default:
+            menuClose();
+            break;
+        }
         break;
     }
 }
@@ -1599,6 +1759,25 @@ LRESULT CALLBACK menuTestProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_TIMER && wp == kMenuTestTimer) {
         KillTimer(hwnd, kMenuTestTimer);
         menuTestStep(hwnd);
+        return 0;
+    }
+    if (msg == WM_TIMER && wp == kPopupTestTimer) {
+        // The menu bar's popup is up.  Click outside it the way a quick second
+        // click arrives: as a double-click.  If that does not close it, the
+        // next tick does, so the test cannot hang on a menu left open.
+        KillTimer(hwnd, kPopupTestTimer);
+        if (!g_popupClicked) {
+            HWND ignored = nullptr;
+            menuWindows(&ignored);  // also finds g_popup
+            if (g_popup) {
+                PostMessageW(g_popup, WM_LBUTTONDBLCLK, MK_LBUTTON, MAKELPARAM(-20, -20));
+                g_popupClicked = true;
+            }
+            SetTimer(hwnd, kPopupTestTimer, 150, nullptr);
+        } else if (g_popup && IsWindow(g_popup)) {
+            g_popupEscaped = true;  // the double-click did not close it
+            PostMessageW(g_popup, WM_KEYDOWN, VK_ESCAPE, 0);
+        }
         return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
@@ -2180,11 +2359,9 @@ int runUiTest(App& app) {
     std::wstring dragLabel = L"1200 项框选40次 " + std::to_wstring(dragMs) + L"ms";
     check(dragLabel.c_str(), dragMs < 400);
 
-    // The popup menu, with real windows: hover A, go down to B, back to A,
-    // travel the diagonal that crosses B's row, back up to A, down to B once
-    // more, then on to a plain item.  What matters is the submenu that is
-    // actually on screen (A's has three rows, B's one) and the row actually
-    // painted.  The row under the pointer wins every time.
+    // The popup menu, with real windows.  Menu: A(a1,a2,a3) / B(b1) / C.
+    // What matters is the submenu that is actually on screen (A's has three
+    // rows, B's one) and the row actually painted.
     {
         WNDCLASSEXW wc{sizeof(WNDCLASSEXW)};
         wc.lpfnWndProc = menuTestProc;
@@ -2203,6 +2380,9 @@ int runUiTest(App& app) {
         AppendMenuW(subB, MF_STRING, 211, L"b1");
         AppendMenuW(menu, MF_POPUP, (UINT_PTR)subB, L"B");
         AppendMenuW(menu, MF_STRING, 221, L"C");
+        HMENU subD = CreatePopupMenu();  // far taller than the menu it belongs to
+        for (int i = 0; i < 8; ++i) AppendMenuW(subD, MF_STRING, 240 + i, L"d");
+        AppendMenuW(menu, MF_POPUP, (UINT_PTR)subD, L"D");
 
         MenuDrive& d = g_drive;
         const double s = dpiScaleOfWindow(owner);
@@ -2210,26 +2390,28 @@ int runUiTest(App& app) {
         const int itemH = (int)(22 * s + 0.5);
         RECT work{};
         SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
-        // A click anywhere else closes the menu; then the run is simply repeated.
-        for (int attempt = 0; attempt < 4; ++attempt) {
-            d = MenuDrive{};
-            d.margin = margin;
-            d.itemH = itemH;
-            d.yc0 = margin + itemH / 2;
-            d.yc1 = d.yc0 + itemH;
-            d.yc2 = d.yc1 + itemH;
-            const HWND foreground = GetForegroundWindow();
-            SetTimer(owner, kMenuTestTimer, 150, nullptr);
-            showHMenu(owner, menu, POINT{work.left + 40, work.top + 40});
-            if (foreground) SetForegroundWindow(foreground);
-            KillTimer(owner, kMenuTestTimer);
-            if (d.step >= 8) break;
-        }
-        DestroyMenu(menu);
-        DestroyWindow(owner);
-
-        const int topA = 0, heightA = 2 * d.margin + 3 * d.itemH;
-        const int topB = d.itemH, heightB = 2 * d.margin + d.itemH;
+        // Shows the menu and lets the timer drive it.  A click anywhere else
+        // closes it early; then the drive is simply repeated.
+        const auto drive = [&](int phase, int steps) {
+            for (int attempt = 0; attempt < 4; ++attempt) {
+                d = MenuDrive{};
+                d.phase = phase;
+                d.margin = margin;
+                d.itemH = itemH;
+                d.yc0 = margin + itemH / 2;
+                d.yc1 = d.yc0 + itemH;
+                d.yc2 = d.yc1 + itemH;
+                d.yc3 = d.yc2 + itemH;
+                const HWND foreground = GetForegroundWindow();
+                SetTimer(owner, kMenuTestTimer, 150, nullptr);
+                const int chosen = showHMenu(owner, menu, POINT{work.left + 40, work.top + 40});
+                if (foreground) SetForegroundWindow(foreground);
+                KillTimer(owner, kMenuTestTimer);
+                if (d.step < steps) continue;  // closed from outside before the drive ended
+                if (phase == 2) d.chosen = chosen;
+                break;
+            }
+        };
         // Measured values go into the label of a failed check.
         auto look = [](const MenuDrive::Seen& v) {
             return L"（实测 top=" + std::to_wstring(v.subTop) + L" h=" +
@@ -2244,20 +2426,71 @@ int runUiTest(App& app) {
                 label += look(v);
             check(label.c_str(), label == name);
         };
-        const auto& A = d.afterA;
-        const auto& B = d.afterB;
-        const auto& R = d.backA;
-        const auto& G = d.diagonal;
-        const auto& R2 = d.backAgain;
-        const auto& V = d.vertical;
-        const auto& P = d.plain;
-        expect(L"悬停A弹出A的子菜单", A, topA, heightA, true, false);
-        expect(L"垂直移到B切换为B的子菜单", B, topB, heightB, false, true);
-        expect(L"回到A切回A的子菜单", R, topA, heightA, true, false);
-        expect(L"斜线划过B行就是B行，没有走廊", G, topB, heightB, false, true);
-        expect(L"再回到A仍是A的子菜单", R2, topA, heightA, true, false);
-        expect(L"子菜单开着时垂直下移立即到B", V, topB, heightB, false, true);
-        check(L"移到普通项关闭子菜单", !P.hasSub && !P.row0Hot && !P.row1Hot);
+        const int topA = 0, heightA = 2 * margin + 3 * itemH;
+        const int topB = itemH, heightB = 2 * margin + itemH;
+        const int topD = 3 * itemH, heightD = 2 * margin + 8 * itemH;
+
+        // 1. The row under the pointer is the selected row - except while the
+        //    pointer is on its way from A to A's submenu, which lies beside
+        //    B: that path crosses B, and the submenu has to still be there
+        //    when the pointer arrives.
+        drive(1, 10);
+        expect(L"悬停A弹出A的子菜单", d.afterA, topA, heightA, true, false);
+        expect(L"垂直移到B切换为B的子菜单", d.afterB, topB, heightB, false, true);
+        expect(L"回到A切回A的子菜单", d.backA, topA, heightA, true, false);
+        expect(L"斜线穿过B行去A的子菜单：A保持", d.diagonal, topA, heightA, true, false);
+        expect(L"从去子菜单的路上回到标签处：立刻到B", d.downToB, topB, heightB, false, true);
+        expect(L"先陡后平去A的子菜单：A保持", d.curved, topA, heightA, true, false);
+        expect(L"再回到标签处：立刻到B", d.vertical, topB, heightB, false, true);
+        check(L"移到普通项关闭子菜单", !d.plain.hasSub && !d.plain.row0Hot && !d.plain.row1Hot);
+
+        // 4. A submenu eight rows tall beside a four-row menu: its path must
+        //    not be so wide that D keeps the selection while the pointer
+        //    moves along the menu.
+        drive(4, 3);
+        check(L"很高的子菜单照样弹出", d.tall.hasSub && d.tall.subTop == topD &&
+                                    d.tall.subHeight == heightD && d.tall.row3Hot);
+        check(L"很高的子菜单不拦着离开它那一行",
+              !d.belowTall.hasSub && !d.belowTall.row3Hot);
+
+        // 2. All the way in, and the click lands: the menu returns a3.
+        drive(2, 3);
+        check(L"沿路走进子菜单，点的那一项就是要执行的那一项", d.chosen == 203 && d.subHot);
+
+        // 3. Back out of the submenu into another row: that row is selected.
+        drive(3, 4);
+        expect(L"从子菜单回到B行就是B", d.returned, topB, heightB, false, true);
+        DestroyMenu(menu);
+
+        // The menu bar's popup (another window class) closes on a quick
+        // second click too, which arrives as a double-click.
+        {
+            const std::vector<MenuItem> items{{L"a", 301, true}, {L"b", 302, true}};
+            g_popupClicked = false;
+            g_popupEscaped = false;
+            SetTimer(owner, kPopupTestTimer, 200, nullptr);
+            showPopupMenu(owner, items, work.left + 40, work.top + 40, false);
+            KillTimer(owner, kPopupTestTimer);
+            check(L"菜单栏弹出的菜单被快速的第二下点击关掉", g_popupClicked && !g_popupEscaped);
+        }
+        DestroyWindow(owner);
+    }
+
+    // A second click that comes fast enough arrives as a double-click.  On
+    // the toolbar it is just another click: the View button is pressed by it.
+    {
+        app.setViewMode(ViewMode::Details);
+        app.relayout(1100, 760);
+        const RECT tool = app.toolbarItemRect(4);
+        const POINT at{(tool.left + tool.right) / 2, (tool.top + tool.bottom) / 2};
+        const ViewMode before = app.mode;
+        app.pressTool = -1;
+        onDoubleClick(nullptr, app, at);
+        const bool pressed = app.pressTool == 4;
+        onLButtonUp(nullptr, app, at);
+        check(L"快速的第二下点击（双击消息）照样按下工具栏的查看按钮",
+              pressed && app.mode != before && app.pressTool == -1);
+        app.setViewMode(ViewMode::Details);
     }
 
     // The rename field, against what the row really paints.  Every view draws

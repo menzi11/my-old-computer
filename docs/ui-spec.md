@@ -127,10 +127,16 @@ Lag is never traded for anything. For menus and hover feedback in particular:
   timer, grace period or delay stands between the pointer and the screen.
 - A submenu opens the moment its row is hovered and closes the moment the
   pointer leaves that row.
-- There is no exception: no corridor, safe triangle or grace period. The row
-  under the pointer is the selected row, always. A pointer that crosses other
-  rows on its diagonal way to a submenu selects them; a submenu is reached by
-  moving right into it.
+- The row under the pointer is the selected row, with one exception, and it
+  is a matter of place, not of time: while the pointer is on the path from
+  the row it left to that row's submenu, the row keeps the selection and the
+  submenu stays. The path is a funnel - as wide as the row where the pointer
+  left it, as wide as the submenu plus a row of slack where it meets it, and
+  never further than three rows from its own row. A pointer crossing the rows
+  beside a submenu on its way to it therefore does not switch them; moving
+  along the menu leaves the funnel on its first pixel. (Without this a
+  submenu is gone before a diagonally moving pointer gets to it, and nothing
+  in it can be clicked.)
 
 ## Platform mapping
 
