@@ -164,6 +164,7 @@ void drawBandDots(HDC dc, const RECT& r) {
 void eraseBand(HWND hwnd) {
     if (!g_bandVisible) return;
     g_bandVisible = false;
+    if (!hwnd) return;
     if (!g_paint.mem || g_band.right <= g_band.left || g_band.bottom <= g_band.top) return;
     HDC dc = GetDC(hwnd);
     if (!dc) return;
@@ -175,14 +176,13 @@ void eraseBand(HWND hwnd) {
 void drawBand(HWND hwnd, App& a) {
     g_band = marqueeBand(a);
     g_bandVisible = false;
+    if (!hwnd) return;
     if (g_band.right <= g_band.left || g_band.bottom <= g_band.top) return;
     HDC dc = GetDC(hwnd);
     if (!dc) return;
     drawBandDots(dc, g_band);
     ReleaseDC(hwnd, dc);
     g_bandVisible = true;
-    diagLog(L"BAND %d,%d..%d,%d", (int)g_band.left, (int)g_band.top, (int)g_band.right,
-            (int)g_band.bottom);
 }
 
 void paintWindow(HWND hwnd) {
@@ -226,6 +226,7 @@ void repaintRows(HWND hwnd, App& a, const std::vector<int>& rows) {
         repaint(hwnd);
         return;
     }
+    HDC window = hwnd ? GetDC(hwnd) : nullptr;
     const RECT& vp = a.mode == ViewMode::Details ? a.lay.listViewport : a.lay.gridViewport;
     for (int i : rows) {
         RECT r = a.mode == ViewMode::Details ? a.listRowRect(i) : a.gridCellRect(i);
@@ -238,8 +239,16 @@ void repaintRows(HWND hwnd, App& a, const std::vector<int>& rows) {
             renderItemRow(c, a, i);
         }
         RestoreDC(g_paint.mem, saved);
-        InvalidateRect(hwnd, &clip, FALSE);
+        if (window) {
+            // Blit immediately: while the mouse keeps moving, WM_PAINT is
+            // starved, so waiting for it left the rows unhighlighted.
+            BitBlt(window, clip.left, clip.top, clip.right - clip.left, clip.bottom - clip.top,
+                   g_paint.mem, clip.left, clip.top, SRCCOPY);
+        } else if (hwnd) {
+            InvalidateRect(hwnd, &clip, FALSE);
+        }
     }
+    if (window) ReleaseDC(hwnd, window);
 }
 
 // ---------------------------------------------------------------- selection
@@ -430,6 +439,8 @@ void applyMarqueeSelection(HWND hwnd, App& a) {
     } else {
         repaintRows(hwnd, a, changed);
     }
+    // The row blits may have covered part of the rectangle; put it back.
+    drawBand(hwnd, a);
 }
 
 // ---------------------------------------------------------------- dragging
@@ -624,6 +635,15 @@ void onMouseMove(HWND hwnd, App& a, POINT p) {
     }
     if (a.marquee) {
         moveBand(hwnd, a, p);
+        // Apply the selection from the move handler as well, capped at ~66 Hz:
+        // the band is already on screen, so this can never hold it back, and
+        // selection keeps working even if the timer is starved.
+        static ULONGLONG lastApply = 0;
+        const ULONGLONG now = GetTickCount64();
+        if (now - lastApply >= 15) {
+            lastApply = now;
+            applyMarqueeSelection(hwnd, a);
+        }
         return;
     }
 
