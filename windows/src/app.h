@@ -103,6 +103,9 @@ public:
     bool marquee = false;
     POINT marqueeStart{};
     POINT marqueeEnd{};
+    // Set whenever anything but the rubber band changes; lets the window reuse
+    // its cached frame while a selection drag is in progress.
+    bool paintDirty = true;
     bool dragArmed = false;
     bool dragging = false;
     POINT dragPoint{};
@@ -149,8 +152,10 @@ public:
     // Selection
     void selectAll();
     void clearSelection();
-    std::vector<const Entry*> selectedEntries() const;
-    const Entry* firstSelected() const;
+    // Paths the context menu and the file commands act on: the selected items,
+    // or the folder a context menu was opened on in the tree.
+    std::vector<std::wstring> selectedPaths() const;
+    std::wstring firstSelectedPath() const;
 
     // File operations
     void openEntry(const Entry& e);
@@ -162,7 +167,12 @@ public:
     void paste();
     void copyPaths();
     void revealSelection();
-    void openTerminal();
+    void openTerminalForSelection();
+    void openWithSelection();
+    void openInNewWindow();
+    void createShortcutForSelection();
+    void showSelectionProperties();
+    void sortBy(int column);
     bool performDrop(const std::vector<std::wstring>& paths, const std::wstring& folder);
 
     // Favorites
@@ -223,7 +233,6 @@ public:
     std::vector<MenuItem> menuFor(const std::wstring& name) const;
     std::wstring menuTitle(int index) const;
     std::vector<MenuItem> contextMenu() const;
-    std::vector<MenuItem> treeContextMenu(const std::wstring& nodePath, bool isFavorite) const;
     std::vector<MenuItem> placesMenu() const;
     void performMenuAction(int id, const std::wstring& arg = L"");
 

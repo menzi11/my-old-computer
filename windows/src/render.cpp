@@ -174,7 +174,7 @@ void drawAddressBar(Canvas& c, App& a) {
     if (!a.addrEditing) {
         RECT textRect{a.lay.addrField.left + c.px(4), a.lay.addrField.top,
                       a.lay.addrField.right - c.px(4), a.lay.addrField.bottom};
-        c.textClip(fsx::abbreviateHome(a.current), textRect, Theme::text, Align::Left);
+        c.textClip(a.current, textRect, Theme::text, Align::Left);
     }
     // Drop arrow.
     RECT arrow = a.lay.addrArrow;
@@ -521,7 +521,8 @@ void renderApp(Canvas& c, App& a) {
     drawSplitter(c, a);
     if (a.mode == ViewMode::Details) drawDetails(c, a);
     else drawGrid(c, a);
-    drawMarquee(c, a);
     drawDragTarget(c, a);
     drawStatusBar(c, a);
 }
+
+void renderMarquee(Canvas& c, App& a) { drawMarquee(c, a); }

@@ -95,7 +95,11 @@ the hand-drawn set.  macOS draws the icons in `Icons.swift` per extension.
   Delete moves to the Trash / Recycle Bin.
 - Sizes use the same units on both platforms (`字节`/KB/MB/GB); dates are
   `yyyy/M/d HH:mm`.
-- The address bar abbreviates the home directory to `~` and expands it again.
+- The address bar always shows the real path (no `~` abbreviation) and accepts a
+  path typed by hand.
+- The window has one context menu for an item: the file list and the tree show
+  the same commands for a folder, and the empty area shows views, sorting,
+  refresh, paste and New folder.
 
 ## Platform mapping
 

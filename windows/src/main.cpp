@@ -87,7 +87,52 @@ void dumpLayout(App& a) {
     fclose(f);
 }
 
-void repaint(HWND hwnd) { InvalidateRect(hwnd, nullptr, FALSE); }
+void repaint(HWND hwnd) {
+    g_app.paintDirty = true;
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+// Rectangle covered by the rubber band, clipped to the file view.
+RECT marqueeBand(const App& a) {
+    const RECT& vp = a.mode == ViewMode::Details ? a.lay.listViewport : a.lay.gridViewport;
+    RECT r{std::min(a.marqueeStart.x, a.marqueeEnd.x), std::min(a.marqueeStart.y, a.marqueeEnd.y),
+           std::max(a.marqueeStart.x, a.marqueeEnd.x), std::max(a.marqueeStart.y, a.marqueeEnd.y)};
+    r.left = std::max(r.left, (LONG)vp.left);
+    r.top = std::max(r.top, (LONG)vp.top);
+    r.right = std::min(r.right, (LONG)vp.right);
+    r.bottom = std::min(r.bottom, (LONG)vp.bottom);
+    return r;
+}
+
+// One reusable back buffer for the whole window: creating a compatible bitmap
+// for every mouse-move repaint made big folders drag like molasses.
+struct PaintCache {
+    HDC mem = nullptr;
+    HBITMAP bmp = nullptr;
+    HGDIOBJ old = nullptr;
+    HDC screen = nullptr;
+    int w = 0;
+    int h = 0;
+};
+PaintCache g_paint;
+
+void freePaintCache() {
+    if (g_paint.mem) {
+        if (g_paint.old) SelectObject(g_paint.mem, g_paint.old);
+        DeleteDC(g_paint.mem);
+        g_paint.mem = nullptr;
+        g_paint.old = nullptr;
+    }
+    if (g_paint.bmp) {
+        DeleteObject(g_paint.bmp);
+        g_paint.bmp = nullptr;
+    }
+    if (g_paint.screen) {
+        ReleaseDC(nullptr, g_paint.screen);
+        g_paint.screen = nullptr;
+    }
+    g_paint.w = g_paint.h = 0;
+}
 
 void paintWindow(HWND hwnd) {
     PAINTSTRUCT ps;
@@ -98,17 +143,29 @@ void paintWindow(HWND hwnd) {
         EndPaint(hwnd, &ps);
         return;
     }
-    HDC mem = CreateCompatibleDC(dc);
-    HBITMAP bmp = CreateCompatibleBitmap(dc, rc.right, rc.bottom);
-    HGDIOBJ old = SelectObject(mem, bmp);
-    {
-        Canvas canvas(mem, g_app.scale);
-        renderApp(canvas, g_app);
+    if (g_paint.w != rc.right || g_paint.h != rc.bottom || !g_paint.mem) {
+        freePaintCache();
+        g_paint.screen = GetDC(nullptr);
+        g_paint.mem = CreateCompatibleDC(g_paint.screen);
+        g_paint.bmp = CreateCompatibleBitmap(g_paint.screen, rc.right, rc.bottom);
+        g_paint.old = SelectObject(g_paint.mem, g_paint.bmp);
+        g_paint.w = rc.right;
+        g_paint.h = rc.bottom;
     }
-    BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
-    SelectObject(mem, old);
-    DeleteObject(bmp);
-    DeleteDC(mem);
+    if (g_paint.mem) {
+        if (g_app.paintDirty) {
+            Canvas canvas(g_paint.mem, g_app.scale);
+            renderApp(canvas, g_app);
+            g_app.paintDirty = false;
+        }
+        BitBlt(dc, 0, 0, rc.right, rc.bottom, g_paint.mem, 0, 0, SRCCOPY);
+        if (g_app.marquee) {
+            // The rubber band is the only thing that moves during a selection
+            // drag; drawing it over the cached frame keeps the drag smooth.
+            Canvas overlay(dc, g_app.scale);
+            renderMarquee(overlay, g_app);
+        }
+    }
     EndPaint(hwnd, &ps);
 }
 
@@ -185,14 +242,15 @@ void moveSelection(App& a, int dx, int dy) {
     ensureVisible(a, idx);
 }
 
-void marqueeUpdate(App& a) {
+bool marqueeUpdate(App& a) {
     // +1 on the far edges: a perfectly vertical/horizontal drag has zero width
     // as a RECT and would otherwise select nothing.
     RECT r{std::min(a.marqueeStart.x, a.marqueeEnd.x), std::min(a.marqueeStart.y, a.marqueeEnd.y),
            std::max(a.marqueeStart.x, a.marqueeEnd.x) + 1,
            std::max(a.marqueeStart.y, a.marqueeEnd.y) + 1};
-    bool additive = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-    if (!additive) a.selection.clear();
+    const bool additive = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    std::set<std::wstring> next;
+    if (additive) next = a.selection;
     for (int i = 0; i < (int)a.entries.size(); ++i) {
         // Only items the band actually touches: the icon and the name text.
         // A band drawn in the blank part of the row must not pick anything.
@@ -204,8 +262,11 @@ void marqueeUpdate(App& a) {
             hit = a.gridCellRect(i);
         }
         RECT inter{};
-        if (IntersectRect(&inter, &hit, &r)) a.selection.insert(a.entries[i].path);
+        if (IntersectRect(&inter, &hit, &r)) next.insert(a.entries[i].path);
     }
+    if (next == a.selection) return false;
+    a.selection.swap(next);
+    return true;
 }
 
 void startMarquee(HWND hwnd, App& a, POINT p) {
@@ -244,7 +305,10 @@ void showAppMenu(HWND hwnd, App& a, int index, POINT p) {
 
 void showContextMenu(HWND hwnd, App& a, POINT p) {
     std::vector<MenuItem> items;
+    bool fromTree = false;
     if (a.sidebarVisible && PtInRect(&a.lay.sidebar, p)) {
+        // The tree opens exactly the same menu as the file list does for that
+        // folder, so all commands behave identically in both places.
         int row = a.treeRowAt(p);
         std::wstring path;
         bool fav = false;
@@ -252,12 +316,13 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
             TreeNode* n = a.treeFlat[row];
             path = n->path;
             fav = n->kind == TreeNode::Favorite;
-            a.selection.clear();
             a.hoverTree = row;
         }
+        a.selection.clear();
         a.contextFolder = path;
         a.contextIsFavorite = fav;
-        items = a.treeContextMenu(path, fav);
+        fromTree = true;
+        items = a.contextMenu();
     } else {
         int row = -1;
         if (a.mode == ViewMode::Details) {
@@ -281,6 +346,9 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
     ClientToScreen(hwnd, &screen);
     int id = showPopupMenu(hwnd, items, screen.x, screen.y, false);
     if (id) a.performMenuAction(id);
+    if (fromTree) a.selection.clear();
+    a.contextFolder.clear();
+    a.contextIsFavorite = false;
     repaint(hwnd);
 }
 
@@ -345,6 +413,8 @@ void onMouseMove(HWND hwnd, App& a, POINT p) {
         }
     }
     if (a.marquee) {
+        const RECT before = marqueeBand(a);
+        const int scrollBefore = a.mode == ViewMode::Details ? a.listScroll : a.gridScroll;
         // Auto-scroll when the pointer is dragged past the edge of the list.
         const RECT& vp = a.mode == ViewMode::Details ? a.lay.listViewport : a.lay.gridViewport;
         const int step = a.mode == ViewMode::Details ? a.m.rowH : a.gridCellH();
@@ -356,8 +426,18 @@ void onMouseMove(HWND hwnd, App& a, POINT p) {
             else a.scrollGridBy(step);
         }
         a.marqueeEnd = p;
-        marqueeUpdate(a);
-        repaint(hwnd);
+        const bool selChanged = marqueeUpdate(a);
+        const int scrollAfter = a.mode == ViewMode::Details ? a.listScroll : a.gridScroll;
+        if (selChanged || scrollAfter != scrollBefore) {
+            repaint(hwnd);  // selection or content changed: re-render the frame
+        } else {
+            // Only the band moved: repaint that small area over the cached frame.
+            const RECT after = marqueeBand(a);
+            RECT dirty{};
+            UnionRect(&dirty, &before, &after);
+            InflateRect(&dirty, 2, 2);
+            InvalidateRect(hwnd, &dirty, FALSE);
+        }
         return;
     }
 
@@ -660,7 +740,7 @@ void onKeyDown(HWND hwnd, App& a, WPARAM key) {
     case VK_F5: a.reload(); break;
     case VK_SPACE:
         if (preview::visible()) preview::hide();
-        else if (const Entry* e = a.firstSelected()) preview::show(hwnd, e->path);
+        else if (std::wstring p = a.firstSelectedPath(); !p.empty()) preview::show(hwnd, p);
         break;
     case VK_ESCAPE:
         if (a.marquee || a.dragging) {
@@ -908,6 +988,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DESTROY:
         dnd::revokeTarget(hwnd);
         preview::hide();
+        freePaintCache();
         PostQuitMessage(0);
         return 0;
     default:
@@ -1021,6 +1102,43 @@ int runUiTest(App& app) {
     onLButtonUp(nullptr, app, below);
     check(L"点击空白清空选择", app.selection.empty());
 
+    // The tree has to offer exactly the menu the file list offers.
+    CreateDirectoryW((base + L"\\sub").c_str(), nullptr);
+    app.reload();
+    const std::wstring sub = base + L"\\sub";
+    app.selection.clear();
+    app.selection.insert(sub);
+    app.contextFolder = sub;
+    auto listMenu = app.contextMenu();
+    app.selection.clear();
+    app.contextFolder = sub;  // what a tree right-click sets up
+    auto treeMenu = app.contextMenu();
+    bool sameMenu = listMenu.size() == treeMenu.size();
+    for (size_t i = 0; sameMenu && i < listMenu.size(); ++i)
+        sameMenu = listMenu[i].id == treeMenu[i].id && listMenu[i].title == treeMenu[i].title;
+    check(L"树与列表右键菜单一致", sameMenu);
+
+    bool hasProps = false, hasNewFolder = false, hasOpenWith = false, hasShortcut = false;
+    for (auto& it : listMenu) {
+        if (it.id == ID_PROPERTIES) hasProps = true;
+        if (it.id == ID_CREATE_SHORTCUT) hasShortcut = true;
+    }
+    check(L"文件夹菜单有属性和快捷方式", hasProps && hasShortcut);
+    app.selection.clear();
+    app.selection.insert(base + L"\\item0.txt");
+    app.contextFolder.clear();
+    auto fileMenu = app.contextMenu();
+    for (auto& it : fileMenu)
+        if (it.id == ID_OPEN_WITH) hasOpenWith = true;
+    check(L"文件菜单有打开方式", hasOpenWith);
+    app.selection.clear();
+    app.contextFolder.clear();
+    auto background = app.contextMenu();
+    for (auto& it : background)
+        if (it.id == ID_NEW_FOLDER) hasNewFolder = true;
+    check(L"空白右键有新建文件夹", hasNewFolder);
+    app.selection.clear();
+
     app.setViewMode(ViewMode::Icons);
     app.relayout(1100, 760);
     app.clampScroll();
@@ -1036,6 +1154,61 @@ int runUiTest(App& app) {
     onMouseMove(nullptr, app, POINT{(cell2.left + cell2.right) / 2, cell2.top + 30});
     onLButtonUp(nullptr, app, POINT{(cell2.left + cell2.right) / 2, cell2.top + 30});
     check(L"大图标框选3项", app.selection.size() == 3);
+
+    // Rubber band geometry: both corners must really be drawn.
+    app.setViewMode(ViewMode::Details);
+    app.relayout(1100, 760);
+    app.marquee = true;
+    app.marqueeStart = POINT{app.lay.listViewport.left + 50, app.lay.listViewport.top + 20};
+    app.marqueeEnd = POINT{app.lay.listViewport.left + 300, app.lay.listViewport.top + 120};
+    HDC bandScreen = GetDC(nullptr);
+    HDC bandDc = CreateCompatibleDC(bandScreen);
+    HBITMAP bandBmp = CreateCompatibleBitmap(bandScreen, app.width, app.height);
+    HGDIOBJ bandOld = SelectObject(bandDc, bandBmp);
+    {
+        Canvas c(bandDc, app.scale);
+        renderApp(c, app);
+        renderMarquee(c, app);
+    }
+    int darkTop = 0, firstTop = -1, lastTop = -1;
+    for (int x = app.marqueeStart.x; x < app.marqueeEnd.x; ++x) {
+        if (GetPixel(bandDc, x, app.marqueeStart.y) == Theme::dark) {
+            ++darkTop;
+            if (firstTop < 0) firstTop = x;
+            lastTop = x;
+        }
+    }
+    check(L"框选框横跨整段", darkTop > 10 && firstTop == app.marqueeStart.x &&
+                                 lastTop >= app.marqueeEnd.x - 3);
+    bool leftEdge = GetPixel(bandDc, app.marqueeStart.x, app.marqueeStart.y + 20) == Theme::dark;
+    bool rightEdge = GetPixel(bandDc, app.marqueeEnd.x - 1, app.marqueeStart.y + 20) == Theme::dark;
+    check(L"框选框左右边都在", leftEdge && rightEdge);
+    SelectObject(bandDc, bandOld);
+    DeleteObject(bandBmp);
+    DeleteDC(bandDc);
+    ReleaseDC(nullptr, bandScreen);
+    app.marquee = false;
+    app.marqueeEnd = app.marqueeStart;
+
+    // Paint benchmark: catches accidental full-window repaint storms.
+    app.setViewMode(ViewMode::Details);
+    app.relayout(1100, 760);
+    HDC screen = GetDC(nullptr);
+    HDC mem = CreateCompatibleDC(screen);
+    HBITMAP bmp = CreateCompatibleBitmap(screen, app.width, app.height);
+    HGDIOBJ old = SelectObject(mem, bmp);
+    const ULONGLONG t0 = GetTickCount64();
+    for (int i = 0; i < 20; ++i) {
+        Canvas c(mem, app.scale);
+        renderApp(c, app);
+    }
+    const ULONGLONG frameMs = GetTickCount64() - t0;
+    SelectObject(mem, old);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+    ReleaseDC(nullptr, screen);
+    std::wstring frameLabel = L"渲染20帧 " + std::to_wstring(frameMs) + L"ms";
+    check(frameLabel.c_str(), frameMs < 2000);
     return 0;
 }
 
@@ -1115,7 +1288,6 @@ int runSnapshot(App& app, const std::vector<std::wstring>& args) {
     app.demo = hasArg(args, L"--demo");
     std::wstring path = argValue(args, L"--path");
     if (path.empty()) path = fsx::homeDir();
-    path = fsx::expandHome(path);
     app.current = path;
     app.init(nullptr);
     app.scale = 1.0;
@@ -1269,7 +1441,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
     g_app.demo = hasArg(args, L"--demo");
     std::wstring startPath = argValue(args, L"--path");
     if (startPath.empty()) startPath = fsx::homeDir();
-    startPath = fsx::expandHome(startPath);
     if (g_app.demo) {
         g_app.current = startPath;
         g_app.buildTree();

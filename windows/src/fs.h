@@ -39,8 +39,6 @@ bool isInside(const std::wstring& child, const std::wstring& parent);
 bool exists(const std::wstring& path);
 bool isDirectory(const std::wstring& path);
 bool sameVolume(const std::wstring& a, const std::wstring& b);
-std::wstring abbreviateHome(const std::wstring& path);
-std::wstring expandHome(const std::wstring& text);
 std::wstring uniqueTarget(const std::wstring& src, const std::wstring& destDir);
 
 // File operations.  Return true when at least one item was handled.
@@ -50,6 +48,10 @@ bool moveItems(const std::vector<std::wstring>& paths, const std::wstring& destD
 bool makeFolder(const std::wstring& dir, const std::wstring& name, std::wstring* created);
 bool renameItem(const std::wstring& path, const std::wstring& newName, std::wstring* error);
 bool openWithShell(const std::wstring& path);
+bool openWithDialog(HWND owner, const std::wstring& path);
+bool showProperties(HWND owner, const std::wstring& path);
+bool createShortcut(const std::wstring& target, const std::wstring& dir, std::wstring* created);
+bool clipboardHasFiles();
 bool revealInExplorer(const std::wstring& path);
 bool openTerminalAt(const std::wstring& dir);
 bool hasAnySubdirectory(const std::wstring& dir, bool showHidden);

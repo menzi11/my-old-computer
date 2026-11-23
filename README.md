@@ -65,14 +65,20 @@ for palette, metrics, bevels and interaction rules. The two windows are not
 ## Features
 
 **Navigation that survives a full day** — Back / Forward / Up with a real history
-stack, an address bar that abbreviates `~` for your home folder and expands it again,
-and a keyboard shortcut for every action.
+stack, an address bar that always shows the real Windows path and accepts one you
+type, and a keyboard shortcut for every action.
 
 **Three working views** — details with Name / Size / Type / Date columns and
 click-to-sort (directories first, natural name order), list and large-icon views.
 Switching views keeps the selection. Details rows have no full-row select: only
 clicking the icon or the file name picks the row, so the Size / Type / Date
 columns stay free for scrolling and rubber-band selection.
+
+**Explorer-shaped context menus** — a file or folder menu with Open, Open with,
+Open in new window, Create shortcut, Cut / Copy / Paste, Delete, Rename,
+Properties, Reveal in Explorer and a terminal here; the tree opens that same menu
+for the folder under the pointer, and the empty area offers views, sorting,
+refresh, paste and New folder.
 
 **A sidebar that knows the machine** — My Computer with every drive or mounted
 volume, folders that expand with `+` / `−`, a Favorites group, a draggable splitter

@@ -2,6 +2,7 @@
 
 #include <shlobj.h>
 #include <shlwapi.h>
+#include <shobjidl.h>
 #include <shellapi.h>
 
 #include <algorithm>
@@ -264,22 +265,6 @@ bool sameVolume(const std::wstring& a, const std::wstring& b) {
     return _wcsicmp(rootOf(a).c_str(), rootOf(b).c_str()) == 0;
 }
 
-std::wstring abbreviateHome(const std::wstring& path) {
-    std::wstring home = homeDir();
-    if (path.size() >= home.size() && _wcsnicmp(path.c_str(), home.c_str(), home.size()) == 0) {
-        if (path.size() == home.size()) return L"~";
-        if (path[home.size()] == L'\\') return L"~" + path.substr(home.size());
-    }
-    return path;
-}
-
-std::wstring expandHome(const std::wstring& text) {
-    if (text == L"~") return homeDir();
-    if (text.size() > 1 && text[0] == L'~' && (text[1] == L'\\' || text[1] == L'/'))
-        return homeDir() + L"\\" + text.substr(2);
-    return text;
-}
-
 std::wstring uniqueTarget(const std::wstring& src, const std::wstring& destDir) {
     std::wstring name = fileName(src);
     std::wstring candidate = joinPath(destDir, name);
@@ -412,6 +397,62 @@ bool renameItem(const std::wstring& path, const std::wstring& newName, std::wstr
 bool openWithShell(const std::wstring& path) {
     HINSTANCE r = ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     return (INT_PTR)r > 32;
+}
+
+bool openWithDialog(HWND owner, const std::wstring& path) {
+    OPENASINFO info{};
+    info.pcszFile = path.c_str();
+    info.oaifInFlags = OAIF_EXEC;
+    if (SUCCEEDED(SHOpenWithDialog(owner, &info))) return true;
+    HINSTANCE r = ShellExecuteW(owner, L"openas", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    return (INT_PTR)r > 32;
+}
+
+bool showProperties(HWND owner, const std::wstring& path) {
+    SHELLEXECUTEINFOW sei{};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_INVOKEIDLIST;
+    sei.hwnd = owner;
+    sei.lpVerb = L"properties";
+    sei.lpFile = path.c_str();
+    sei.nShow = SW_SHOWNORMAL;
+    return ShellExecuteExW(&sei) != FALSE;
+}
+
+bool createShortcut(const std::wstring& target, const std::wstring& dir, std::wstring* created) {
+    IShellLinkW* link = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&link))))
+        return false;
+    link->SetPath(target.c_str());
+    std::wstring workDir = isDirectory(target) ? target : parentPath(target);
+    link->SetWorkingDirectory(workDir.c_str());
+    std::wstring base = fileName(target);
+    if (!isDirectory(target)) {
+        size_t dot = base.find_last_of(L'.');
+        if (dot != std::wstring::npos && dot > 0) base = base.substr(0, dot);
+    }
+    if (base.empty()) base = L"快捷方式";
+    std::wstring out = joinPath(dir, base + L" - 快捷方式.lnk");
+    for (int n = 2; exists(out) && n < 1000; ++n)
+        out = joinPath(dir, base + L" - 快捷方式 (" + std::to_wstring(n) + L").lnk");
+    IPersistFile* file = nullptr;
+    if (SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&file)))) {
+        file->Save(out.c_str(), TRUE);
+        file->Release();
+    }
+    link->Release();
+    if (created) *created = out;
+    return exists(out);
+}
+
+bool clipboardHasFiles() {
+    bool has = false;
+    if (OpenClipboard(nullptr)) {
+        has = IsClipboardFormatAvailable(CF_HDROP) != FALSE;
+        CloseClipboard();
+    }
+    return has;
 }
 
 bool revealInExplorer(const std::wstring& path) {

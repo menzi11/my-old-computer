@@ -204,6 +204,10 @@ public:
         bool isTree = false;
         int row = -1;
         computeTarget(p, target, isTree, row);
+        // Repaint only when the highlighted drop target changes: invalidating
+        // on every mouse move made dragging in large folders crawl.
+        const bool changed = target != app_->dragTargetFolder ||
+                             isTree != app_->dragTargetIsTree || row != app_->dragTargetRow;
         app_->dragTargetFolder = target;
         app_->dragTargetIsTree = isTree;
         app_->dragTargetRow = row;
@@ -220,7 +224,10 @@ public:
         // pointer: show the "no drop" cursor instead of a move cursor.
         if (target.empty() && allFromCurrent()) want = DROPEFFECT_NONE;
         if (effect) *effect = want;
-        InvalidateRect(hwnd_, nullptr, FALSE);
+        if (changed) {
+            app_->paintDirty = true;
+            InvalidateRect(hwnd_, nullptr, FALSE);
+        }
         return S_OK;
     }
 
@@ -267,6 +274,7 @@ private:
         app_->dragTargetIsTree = false;
         app_->dragTargetRow = -1;
         paths_.clear();
+        app_->paintDirty = true;
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
 

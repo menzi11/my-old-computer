@@ -186,7 +186,7 @@ void App::loadDirectory(const std::wstring& path, bool recordHistory, bool fromT
         scrollTreeToSelection();
     }
     clampScroll();
-    if (addrEdit && addrEditing) SetWindowTextW(addrEdit, fsx::abbreviateHome(current).c_str());
+    if (addrEdit && addrEditing) SetWindowTextW(addrEdit, current.c_str());
 }
 
 void App::reload() {
@@ -226,7 +226,6 @@ bool App::goToTypedPath(const std::wstring& text) {
     std::wstring p = text;
     while (!p.empty() && (p.front() == L' ' || p.front() == L'\t')) p.erase(p.begin());
     while (!p.empty() && (p.back() == L' ' || p.back() == L'\t')) p.pop_back();
-    p = fsx::expandHome(p);
     if (p.empty()) return false;
     if (!fsx::exists(p) || !fsx::isDirectory(p)) {
         MessageBeep(MB_ICONASTERISK);
@@ -261,17 +260,20 @@ void App::selectAll() {
 
 void App::clearSelection() { selection.clear(); }
 
-std::vector<const Entry*> App::selectedEntries() const {
-    std::vector<const Entry*> out;
+// The tree can open the very same context menu for a folder that is not part
+// of the current listing: those commands then work on contextFolder.
+std::vector<std::wstring> App::selectedPaths() const {
+    std::vector<std::wstring> out;
     for (auto& e : entries)
-        if (selection.count(e.path)) out.push_back(&e);
+        if (selection.count(e.path)) out.push_back(e.path);
+    if (out.empty() && !contextFolder.empty() && fsx::exists(contextFolder))
+        out.push_back(contextFolder);
     return out;
 }
 
-const Entry* App::firstSelected() const {
-    for (auto& e : entries)
-        if (selection.count(e.path)) return &e;
-    return nullptr;
+std::wstring App::firstSelectedPath() const {
+    auto paths = selectedPaths();
+    return paths.empty() ? std::wstring() : paths.front();
 }
 
 // ---------------------------------------------------------------- operations
@@ -285,7 +287,60 @@ void App::openEntry(const Entry& e) {
 }
 
 void App::openSelection() {
-    if (const Entry* e = firstSelected()) openEntry(*e);
+    std::wstring path = firstSelectedPath();
+    if (path.empty()) return;
+    if (fsx::isDirectory(path)) loadDirectory(path);
+    else if (!fsx::openWithShell(path)) showError(hwnd, L"打开", L"无法打开该项。");
+}
+
+void App::openWithSelection() {
+    std::wstring path = firstSelectedPath();
+    if (path.empty()) return;
+    if (!fsx::openWithDialog(hwnd, path)) showError(hwnd, L"打开方式", L"无法打开“打开方式”对话框。");
+}
+
+void App::openInNewWindow() {
+    auto paths = selectedPaths();
+    if (paths.empty() || !fsx::isDirectory(paths.front())) return;
+    wchar_t exe[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring args = L"--path \"" + paths.front() + L"\"";
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    if (CreateProcessW(exe, args.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+    }
+}
+
+void App::createShortcutForSelection() {
+    auto paths = selectedPaths();
+    if (paths.empty()) return;
+    std::wstring dir = fsx::parentPath(paths.front());
+    if (dir.empty()) dir = current;
+    std::wstring created;
+    if (!fsx::createShortcut(paths.front(), dir, &created)) {
+        showError(hwnd, L"创建快捷方式", L"无法创建快捷方式。");
+        return;
+    }
+    if (_wcsicmp(dir.c_str(), current.c_str()) == 0) reload();
+    else loadDirectory(dir);
+    selection.clear();
+    selection.insert(created);
+}
+
+void App::showSelectionProperties() {
+    std::wstring path = firstSelectedPath();
+    if (path.empty()) path = current;
+    if (!fsx::showProperties(hwnd, path)) showError(hwnd, L"属性", L"无法显示属性。");
+}
+
+void App::sortBy(int column) {
+    sortColumn = std::clamp(column, 0, 3);
+    sortAsc = true;
+    fsx::sortEntries(entries, sortColumn, sortAsc);
+    clampScroll();
 }
 
 void App::newFolder() {
@@ -303,10 +358,10 @@ void App::newFolder() {
 }
 
 void App::renameSelection() {
-    const Entry* e = firstSelected();
-    if (!e) return;
-    std::wstring name = e->name;
-    std::wstring full = e->path;
+    auto paths = selectedPaths();
+    if (paths.size() != 1) return;
+    std::wstring full = paths.front();
+    std::wstring name = fsx::fileName(full);
     if (!promptText(hwnd, L"重命名", L"输入新名称：", name, &name)) return;
     if (name.empty() || name == fsx::fileName(full)) return;
     std::wstring error;
@@ -321,20 +376,18 @@ void App::renameSelection() {
 }
 
 void App::deleteSelection() {
-    auto sel = selectedEntries();
-    if (sel.empty()) return;
-    std::vector<std::wstring> paths;
-    for (auto* e : sel) paths.push_back(e->path);
+    auto paths = selectedPaths();
+    if (paths.empty()) return;
     if (!fsx::recycle(paths)) showError(hwnd, L"删除", L"无法将选定的项目移入回收站。");
     selection.clear();
     reload();
 }
 
 void App::copySelection(bool cut) {
-    auto sel = selectedEntries();
+    auto sel = selectedPaths();
     if (sel.empty()) return;
     clip.clear();
-    for (auto* e : sel) clip.push_back(e->path);
+    for (auto& p : sel) clip.push_back(p);
     clipCut = cut;
 
     // Publish the file list so Explorer and other apps can paste it.
@@ -415,9 +468,9 @@ void App::paste() {
 
 void App::copyPaths() {
     std::wstring text;
-    for (auto* e : selectedEntries()) {
+    for (auto& p : selectedPaths()) {
         if (!text.empty()) text += L"\r\n";
-        text += e->path;
+        text += p;
     }
     if (text.empty()) return;
     if (OpenClipboard(hwnd)) {
@@ -434,10 +487,17 @@ void App::copyPaths() {
 }
 
 void App::revealSelection() {
-    if (const Entry* e = firstSelected()) fsx::revealInExplorer(e->path);
+    std::wstring path = firstSelectedPath();
+    if (!path.empty()) fsx::revealInExplorer(path);
 }
 
-void App::openTerminal() { fsx::openTerminalAt(current); }
+void App::openTerminalForSelection() {
+    std::wstring path = firstSelectedPath();
+    std::wstring dir = current;
+    if (!path.empty())
+        dir = fsx::isDirectory(path) ? path : fsx::parentPath(path);
+    fsx::openTerminalAt(dir);
+}
 
 bool App::performDrop(const std::vector<std::wstring>& paths, const std::wstring& folder) {
     std::wstring dest = folder.empty() ? current : folder;
@@ -1038,38 +1098,55 @@ std::vector<MenuItem> App::menuFor(const std::wstring& name) const {
 
 std::vector<MenuItem> App::contextMenu() const {
     std::vector<MenuItem> m;
-    const bool hasSel = !selection.empty();
-    m.push_back({L"打开", ID_OPEN, hasSel});
-    m.push_back({L"快速查看", ID_PREVIEW, hasSel});
-    m.push_back({L"在资源管理器中显示", ID_REVEAL, hasSel});
+    const auto paths = selectedPaths();
+    if (paths.empty()) {
+        // Empty area of the current folder: view, sort, paste and folder tools.
+        m.push_back({L"大图标", ID_VIEW_BIG, true, mode == ViewMode::Icons});
+        m.push_back({L"列表", ID_VIEW_LIST, true, mode == ViewMode::List});
+        m.push_back({L"详细信息", ID_VIEW_DETAILS, true, mode == ViewMode::Details});
+        m.push_back({L"", 0, false, false, true});
+        m.push_back({L"按名称排序", ID_SORT_NAME, true, sortColumn == 0});
+        m.push_back({L"按大小排序", ID_SORT_SIZE, true, sortColumn == 1});
+        m.push_back({L"按类型排序", ID_SORT_TYPE, true, sortColumn == 2});
+        m.push_back({L"按修改日期排序", ID_SORT_DATE, true, sortColumn == 3});
+        m.push_back({L"", 0, false, false, true});
+        m.push_back({L"刷新", ID_REFRESH, true, false, false, L"F5"});
+        m.push_back({L"粘贴", ID_PASTE, fsx::clipboardHasFiles(), false, false, L"Ctrl+V"});
+        m.push_back({L"新建文件夹", ID_NEW_FOLDER, true});
+        m.push_back({L"", 0, false, false, true});
+        m.push_back({L"显示隐藏文件", ID_TOGGLE_HIDDEN, true, showHidden});
+        m.push_back({L"在命令提示符中打开", ID_OPEN_TERMINAL, true});
+        m.push_back({L"属性", ID_PROPERTIES, true});
+        return m;
+    }
+
+    const bool single = paths.size() == 1;
+    const bool isDir = fsx::isDirectory(paths.front());
+    m.push_back({L"打开", ID_OPEN, true});
+    if (single && !isDir) m.push_back({L"打开方式…", ID_OPEN_WITH, true});
+    if (single && isDir) m.push_back({L"在新窗口中打开", ID_OPEN_NEW_WINDOW, true});
+    m.push_back({L"快速查看", ID_PREVIEW, single, false, false, L"Space"});
     m.push_back({L"", 0, false, false, true});
-    m.push_back({L"剪切", ID_CUT, hasSel});
-    m.push_back({L"复制", ID_COPY, hasSel});
-    m.push_back({L"粘贴", ID_PASTE, true});
+    m.push_back({L"剪切", ID_CUT, true, false, false, L"Ctrl+X"});
+    m.push_back({L"复制", ID_COPY, true, false, false, L"Ctrl+C"});
+    if (isDir) m.push_back({L"粘贴", ID_PASTE, fsx::clipboardHasFiles(), false, false, L"Ctrl+V"});
+    m.push_back({L"创建快捷方式", ID_CREATE_SHORTCUT, single});
     m.push_back({L"", 0, false, false, true});
-    m.push_back({L"新建文件夹", ID_NEW_FOLDER, true});
-    m.push_back({L"重命名", ID_RENAME, hasSel});
-    m.push_back({L"删除", ID_DELETE, hasSel});
+    m.push_back({L"删除", ID_DELETE, true, false, false, L"Del"});
+    m.push_back({L"重命名", ID_RENAME, single, false, false, L"F2"});
     m.push_back({L"", 0, false, false, true});
-    m.push_back({L"添加到收藏夹", ID_ADD_FAV, true});
-    if (contextIsFavorite) m.push_back({L"从收藏夹中移除", ID_REMOVE_FAV, true});
-    m.push_back({L"在命令提示符中打开", ID_OPEN_TERMINAL, true});
+    m.push_back({L"属性", ID_PROPERTIES, true});
+    m.push_back({L"在资源管理器中显示", ID_REVEAL, true});
+    m.push_back({L"复制路径", ID_COPY_PATH, true});
+    if (isDir) {
+        m.push_back({L"", 0, false, false, true});
+        m.push_back({L"添加到收藏夹", ID_ADD_FAV, true});
+        if (contextIsFavorite) m.push_back({L"从收藏夹中移除", ID_REMOVE_FAV, true});
+        m.push_back({L"在命令提示符中打开", ID_OPEN_TERMINAL, true});
+    }
     return m;
 }
 
-std::vector<MenuItem> App::treeContextMenu(const std::wstring& nodePath, bool isFavorite) const {
-    std::vector<MenuItem> m;
-    m.push_back({L"打开", ID_OPEN, !nodePath.empty()});
-    m.push_back({L"在资源管理器中显示", ID_REVEAL, !nodePath.empty()});
-    m.push_back({L"", 0, false, false, true});
-    m.push_back({L"新建文件夹", ID_NEW_FOLDER, true});
-    m.push_back({L"粘贴", ID_PASTE, true});
-    m.push_back({L"", 0, false, false, true});
-    m.push_back({L"添加到收藏夹", ID_ADD_FAV, !nodePath.empty()});
-    if (isFavorite) m.push_back({L"从收藏夹中移除", ID_REMOVE_FAV, true});
-    m.push_back({L"在命令提示符中打开", ID_OPEN_TERMINAL, !nodePath.empty()});
-    return m;
-}
 std::vector<MenuItem> App::placesMenu() const {
     std::vector<MenuItem> m;
     m.push_back({L"我的电脑", ID_FAV_BASE + 900, true});
@@ -1092,7 +1169,7 @@ void App::performMenuAction(int id, const std::wstring& arg) {
     (void)arg;
     switch (id) {
     case ID_OPEN:
-        if (!selection.empty()) {
+        if (!selectedPaths().empty()) {
             openSelection();
         } else if (!contextFolder.empty()) {
             if (fsx::isDirectory(contextFolder)) loadDirectory(contextFolder);
@@ -1101,8 +1178,16 @@ void App::performMenuAction(int id, const std::wstring& arg) {
             contextFolder.clear();
         }
         break;
+    case ID_OPEN_WITH: openWithSelection(); break;
+    case ID_OPEN_NEW_WINDOW: openInNewWindow(); break;
+    case ID_CREATE_SHORTCUT: createShortcutForSelection(); break;
+    case ID_PROPERTIES: showSelectionProperties(); break;
+    case ID_SORT_NAME: sortBy(0); break;
+    case ID_SORT_SIZE: sortBy(1); break;
+    case ID_SORT_TYPE: sortBy(2); break;
+    case ID_SORT_DATE: sortBy(3); break;
     case ID_PREVIEW:
-        if (const Entry* e = firstSelected()) preview::show(hwnd, e->path);
+        if (std::wstring p = firstSelectedPath(); !p.empty()) preview::show(hwnd, p);
         break;
     case ID_NEW_FOLDER: newFolder(); break;
     case ID_RENAME: renameSelection(); break;
@@ -1132,7 +1217,7 @@ void App::performMenuAction(int id, const std::wstring& arg) {
     case ID_ADD_FAV: addFavorite(contextFolder.empty() ? current : contextFolder); break;
     case ID_ADD_FAV_CURRENT: addFavorite(current); break;
     case ID_REMOVE_FAV: removeFavorite(contextFolder.empty() ? current : contextFolder); break;
-    case ID_OPEN_TERMINAL: openTerminal(); break;
+    case ID_OPEN_TERMINAL: openTerminalForSelection(); break;
     case ID_ABOUT: showAbout(hwnd); break;
     default:
         if (id >= ID_FAV_BASE) {
@@ -1201,7 +1286,7 @@ void App::beginAddressEdit() {
     SetWindowPos(addrEdit, HWND_TOP, lay.addrField.left + 2, lay.addrField.top + 2,
                  lay.addrField.right - lay.addrField.left - 4,
                  lay.addrField.bottom - lay.addrField.top - 4, SWP_NOACTIVATE);
-    SetWindowTextW(addrEdit, fsx::abbreviateHome(current).c_str());
+    SetWindowTextW(addrEdit, current.c_str());
     ShowWindow(addrEdit, SW_SHOW);
     SetFocus(addrEdit);
     SendMessageW(addrEdit, EM_SETSEL, 0, -1);
