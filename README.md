@@ -74,11 +74,12 @@ Switching views keeps the selection. Details rows have no full-row select: only
 clicking the icon or the file name picks the row, so the Size / Type / Date
 columns stay free for scrolling and rubber-band selection.
 
-**Explorer-shaped context menus** — a file or folder menu with Open, Open with,
-Open in new window, Create shortcut, Cut / Copy / Paste, Delete, Rename,
-Properties, Reveal in Explorer and a terminal here; the tree opens that same menu
-for the folder under the pointer, and the empty area offers views, sorting,
-refresh, paste and New folder.
+**The real Explorer context menu** — right-clicking a file or folder hosts
+Windows' own shell menu, so 7-Zip, Git, your editors, Send To, Previous Versions
+and every other installed extension appears exactly as it does in Explorer.
+The tree opens the same menu for the folder under the pointer; the empty area
+keeps working View / Sort / Refresh / New commands plus a terminal and the
+hidden-files toggle.
 
 **A sidebar that knows the machine** — My Computer with every drive or mounted
 volume, folders that expand with `+` / `−`, a Favorites group, a draggable splitter

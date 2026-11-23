@@ -357,6 +357,24 @@ void App::newFolder() {
     selection.insert(created);
 }
 
+void App::newTextFile() {
+    std::wstring base = contextFolder.empty() ? current : contextFolder;
+    contextFolder.clear();
+    std::wstring path = fsx::joinPath(base, L"新建文本文档.txt");
+    for (int n = 2; fsx::exists(path) && n < 1000; ++n)
+        path = fsx::joinPath(base, L"新建文本文档 (" + std::to_wstring(n) + L").txt");
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        showError(hwnd, L"新建文本文档", fsx::lastErrorText());
+        return;
+    }
+    CloseHandle(h);
+    if (_wcsicmp(base.c_str(), current.c_str()) == 0) reload();
+    else loadDirectory(base);
+    selection.clear();
+    selection.insert(path);
+}
+
 void App::renameSelection() {
     auto paths = selectedPaths();
     if (paths.size() != 1) return;

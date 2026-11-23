@@ -161,6 +161,7 @@ public:
     void openEntry(const Entry& e);
     void openSelection();
     void newFolder();
+    void newTextFile();
     void renameSelection();
     void deleteSelection();
     void copySelection(bool cut);

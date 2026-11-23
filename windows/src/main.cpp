@@ -22,6 +22,7 @@
 #include "render.h"
 #include "scrollbar.h"
 #include "settings.h"
+#include "shellmenu.h"
 #include "snapshot.h"
 #include "theme.h"
 
@@ -304,48 +305,77 @@ void showAppMenu(HWND hwnd, App& a, int index, POINT p) {
 }
 
 void showContextMenu(HWND hwnd, App& a, POINT p) {
-    std::vector<MenuItem> items;
+    std::vector<std::wstring> paths;
+    std::wstring folder = a.current;
     bool fromTree = false;
     if (a.sidebarVisible && PtInRect(&a.lay.sidebar, p)) {
-        // The tree opens exactly the same menu as the file list does for that
-        // folder, so all commands behave identically in both places.
+        // The tree shows the very same shell menu as the file list does for
+        // that folder, so the commands behave identically in both places.
         int row = a.treeRowAt(p);
-        std::wstring path;
-        bool fav = false;
         if (row >= 0) {
             TreeNode* n = a.treeFlat[row];
-            path = n->path;
-            fav = n->kind == TreeNode::Favorite;
             a.hoverTree = row;
+            if (!n->path.empty()) {
+                a.selection.clear();
+                a.contextFolder = n->path;
+                paths.push_back(n->path);
+                folder = n->path;
+            }
         }
-        a.selection.clear();
-        a.contextFolder = path;
-        a.contextIsFavorite = fav;
         fromTree = true;
-        items = a.contextMenu();
     } else {
         int row = -1;
-        if (a.mode == ViewMode::Details) {
-            row = a.listRowAt(p);
-        } else {
-            int idx = a.gridIndexAt(p);
-            if (idx >= 0) row = idx;
-        }
+        if (a.mode == ViewMode::Details) row = a.listRowAt(p);
+        else row = a.gridIndexAt(p);
         if (row >= 0 && row < (int)a.entries.size()) {
-            const Entry& e = a.entries[row];
-            if (!a.selection.count(e.path)) selectOnly(a, row);
-            a.contextFolder = e.isDir ? e.path : L"";
+            if (!a.selection.count(a.entries[row].path)) selectOnly(a, row);
+            for (auto& e : a.entries)
+                if (a.selection.count(e.path)) paths.push_back(e.path);
+            a.contextFolder = a.entries[row].isDir ? a.entries[row].path : L"";
         } else {
             a.selection.clear();
             a.contextFolder.clear();
         }
         a.contextIsFavorite = false;
-        items = a.contextMenu();
     }
+
     POINT screen = p;
     ClientToScreen(hwnd, &screen);
-    int id = showPopupMenu(hwnd, items, screen.x, screen.y, false);
-    if (id) a.performMenuAction(id);
+
+    shellmenu::ViewState state;
+    state.mode = (int)a.mode;
+    state.sortColumn = a.sortColumn;
+    state.showHidden = a.showHidden;
+    shellmenu::Result result = shellmenu::show(hwnd, folder, paths, screen, state);
+
+    if (!result.shown) {
+        // The shell could not build a menu (unusual path): fall back to the
+        // hand-drawn one so the window always has a context menu.
+        std::vector<MenuItem> items = a.contextMenu();
+        int id = showPopupMenu(hwnd, items, screen.x, screen.y, false);
+        if (id) a.performMenuAction(id);
+    } else {
+        switch (result.command) {
+        case shellmenu::Command::Open: a.openSelection(); break;
+        case shellmenu::Command::OpenNewWindow: a.openInNewWindow(); break;
+        case shellmenu::Command::ViewBig: a.setViewMode(ViewMode::Icons); break;
+        case shellmenu::Command::ViewList: a.setViewMode(ViewMode::List); break;
+        case shellmenu::Command::ViewDetails: a.setViewMode(ViewMode::Details); break;
+        case shellmenu::Command::SortName: a.sortBy(0); break;
+        case shellmenu::Command::SortSize: a.sortBy(1); break;
+        case shellmenu::Command::SortType: a.sortBy(2); break;
+        case shellmenu::Command::SortDate: a.sortBy(3); break;
+        case shellmenu::Command::Refresh: a.reload(); break;
+        case shellmenu::Command::ToggleHidden: a.performMenuAction(ID_TOGGLE_HIDDEN); break;
+        case shellmenu::Command::Terminal: a.openTerminalForSelection(); break;
+        case shellmenu::Command::Rename: a.renameSelection(); break;
+        case shellmenu::Command::NewFolder: a.newFolder(); break;
+        case shellmenu::Command::NewTextFile: a.newTextFile(); break;
+        case shellmenu::Command::None: break;
+        }
+        if (result.invokedShell) a.reload();
+    }
+
     if (fromTree) a.selection.clear();
     a.contextFolder.clear();
     a.contextIsFavorite = false;
@@ -981,6 +1011,13 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DROPFILES:
         onDropFiles(hwnd, a, (HDROP)wp);
         return 0;
+    case WM_INITMENUPOPUP:
+    case WM_DRAWITEM:
+    case WM_MEASUREITEM:
+        // A shell context menu may be open and its extensions want owner-draw
+        // notifications (Send To, Open With, 7-Zip ...).
+        if (shellmenu::forwardMessage(msg, wp, lp)) return 0;
+        break;
     case WM_CLOSE:
         a.saveSettings();
         DestroyWindow(hwnd);
@@ -1154,6 +1191,34 @@ int runUiTest(App& app) {
     onMouseMove(nullptr, app, POINT{(cell2.left + cell2.right) / 2, cell2.top + 30});
     onLButtonUp(nullptr, app, POINT{(cell2.left + cell2.right) / 2, cell2.top + 30});
     check(L"大图标框选3项", app.selection.size() == 3);
+    check(L"原生文件菜单可用", shellmenu::canBuildItemMenu(base + L"\\item0.txt"));
+    check(L"原生背景菜单可用", shellmenu::canBuildBackgroundMenu(base));
+
+    auto fileLabels =
+        shellmenu::labels(base, {base + L"\\item0.txt"}, shellmenu::ViewState{});
+    bool menuHasOpen = false, menuHasProps = false;
+    for (auto& text : fileLabels) {
+        if (text.find(L"打开") != std::wstring::npos) menuHasOpen = true;
+        if (text.find(L"属性") != std::wstring::npos) menuHasProps = true;
+    }
+    check(L"系统菜单含打开和属性", fileLabels.size() >= 6 && menuHasOpen && menuHasProps);
+    auto folderLabels = shellmenu::labels(base, {}, shellmenu::ViewState{});
+    bool menuHasView = false;
+    for (auto& text : folderLabels)
+        if (text.find(L"查看") != std::wstring::npos) menuHasView = true;
+    check(L"背景菜单含查看", folderLabels.size() >= 4 && menuHasView);
+
+    auto folderItemLabels = shellmenu::labels(base, {sub}, shellmenu::ViewState{});
+    bool hasNewWindow = false, hasRename = false;
+    for (auto& text : folderItemLabels) {
+        if (text.find(L"在新窗口中打开") != std::wstring::npos) hasNewWindow = true;
+        if (text.find(L"重命名") != std::wstring::npos) hasRename = true;
+    }
+    check(L"文件夹菜单有新窗口和重命名", hasNewWindow && hasRename);
+
+    app.contextFolder = base;
+    app.newTextFile();
+    check(L"新建文本文档", fsx::exists(base + L"\\新建文本文档.txt"));
 
     // Rubber band geometry: both corners must really be drawn.
     app.setViewMode(ViewMode::Details);
