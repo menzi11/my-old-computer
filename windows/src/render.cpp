@@ -215,7 +215,11 @@ void drawTree(Canvas& c, App& a) {
     RECT vp = a.lay.treeViewport;
     c.fill(vp, Theme::white);
 
-    const int selectedRow = a.treeSelectedRow();
+    // While a row's context menu is up, that row is the selected one; the
+    // current folder's highlight comes back when the menu is gone.  (The
+    // hover colour could not do this job: the menu opens under the pointer,
+    // the window gets WM_MOUSELEAVE, and the hover is gone.)
+    const int selectedRow = a.contextTreeRow >= 0 ? a.contextTreeRow : a.treeSelectedRow();
 
     {
         ClipScope clip(c.dc(), vp);

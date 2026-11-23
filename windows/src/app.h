@@ -108,6 +108,10 @@ public:
     // they must not expand the tree or scroll it out from under the pointer.
     int treeClickRow = -1;
 
+    // The tree row whose context menu is up: it is the tree's selected row
+    // meanwhile, the way Explorer's tree shows it.
+    int contextTreeRow = -1;
+
     // Hover / press feedback for the custom chrome.
     int hoverTree = -1;
     int hoverTool = -1;

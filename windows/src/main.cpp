@@ -576,6 +576,7 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
         if (row >= 0) {
             TreeNode* n = a.treeFlat[row];
             a.hoverTree = row;
+            a.contextTreeRow = row;  // the selected row of the tree while its menu is up
             selectionChanged = true;
             if (n->path.empty()) {
                 // Headers without a folder (我的电脑, 收藏夹) get a small menu of
@@ -593,6 +594,7 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
                 } else if (id) {
                     a.performMenuAction(id);
                 }
+                a.contextTreeRow = -1;
                 repaint(hwnd);
                 return;
             }
@@ -687,6 +689,7 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
     if (fromTree) a.selection.clear();
     a.contextFolder.clear();
     a.contextIsFavorite = false;
+    a.contextTreeRow = -1;
     repaint(hwnd);
 
     if (g_menuPending) {
@@ -2047,6 +2050,54 @@ int runUiTest(App& app) {
     for (size_t i = 0; sameMenu && i < listMenu.size(); ++i)
         sameMenu = listMenu[i].id == treeMenu[i].id && listMenu[i].title == treeMenu[i].title;
     check(L"树与列表右键菜单一致", sameMenu);
+
+    // A right-click in the tree makes that row the selected one for as long
+    // as its menu is up, like Explorer's tree: painted in the selection
+    // colour, and the current folder's row not.
+    {
+        const bool sidebarWas = app.sidebarVisible;
+        app.sidebarVisible = true;
+        app.relayout(1100, 760);
+        const int selected = app.treeSelectedRow();
+        int row = -1;
+        const RECT vp = app.lay.treeViewport;
+        for (int i = 0; i < (int)app.treeFlat.size() && row < 0; ++i) {
+            const RECT r = app.treeRowRect(i);
+            if (i != selected && r.top >= vp.top && r.bottom <= vp.bottom && r.right > r.left) row = i;
+        }
+        // The window as it would be painted now, read at one point.
+        const auto selectAt = [&app](POINT p) {
+            HDC screen = GetDC(nullptr);
+            HDC mem = CreateCompatibleDC(screen);
+            HBITMAP bmp = CreateCompatibleBitmap(screen, app.width, app.height);
+            HGDIOBJ old = SelectObject(mem, bmp);
+            {
+                Canvas c(mem, app.scale);
+                renderApp(c, app);
+            }
+            const COLORREF px = GetPixel(mem, p.x, p.y);
+            SelectObject(mem, old);
+            DeleteObject(bmp);
+            DeleteDC(mem);
+            ReleaseDC(nullptr, screen);
+            return (px & 0x00FFFFFF) == Theme::select;
+        };
+        // Just inside the row's right end, past where a clipped title may reach.
+        const auto probe = [&app](int i) {
+            const RECT r = app.treeRowRect(i);
+            return POINT{r.right - 2, (r.top + r.bottom) / 2};
+        };
+        app.contextTreeRow = row;
+        const bool rowBlue = row >= 0 && selectAt(probe(row));
+        const bool currentPlain = selected < 0 || !selectAt(probe(selected));
+        app.contextTreeRow = -1;
+        const bool rowPlainAgain = row >= 0 && !selectAt(probe(row));
+        const bool currentBlueAgain = selected < 0 || selectAt(probe(selected));
+        check(L"文件树里右键点的那一行在菜单开着时是选中的蓝色", rowBlue && currentPlain);
+        check(L"菜单关掉后文件树的选中高亮回到当前文件夹", rowPlainAgain && currentBlueAgain);
+        app.sidebarVisible = sidebarWas;
+        app.relayout(1100, 760);
+    }
 
     bool hasProps = false, hasNewFolder = false, hasOpenWith = false, hasShortcut = false;
     for (auto& it : listMenu) {

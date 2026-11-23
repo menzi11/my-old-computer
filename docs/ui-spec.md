@@ -100,9 +100,11 @@ the hand-drawn set.  macOS draws the icons in `Icons.swift` per extension.
 - The window has one context menu for an item: the *items* come from the real
   Windows shell menu (`IContextMenu`, so every installed extension shows up),
   but the popup is drawn by this app in the Win98 style.  The file list and the
-  tree show the same menu for a folder.  The empty area uses our own working
-  View / Sort / Refresh / New commands plus the shell's Paste, Properties and
-  extensions.
+  tree show the same menu for a folder.  While that menu is up, the folder's
+  row is the tree's selected row (the current folder's highlight returns when
+  the menu is gone), and in the file list the right-clicked items are
+  selected.  The empty area uses our own working View / Sort / Refresh / New
+  commands plus the shell's Paste, Properties and extensions.
 - Tools → Context menu settings lists the app's own entries and the shell's
   entries grouped by where the right-click happened (empty area, folder, file
   without an extension, one group per file extension); each is hidden in that
