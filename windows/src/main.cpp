@@ -34,6 +34,8 @@ bool g_isSnapshot = false;
 
 int pxOf(double scale, double v) { return (int)(v * scale + 0.5); }
 
+constexpr UINT_PTR kMarqueeTimer = 1;
+
 UINT g_dumpMsg = 0;
 
 void dumpLayout(App& a) {
@@ -144,6 +146,8 @@ void freePaintCache() {
 // mouse handler itself.
 RECT g_band{};
 bool g_bandVisible = false;
+// Band rectangle the current selection was computed for.
+RECT g_appliedBand{};
 
 void drawBandDots(HDC dc, const RECT& r) {
     if (r.right <= r.left || r.bottom <= r.top) return;
@@ -177,6 +181,8 @@ void drawBand(HWND hwnd, App& a) {
     drawBandDots(dc, g_band);
     ReleaseDC(hwnd, dc);
     g_bandVisible = true;
+    diagLog(L"BAND %d,%d..%d,%d", (int)g_band.left, (int)g_band.top, (int)g_band.right,
+            (int)g_band.bottom);
 }
 
 void paintWindow(HWND hwnd) {
@@ -386,8 +392,44 @@ void startMarquee(HWND hwnd, App& a, POINT p) {
     a.dragArmed = false;
     a.dragPath.clear();
     g_bandVisible = false;
+    g_appliedBand = marqueeBand(a);
     SetCapture(hwnd);
+    // Selection is recomputed on a timer: a fast mouse only moves the band,
+    // so rendering rows can never slow the rectangle down.
+    SetTimer(hwnd, kMarqueeTimer, 15, nullptr);
     repaint(hwnd);
+}
+
+// Cheap: erase the old rectangle from the cached frame and draw the new one.
+void moveBand(HWND hwnd, App& a, POINT p) {
+    eraseBand(hwnd);
+    a.marqueeEnd = p;
+    drawBand(hwnd, a);
+}
+
+// Expensive: work out which rows the band now covers and repaint just those.
+void applyMarqueeSelection(HWND hwnd, App& a) {
+    const RECT current = marqueeBand(a);
+    if (EqualRect(&current, &g_appliedBand)) return;
+    const int scrollBefore = a.mode == ViewMode::Details ? a.listScroll : a.gridScroll;
+    // Auto-scroll when the pointer is dragged past the edge of the list.
+    const RECT& vp = a.mode == ViewMode::Details ? a.lay.listViewport : a.lay.gridViewport;
+    const int step = a.mode == ViewMode::Details ? a.m.rowH : a.gridCellH();
+    if (a.marqueeEnd.y < vp.top) {
+        if (a.mode == ViewMode::Details) a.scrollListBy(-step);
+        else a.scrollGridBy(-step);
+    } else if (a.marqueeEnd.y >= vp.bottom) {
+        if (a.mode == ViewMode::Details) a.scrollListBy(step);
+        else a.scrollGridBy(step);
+    }
+    const std::vector<int> changed = marqueeUpdate(a, g_appliedBand);
+    g_appliedBand = current;
+    const int scrollAfter = a.mode == ViewMode::Details ? a.listScroll : a.gridScroll;
+    if (scrollAfter != scrollBefore) {
+        repaint(hwnd);  // everything moved: one full redraw
+    } else {
+        repaintRows(hwnd, a, changed);
+    }
 }
 
 // ---------------------------------------------------------------- dragging
@@ -581,28 +623,7 @@ void onMouseMove(HWND hwnd, App& a, POINT p) {
         }
     }
     if (a.marquee) {
-        const RECT previousBand = marqueeBand(a);
-        eraseBand(hwnd);
-        const int scrollBefore = a.mode == ViewMode::Details ? a.listScroll : a.gridScroll;
-        // Auto-scroll when the pointer is dragged past the edge of the list.
-        const RECT& vp = a.mode == ViewMode::Details ? a.lay.listViewport : a.lay.gridViewport;
-        const int step = a.mode == ViewMode::Details ? a.m.rowH : a.gridCellH();
-        if (p.y < vp.top) {
-            if (a.mode == ViewMode::Details) a.scrollListBy(-step);
-            else a.scrollGridBy(-step);
-        } else if (p.y >= vp.bottom) {
-            if (a.mode == ViewMode::Details) a.scrollListBy(step);
-            else a.scrollGridBy(step);
-        }
-        a.marqueeEnd = p;
-        const std::vector<int> changed = marqueeUpdate(a, previousBand);
-        const int scrollAfter = a.mode == ViewMode::Details ? a.listScroll : a.gridScroll;
-        if (scrollAfter != scrollBefore) {
-            repaint(hwnd);  // everything moved: one full redraw
-        } else {
-            repaintRows(hwnd, a, changed);
-        }
-        drawBand(hwnd, a);
+        moveBand(hwnd, a, p);
         return;
     }
 
@@ -852,6 +873,8 @@ void onLButtonUp(HWND hwnd, App& a, POINT p) {
         return;
     }
     if (a.marquee) {
+        applyMarqueeSelection(hwnd, a);
+        KillTimer(hwnd, kMarqueeTimer);
         eraseBand(hwnd);
         a.marquee = false;
         repaint(hwnd);
@@ -1098,6 +1121,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // Something stole the mouse: never leave a rubber band or a pending
         // drag armed.
         if (a.marquee) {
+            KillTimer(hwnd, kMarqueeTimer);
             eraseBand(hwnd);
             a.marquee = false;
         }
@@ -1150,6 +1174,18 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         onMouseWheel(hwnd, a, p, GET_WHEEL_DELTA_WPARAM(wp));
         return 0;
     }
+    case WM_TIMER:
+        if (wp == kMarqueeTimer && a.marquee) {
+            // Follow the real cursor: even if a fast mouse outruns the move
+            // messages, the rectangle stays under the pointer.
+            POINT p{};
+            if (GetCursorPos(&p)) {
+                ScreenToClient(hwnd, &p);
+                if (p.x != a.marqueeEnd.x || p.y != a.marqueeEnd.y) moveBand(hwnd, a, p);
+            }
+            applyMarqueeSelection(hwnd, a);
+        }
+        return 0;
     case WM_KEYDOWN:
         onKeyDown(hwnd, a, wp);
         return 0;
