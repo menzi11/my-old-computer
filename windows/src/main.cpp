@@ -19,6 +19,7 @@
 #include "fs.h"
 #include "hmmenu.h"
 #include "ids.h"
+#include "options.h"
 #include "preview.h"
 #include "render.h"
 #include "scrollbar.h"
@@ -619,7 +620,7 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
     state.sortColumn = a.sortColumn;
     state.showHidden = a.showHidden;
     state.menuMask = a.settings.menuMask;
-    state.hidden = a.settings.hiddenMenuItems;
+    state.hidden = a.hiddenFor(paths);
     shellmenu::Result result;
     if (a.settings.menuMask & kMenuShell)
         result = shellmenu::show(hwnd, folder, paths, screen, state);
@@ -1546,6 +1547,89 @@ int runUiTest(App& app) {
         if (text.find(L"重命名") != std::wstring::npos) hasRename = true;
     }
     check(L"文件夹菜单有新窗口和重命名", hasNewWindow && hasRename);
+
+    // Per-context hiding: background, folder and per-extension lists are
+    // independent, and a file gets its generic list plus its extension's.
+    app.settings.hiddenBg = {L"查看"};
+    app.settings.hiddenFolder = {L"在新窗口中打开"};
+    app.settings.hiddenFile = {L"打印"};
+    app.settings.hiddenExt[L"txt"] = {L"编辑"};
+    check(L"空白处隐藏独立", app.hiddenFor({}) == std::vector<std::wstring>{L"查看"});
+    check(L"文件夹隐藏独立",
+          app.hiddenFor({sub}) == std::vector<std::wstring>{L"在新窗口中打开"});
+    auto fileHidden = app.hiddenFor({base + L"\\item0.txt"});
+    bool hasPrint = false, hasEdit = false;
+    for (auto& h : fileHidden) {
+        if (h == L"打印") hasPrint = true;
+        if (h == L"编辑") hasEdit = true;
+    }
+    check(L"文件隐藏=通用+扩展名", hasPrint && hasEdit && fileHidden.size() == 2);
+    check(L"扩展名菜单可枚举", !shellmenu::probeFileLabels(L"txt").empty());
+
+    // The settings dialog renders its sectioned list offscreen.
+    {
+        std::vector<MenuSection> secs;
+        MenuSection s1;
+        s1.key = L"bg";
+        s1.title = L"空白处（当前文件夹）";
+        s1.items = {L"粘贴", L"属性", L"显示选项"};
+        s1.hidden = {L"显示选项"};
+        MenuSection s2;
+        s2.key = L"dir";
+        s2.title = L"文件夹";
+        s2.items = {L"打开", L"在新窗口中打开", L"属性"};
+        MenuSection s3;
+        s3.key = L"txt";
+        s3.title = L".txt 文件";
+        s3.items = {L"打开", L"编辑", L"打印", L"属性"};
+        s3.hidden = {L"打印"};
+        secs = {s1, s2, s3};
+        HDC pScreen = GetDC(nullptr);
+        HDC pMem = CreateCompatibleDC(pScreen);
+        HBITMAP pBmp = CreateCompatibleBitmap(pScreen, 760, 520);
+        HGDIOBJ pOld = SelectObject(pMem, pBmp);
+        {
+            Canvas c(pMem, 1.0);
+            drawOptionsPreview(c, RECT{0, 0, 760, 520}, 1.0, kMenuDefaults, secs);
+        }
+        int inked = 0;
+        for (int y = 0; y < 520; y += 2)
+            for (int x = 380; x < 760; x += 2)
+                if (GetPixel(pMem, x, y) != Theme::face) ++inked;
+        check(L"设置对话框分组列表渲染", inked > 200);
+        // Save the frame as a BMP so the layout can be inspected by hand.
+        BITMAPINFO bmi{};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = 760;
+        bmi.bmiHeader.biHeight = -520;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+        std::vector<BYTE> bits((size_t)760 * 520 * 4);
+        GetDIBits(pMem, pBmp, 0, 520, bits.data(), &bmi, DIB_RGB_COLORS);
+        wchar_t out[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, out);
+        wcscat_s(out, L"moc-opts-preview.bmp");
+        FILE* f = nullptr;
+        if (_wfopen_s(&f, out, L"wb") == 0 && f) {
+            BITMAPFILEHEADER fh{};
+            fh.bfType = 0x4D42;
+            fh.bfOffBits = sizeof(fh) + sizeof(BITMAPINFOHEADER);
+            fh.bfSize = fh.bfOffBits + (DWORD)bits.size();
+            fwrite(&fh, sizeof(fh), 1, f);
+            fwrite(&bmi.bmiHeader, sizeof(bmi.bmiHeader), 1, f);
+            fwrite(bits.data(), bits.size(), 1, f);
+            fclose(f);
+        }
+        SelectObject(pMem, pOld);
+        DeleteObject(pBmp);
+        DeleteDC(pMem);
+        ReleaseDC(nullptr, pScreen);
+    }
+    app.settings.hiddenBg.clear();
+    app.settings.hiddenFolder.clear();
+    app.settings.hiddenFile.clear();
+    app.settings.hiddenExt.clear();
 
     // A deleted folder must disappear from the tree model.
     const std::wstring live = base + L"\\tree-live";

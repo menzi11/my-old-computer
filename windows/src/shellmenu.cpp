@@ -435,4 +435,36 @@ bool canBuildBackgroundMenu(const std::wstring& folder) {
     return !labels(folder, {}, ViewState{}).empty();
 }
 
+namespace {
+std::wstring probeRoot() {
+    wchar_t tmp[MAX_PATH]{};
+    GetTempPathW(MAX_PATH, tmp);
+    std::wstring dir = std::wstring(tmp) + L"MyOldComputer-probe";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    return dir;
+}
+}  // namespace
+
+std::vector<std::wstring> probeFileLabels(const std::wstring& ext) {
+    const std::wstring dir = probeRoot();
+    std::wstring file = dir + L"\\probe";
+    if (!ext.empty()) file += L"." + ext;
+    DeleteFileW(file.c_str());
+    HANDLE h = CreateFileW(file.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return {};
+    CloseHandle(h);
+    std::vector<std::wstring> out = shellLabels(dir, {file}, false);
+    DeleteFileW(file.c_str());
+    return out;
+}
+
+std::vector<std::wstring> probeFolderLabels() {
+    const std::wstring root = probeRoot();
+    const std::wstring dir = root + L"\\probe-folder";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    std::vector<std::wstring> out = shellLabels(root, {dir}, false);
+    RemoveDirectoryW(dir.c_str());
+    return out;
+}
+
 }  // namespace shellmenu

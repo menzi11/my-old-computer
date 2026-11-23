@@ -258,6 +258,9 @@ public:
     std::vector<MenuItem> contextMenu() const;
     std::vector<MenuItem> placesMenu() const;
     void performMenuAction(int id, const std::wstring& arg = L"");
+    // Shell labels to hide for a context-menu invocation: the background,
+    // folder items, or files (generic list plus the first item's extension).
+    std::vector<std::wstring> hiddenFor(const std::vector<std::wstring>& paths) const;
 
     // Persistence
     void saveSettings();

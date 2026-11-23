@@ -51,4 +51,41 @@ int positionFromDrag(const RECT& bar, const Metrics& m, int content, int view, i
     return std::clamp(pos, 0, maxScroll);
 }
 
+void draw(Canvas& c, const RECT& bar, const Metrics& m, int content, int view, int pos) {
+    c.fill(bar, Theme::face);
+    const int arrow = std::min(m.arrowH, (int)(bar.bottom - bar.top) / 2);
+    RECT dec{bar.left, bar.top, bar.right, bar.top + arrow};
+    RECT inc{bar.left, bar.bottom - arrow, bar.right, bar.bottom};
+    for (int k = 0; k < 2; ++k) {
+        RECT r = k == 0 ? dec : inc;
+        if (r.bottom <= r.top) continue;
+        c.fill(r, Theme::face);
+        c.bevelRaised(r);
+        const int cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+        POINT tri[3];
+        if (k == 0) {
+            tri[0] = {cx - c.px(4), cy + c.px(2)};
+            tri[1] = {cx + c.px(4), cy + c.px(2)};
+            tri[2] = {cx, cy - c.px(3)};
+        } else {
+            tri[0] = {cx - c.px(4), cy - c.px(2)};
+            tri[1] = {cx + c.px(4), cy - c.px(2)};
+            tri[2] = {cx, cy + c.px(3)};
+        }
+        c.polygonFill(tri, 3, Theme::dark);
+    }
+    RECT track = trackRect(bar, m);
+    if (track.bottom > track.top) {
+        c.fill(track, Theme::faceHi);
+        c.vline(track.left, track.top, track.bottom - track.top, Theme::shadow);
+        c.vline(track.left + 1, track.top, track.bottom - track.top, Theme::white);
+        c.vline(track.right - 1, track.top, track.bottom - track.top, Theme::shadow);
+    }
+    RECT knob = knobRect(bar, m, content, view, pos);
+    if (knob.bottom > knob.top) {
+        c.fill(knob, Theme::face);
+        c.bevelRaised(knob);
+    }
+}
+
 }  // namespace scrollbar

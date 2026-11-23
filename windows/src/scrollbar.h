@@ -3,6 +3,7 @@
 
 #include <windows.h>
 
+#include "canvas.h"
 #include "theme.h"
 
 namespace scrollbar {
@@ -17,5 +18,9 @@ Part hitTest(const RECT& bar, POINT p, const Metrics& m, int content, int view, 
 // Converts a knob drag (delta pixels) into a new scroll position.
 int positionFromDrag(const RECT& bar, const Metrics& m, int content, int view, int startPos,
                      int deltaY);
+
+// Draws a complete scrollbar; geometry and pixels in one place so the main
+// window and the settings dialog share the exact same look.
+void draw(Canvas& c, const RECT& bar, const Metrics& m, int content, int view, int pos);
 
 }  // namespace scrollbar

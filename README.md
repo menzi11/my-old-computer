@@ -81,8 +81,9 @@ extension is there without the modern Windows look.  This app adds Quick View,
 Open in new window, Reveal in Explorer, Copy path, a terminal here and a
 reliable Rename.  The tree opens the same menu for the folder under the pointer;
 the empty area keeps working View / Sort / Refresh / New commands.  Tools →
-Context menu settings lists every entry - the app's own and the shell's, straight
-from the registry - and each one can be hidden.
+Context menu settings lists every shell entry grouped by where the right-click
+happened - empty area, folder, file, per file type - and each one can be hidden
+in that context only; any extension can be added to the list by hand.
 
 **A sidebar that knows the machine** — My Computer with every drive or mounted
 volume, folders that expand with `+` / `−`, a Favorites group, a draggable splitter

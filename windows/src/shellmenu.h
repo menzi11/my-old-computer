@@ -66,6 +66,13 @@ std::vector<std::wstring> labels(const std::wstring& folder,
 std::vector<std::wstring> shellLabels(const std::wstring& folder,
                                       const std::vector<std::wstring>& paths, bool background);
 
+// Enumerates a context's shell items by probing with a throwaway file in
+// %TEMP%, so settings can be offered for any file type, not just whatever
+// happens to sit in the current folder.  `ext` has no dot ("png"; empty =
+// a file without an extension).
+std::vector<std::wstring> probeFileLabels(const std::wstring& ext);
+std::vector<std::wstring> probeFolderLabels();
+
 // Used by --uitest: can the shell produce a menu for this path?
 bool canBuildItemMenu(const std::wstring& path);
 bool canBuildBackgroundMenu(const std::wstring& folder);

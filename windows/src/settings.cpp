@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cwctype>
 
 namespace {
 
@@ -12,6 +13,53 @@ std::wstring iniRead(const std::wstring& path, const wchar_t* section, const wch
     wchar_t buf[4096];
     GetPrivateProfileStringW(section, key, def, buf, 4096, path.c_str());
     return buf;
+}
+
+bool startsWith(const std::wstring& s, const wchar_t* prefix) {
+    const size_t n = wcslen(prefix);
+    return s.size() >= n && s.compare(0, n, prefix) == 0;
+}
+
+std::wstring lowerAscii(std::wstring s) {
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](wchar_t c) { return (wchar_t)towlower(c); });
+    return s;
+}
+
+std::vector<std::wstring> sectionNames(const std::wstring& path) {
+    std::vector<wchar_t> buf(32768);
+    const DWORD n = GetPrivateProfileSectionNamesW(buf.data(), (DWORD)buf.size(), path.c_str());
+    std::vector<std::wstring> out;
+    DWORD i = 0;
+    while (i < n) {
+        std::wstring s(&buf[i]);
+        i += (DWORD)s.size() + 1;
+        out.push_back(std::move(s));
+    }
+    return out;
+}
+
+// Reads hide0..hide63 of one section into `out`.
+void readHidden(const std::wstring& path, const wchar_t* section,
+                std::vector<std::wstring>& out) {
+    for (int i = 0; i < 64; ++i) {
+        wchar_t key[16];
+        swprintf_s(key, L"hide%d", i);
+        std::wstring v = iniRead(path, section, key, L"");
+        if (!v.empty()) out.push_back(v);
+    }
+}
+
+void writeHidden(const std::wstring& path, const wchar_t* section,
+                 const std::vector<std::wstring>& list) {
+    for (int i = 0; i < 64; ++i) {
+        wchar_t key[16];
+        swprintf_s(key, L"hide%d", i);
+        if (i < (int)list.size())
+            WritePrivateProfileStringW(section, key, list[i].c_str(), path.c_str());
+        else
+            WritePrivateProfileStringW(section, key, nullptr, path.c_str());
+    }
 }
 
 }  // namespace
@@ -43,13 +91,26 @@ void Settings::load() {
     menuMask = (unsigned)wcstoul(
         iniRead(path, L"menu", L"mask", L"").c_str(), nullptr, 0);
     if (menuMask == 0) menuMask = kMenuDefaults;
-    hiddenMenuItems.clear();
-    for (int i = 0; i < 64; ++i) {
-        wchar_t key[16];
-        swprintf_s(key, L"hide%d", i);
-        std::wstring v = iniRead(path, L"menu", key, L"");
-        if (!v.empty()) hiddenMenuItems.push_back(v);
+
+    // Per-context hidden lists.  The old flat [menu] hide* list applied to
+    // every context at once, so it migrates into all three base lists.
+    std::vector<std::wstring> legacy;
+    readHidden(path, L"menu", legacy);
+    hiddenBg = legacy;
+    hiddenFolder = legacy;
+    hiddenFile = legacy;
+    readHidden(path, L"menu-bg", hiddenBg);
+    readHidden(path, L"menu-folder", hiddenFolder);
+    readHidden(path, L"menu-file", hiddenFile);
+    hiddenExt.clear();
+    const std::wstring kExtPrefix = L"menu-ext.";
+    for (auto& s : sectionNames(path)) {
+        if (!startsWith(s, kExtPrefix.c_str())) continue;
+        const std::wstring ext = lowerAscii(s.substr(kExtPrefix.size()));
+        if (ext.empty()) continue;
+        readHidden(path, s.c_str(), hiddenExt[ext]);
     }
+
     favorites.clear();
     for (int i = 0; i < 64; ++i) {
         wchar_t key[16];
@@ -78,14 +139,28 @@ void Settings::save() const {
     WritePrivateProfileStringW(L"view", L"sysicons", useSystemIcons ? L"1" : L"0", path.c_str());
     swprintf_s(buf, L"0x%X", menuMask);
     WritePrivateProfileStringW(L"menu", L"mask", buf, path.c_str());
-    for (int i = 0; i < 64; ++i) {
-        wchar_t key[16];
-        swprintf_s(key, L"hide%d", i);
-        if (i < (int)hiddenMenuItems.size())
-            WritePrivateProfileStringW(L"menu", key, hiddenMenuItems[i].c_str(), path.c_str());
-        else
-            WritePrivateProfileStringW(L"menu", key, nullptr, path.c_str());
+    // Retire the legacy flat list; the per-context sections replace it.
+    writeHidden(path, L"menu", {});
+    writeHidden(path, L"menu-bg", hiddenBg);
+    writeHidden(path, L"menu-folder", hiddenFolder);
+    writeHidden(path, L"menu-file", hiddenFile);
+
+    // One section per extension that has anything hidden; stale sections
+    // (extensions whose items are all visible again) are removed.
+    std::vector<std::wstring> keep;
+    for (auto& [ext, list] : hiddenExt) {
+        if (list.empty()) continue;
+        const std::wstring section = L"menu-ext." + ext;
+        writeHidden(path, section.c_str(), list);
+        keep.push_back(section);
     }
+    const std::wstring kExtPrefix = L"menu-ext.";
+    for (auto& s : sectionNames(path)) {
+        if (!startsWith(s, kExtPrefix.c_str())) continue;
+        if (std::find(keep.begin(), keep.end(), s) == keep.end())
+            WritePrivateProfileStringW(s.c_str(), nullptr, nullptr, path.c_str());
+    }
+
     WritePrivateProfileStringW(L"favorites", nullptr, nullptr, path.c_str());
     for (size_t i = 0; i < favorites.size() && i < 64; ++i) {
         wchar_t key[16];

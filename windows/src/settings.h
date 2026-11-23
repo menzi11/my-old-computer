@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -38,7 +39,15 @@ struct Settings {
     bool showHidden = false;
     bool useSystemIcons = true;
     unsigned menuMask = kMenuDefaults;
-    std::vector<std::wstring> hiddenMenuItems;  // shell menu labels the user hid
+    // Shell menu labels switched off, kept per Explorer context so hiding
+    // something in one place never touches another: the folder background,
+    // folder items, files without a known extension, and one list per file
+    // extension ("txt" - no dot, lower case).  Labels are matched
+    // case-insensitively against the shell's own item text.
+    std::vector<std::wstring> hiddenBg;
+    std::vector<std::wstring> hiddenFolder;
+    std::vector<std::wstring> hiddenFile;
+    std::map<std::wstring, std::vector<std::wstring>> hiddenExt;
     std::vector<std::wstring> favorites;
 
     void load();

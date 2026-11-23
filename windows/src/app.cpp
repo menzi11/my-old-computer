@@ -12,6 +12,7 @@
 
 #include "dialog.h"
 #include "ids.h"
+#include "options.h"
 #include "preview.h"
 #include "shellmenu.h"
 
@@ -373,37 +374,97 @@ void App::sortBy(int column) {
     clampScroll();
 }
 
+std::vector<std::wstring> App::hiddenFor(const std::vector<std::wstring>& paths) const {
+    if (paths.empty()) return settings.hiddenBg;
+    if (fsx::isDirectory(paths.front())) return settings.hiddenFolder;
+    std::vector<std::wstring> out = settings.hiddenFile;
+    const std::wstring ext = fsx::extensionLower(fsx::fileName(paths.front()));
+    if (!ext.empty()) {
+        auto it = settings.hiddenExt.find(ext);
+        if (it != settings.hiddenExt.end())
+            out.insert(out.end(), it->second.begin(), it->second.end());
+    }
+    return out;
+}
+
 void App::openMenuSettings() {
-    // Offer the shell's own labels (read from the registry by the shell) so
-    // they can be hidden individually, plus our own toggles.
-    std::vector<std::wstring> labels;
-    auto add = [&labels](const std::vector<std::wstring>& items) {
-        for (auto& text : items) {
-            if (text.empty()) continue;
-            if (text == L"查看" || text == L"排序方式" || text == L"分组依据" || text == L"刷新" ||
-                text == L"新建")
-                continue;  // replaced by our own working entries
-            if (std::find(labels.begin(), labels.end(), text) == labels.end())
-                labels.push_back(text);
+    // One section per Explorer context.  Labels we replace with working
+    // equivalents (view/sort/refresh/new, rename) are left out: they are
+    // governed by our own toggles in the dialog's left column.
+    std::vector<MenuSection> sections;
+    auto filter = [](std::vector<std::wstring> items, bool background) {
+        std::vector<std::wstring> out;
+        for (auto& t : items) {
+            if (t.empty()) continue;
+            if (background) {
+                if (t == L"查看" || t == L"排序方式" || t == L"分组依据" || t == L"刷新" ||
+                    t == L"新建")
+                    continue;
+            } else if (t == L"重命名") {
+                continue;
+            }
+            if (std::find(out.begin(), out.end(), t) == out.end()) out.push_back(t);
         }
+        return out;
     };
-    add(shellmenu::shellLabels(current, {}, true));
-    const std::wstring parent = fsx::parentPath(current);
-    if (!parent.empty() && _wcsicmp(parent.c_str(), current.c_str()) != 0)
-        add(shellmenu::shellLabels(parent, {current}, false));
-    for (auto& e : entries) {
-        if (e.isDir) continue;
-        add(shellmenu::shellLabels(current, {e.path}, false));
-        break;
+
+    MenuSection bg;
+    bg.key = L"bg";
+    bg.title = L"空白处（当前文件夹）";
+    bg.items = filter(shellmenu::shellLabels(current, {}, true), true);
+    bg.hidden = settings.hiddenBg;
+    sections.push_back(std::move(bg));
+
+    MenuSection dir;
+    dir.key = L"dir";
+    dir.title = L"文件夹";
+    dir.items = filter(shellmenu::probeFolderLabels(), false);
+    dir.hidden = settings.hiddenFolder;
+    sections.push_back(std::move(dir));
+
+    MenuSection plain;
+    plain.key = L"file";
+    plain.title = L"文件（无扩展名）";
+    plain.items = filter(shellmenu::probeFileLabels(L""), false);
+    plain.hidden = settings.hiddenFile;
+    sections.push_back(std::move(plain));
+
+    // File types: everything the user already configured comes first (so it
+    // can be undone), then the current folder's types up to a cap - probing
+    // each type builds a shell menu, and dozens of those would stall the
+    // dialog.  Anything else can be added by hand inside the dialog.
+    std::vector<std::wstring> exts;
+    auto addExt = [&exts](const std::wstring& e) {
+        if (e.empty()) return;
+        if (std::find(exts.begin(), exts.end(), e) == exts.end()) exts.push_back(e);
+    };
+    for (auto& saved : settings.hiddenExt) addExt(saved.first);
+    for (auto& e : entries)
+        if (!e.isDir) addExt(fsx::extensionLower(e.name));
+    if (exts.size() > 16) exts.resize(16);
+    for (auto& ext : exts) {
+        MenuSection s;
+        s.key = ext;
+        s.title = L"." + ext + L" 文件";
+        s.items = filter(shellmenu::probeFileLabels(ext), false);
+        if (s.items.empty()) continue;
+        auto it = settings.hiddenExt.find(ext);
+        if (it != settings.hiddenExt.end()) s.hidden = it->second;
+        sections.push_back(std::move(s));
     }
-    for (auto& e : entries) {
-        if (!selection.count(e.path)) continue;
-        add(shellmenu::shellLabels(current, {e.path}, false));
-        break;
+
+    if (!showMenuOptions(hwnd, &settings.menuMask, sections)) return;
+    settings.hiddenBg.clear();
+    settings.hiddenFolder.clear();
+    settings.hiddenFile.clear();
+    settings.hiddenExt.clear();
+    for (auto& s : sections) {
+        if (s.key == L"bg") settings.hiddenBg = s.hidden;
+        else if (s.key == L"dir") settings.hiddenFolder = s.hidden;
+        else if (s.key == L"file") settings.hiddenFile = s.hidden;
+        else if (!s.hidden.empty()) settings.hiddenExt[s.key] = s.hidden;
     }
-    std::sort(labels.begin(), labels.end());
-    if (showMenuOptions(hwnd, &settings.menuMask, labels, settings.hiddenMenuItems))
-        settings.save();
+    settings.save();
 }
 
 void App::newFolder() {
