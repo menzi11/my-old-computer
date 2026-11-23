@@ -137,6 +137,11 @@ Lag is never traded for anything. For menus and hover feedback in particular:
   along the menu leaves the funnel on its first pixel. (Without this a
   submenu is gone before a diagonally moving pointer gets to it, and nothing
   in it can be clicked.)
+- A click in a menu window activates nothing, and a menu does not take the
+  foreground moving to its own window for the user leaving it. (Windows asks
+  a window whether to activate it on a click; answering yes for a submenu
+  took the foreground from the root menu, which closed the whole menu before
+  the click reached the submenu.)
 
 ## Platform mapping
 

@@ -233,6 +233,22 @@ POINT rowEdge(const Node* n, int index) {
     return POINT{r.right, (r.top + r.bottom) / 2};
 }
 
+// True for a window of this menu: the root or any of its submenus.
+bool isMenuWindow(HWND h) {
+    wchar_t cls[32]{};
+    DWORD pid = 0;
+    return h && GetWindowThreadProcessId(h, &pid) && pid == GetCurrentProcessId() &&
+           GetClassNameW(h, cls, 32) && lstrcmpW(cls, L"MyOldComputerHMenu") == 0;
+}
+
+// The pointer is on one of this menu's windows with the left button held:
+// the foreground is being lost to a click of ours, not to the user leaving.
+bool clickedOnMenu() {
+    if (!(GetAsyncKeyState(VK_LBUTTON) & 0x8000)) return false;
+    POINT p{};
+    return GetCursorPos(&p) && isMenuWindow(WindowFromPoint(p));
+}
+
 void closeAll(Node* root) {
     destroyChildren(root);
     if (root->hwnd) {
@@ -423,10 +439,40 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
         }
         return 0;
+    case WM_MOUSEACTIVATE:
+        // A click in a menu window activates nothing.  The root is the
+        // foreground window and a submenu cannot be activated
+        // (WS_EX_NOACTIVATE), so letting the system run its activation on a
+        // click in a submenu only deactivated the root - which took that for
+        // the user leaving the menu and closed the whole menu before the
+        // click reached the submenu.  Nothing in a submenu could be clicked
+        // with a real mouse (posted messages skip activation, so no test
+        // showed it).
+        diagLog(L"hmmenu mouseactivate child=%d -> MA_NOACTIVATE",
+                n ? (int)(n->parent != nullptr) : -1);
+        return MA_NOACTIVATE;
+    case WM_POINTERACTIVATE:
+        // The same question, asked for a finger or a pen.
+        return PA_NOACTIVATE;
     case WM_ACTIVATE:
-        if (LOWORD(wp) == WA_INACTIVE && n && !n->parent) closeAll(n);
+        diagLog(L"hmmenu activate %04X child=%d", (unsigned)LOWORD(wp),
+                n ? (int)(n->parent != nullptr) : -1);
+        // Losing the foreground means the user went elsewhere - unless this
+        // menu itself caused it (one of its windows taking it, or a click of
+        // ours on it).  A click in a submenu must never read as leaving the
+        // menu; then the foreground is simply taken back, so that the menu
+        // still closes when the user does go elsewhere.
+        if (LOWORD(wp) == WA_INACTIVE && n && !n->parent) {
+            if (isMenuWindow((HWND)lp) || clickedOnMenu()) {
+                diagLog(L"hmmenu activate lost to its own click: taken back");
+                if (!SetForegroundWindow(n->hwnd)) closeAll(n);
+            } else {
+                closeAll(n);
+            }
+        }
         return 0;
     case WM_CLOSE:
+        diagLog(L"hmmenu close child=%d", n ? (int)(n->parent != nullptr) : -1);
         if (n && !n->parent) closeAll(n);
         return 0;
     case WM_DESTROY:

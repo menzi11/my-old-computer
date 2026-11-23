@@ -1334,9 +1334,13 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     }
+    case WM_ACTIVATE:
+        diagLog(L"main activate %04X", (unsigned)LOWORD(wp));
+        break;
     case WM_LBUTTONDOWN: {
         POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         if (menuIsOpen()) {
+            diagLog(L"main lbutton while a menu is open at %d,%d", p.x, p.y);
             menuClose();
             return 0;
         }
@@ -1359,6 +1363,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_MOUSEACTIVATE:
+        diagLog(L"main mouseactivate menu=%d", (int)menuIsOpen());
         // A click while one of our shell menus is up must not run the normal
         // activation dance: activating the main window makes Windows destroy
         // the foreground menu window mid-activation, and the click that
@@ -1468,11 +1473,13 @@ struct MenuDrive {
     int phase = 0;        // which drive this is (see menuTestStep)
     int step = 0;
     int chosen = 0;       // what the menu returned when a submenu row was clicked
-    bool subHot = false;  // the submenu's own row, painted highlighted
+    bool subHot = false;    // the submenu's own row, painted highlighted
+    bool activates = false;  // the submenu asked the system to activate it on a click
     int x0 = 10, yc0 = 0, yc1 = 0, yc2 = 0, yc3 = 0;  // probe points, client coords of the root
     int itemH = 0, margin = 0;
     Seen afterA, afterB, backA, diagonal, downToB, curved, vertical, plain, returned;
     Seen tall, belowTall;  // a submenu far taller than the menu beside it
+    Seen ownActivation;    // after one of the menu's own windows took the foreground
 };
 
 MenuDrive g_drive;
@@ -1679,7 +1686,16 @@ void menuTestStep(HWND owner) {
             }
             const int y3 = d.margin + 2 * d.itemH + d.itemH / 2;
             d.subHot = menuRowHot(sub, 12, y3);
-            post(sub, WM_LBUTTONUP, 36, y3);  // click a3
+            // What Windows does around a real click in the submenu (a posted
+            // message skips all of it): it asks the window whether to
+            // activate, and on "yes" takes activation away from the window
+            // that has it - the root menu.
+            d.activates =
+                SendMessageW(sub, WM_MOUSEACTIVATE, (WPARAM)sub,
+                             MAKELPARAM(HTCLIENT, WM_LBUTTONDOWN)) != MA_NOACTIVATE;
+            if (d.activates)
+                SendMessageW(d.root, WM_ACTIVATE, MAKEWPARAM(WA_INACTIVE, 0), (LPARAM)sub);
+            if (IsWindow(sub)) post(sub, WM_LBUTTONUP, 36, y3);  // click a3
             next(150);
             break;
         }
@@ -1728,7 +1744,7 @@ void menuTestStep(HWND owner) {
             break;
         }
         break;
-    default:  // 4: a submenu far taller than the menu must not hold its row against the rows beside it
+    case 4:  // a submenu far taller than the menu must not hold its row against the rows beside it
         switch (d.step++) {
         case 0:
             post(d.root, WM_MOUSEMOVE, d.x0, d.yc3);  // hover D
@@ -1744,6 +1760,35 @@ void menuTestStep(HWND owner) {
         case 2:
             d.belowTall = menuTestLook();
             d.belowTall.row3Hot = menuRowHot(d.root, d.x0, d.yc3);
+            PostMessageW(d.root, WM_KEYDOWN, VK_ESCAPE, 0);
+            next(150);
+            break;
+        default:
+            menuClose();
+            break;
+        }
+        break;
+    case 5:  // one of the menu's own windows takes the foreground from the root
+        switch (d.step++) {
+        case 0:
+            post(d.root, WM_MOUSEMOVE, d.x0, d.yc0);
+            next(80);
+            break;
+        case 1: {
+            POINT at{};
+            const HWND sub = submenu(&at);
+            if (!sub) {
+                menuClose();
+                break;
+            }
+            // What Windows tells a window that is losing the foreground to
+            // another one.
+            SendMessageW(d.root, WM_ACTIVATE, MAKEWPARAM(WA_INACTIVE, 0), (LPARAM)sub);
+            next(100);
+            break;
+        }
+        case 2:
+            d.ownActivation = menuTestLook();
             PostMessageW(d.root, WM_KEYDOWN, VK_ESCAPE, 0);
             next(150);
             break;
@@ -2455,11 +2500,17 @@ int runUiTest(App& app) {
 
         // 2. All the way in, and the click lands: the menu returns a3.
         drive(2, 3);
+        check(L"点击菜单窗口时不要求激活（否则根菜单会被取消激活而关闭）", !d.activates);
         check(L"沿路走进子菜单，点的那一项就是要执行的那一项", d.chosen == 203 && d.subHot);
 
         // 3. Back out of the submenu into another row: that row is selected.
         drive(3, 4);
         expect(L"从子菜单回到B行就是B", d.returned, topB, heightB, false, true);
+
+        // 5. The foreground moving to one of the menu's own windows is not
+        //    the user leaving the menu.
+        drive(5, 3);
+        expect(L"前台转给菜单自己的窗口时菜单不关", d.ownActivation, topA, heightA, true, false);
         DestroyMenu(menu);
 
         // The menu bar's popup (another window class) closes on a quick
