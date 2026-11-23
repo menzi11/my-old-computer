@@ -112,6 +112,9 @@ the hand-drawn set.  macOS draws the icons in `Icons.swift` per extension.
   `[menu-ext.<ext>]` sections of settings.ini.
 - The empty-area menu starts with View, Sort by and Refresh, then **New** as
   a submenu holding Folder and Text Document - Explorer's order, nothing flat.
+- New Folder and New Text Document end in that edit, as in Explorer: the new
+  item is scrolled into view, selected, and its name is being typed over
+  (a file's extension is left out). Esc leaves it with the name it got.
 - F2 (and Rename) edits the name in place: the name's selection box becomes a
   white field with a 1 px black frame, the name stays on exactly its pixels,
   the base name is selected (a folder's whole name), Enter commits, Escape

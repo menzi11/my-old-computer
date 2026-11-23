@@ -486,8 +486,13 @@ void App::newFolder() {
     }
     if (_wcsicmp(base.c_str(), current.c_str()) != 0) loadDirectory(base);
     else refreshAfterChange();
+    // As in Explorer: the new folder is in view, selected, and its name is
+    // being typed over.  Esc keeps the name it got, Enter renames it.
     selection.clear();
     selection.insert(created);
+    const int row = rowOfPath(created);
+    revealRow(row);
+    if (row >= 0) beginRename(row);
 }
 
 void App::newTextFile() {
@@ -504,19 +509,26 @@ void App::newTextFile() {
     CloseHandle(h);
     if (_wcsicmp(base.c_str(), current.c_str()) == 0) refreshAfterChange();
     else loadDirectory(base);
+    // The same as for a new folder; the extension is not part of what is
+    // being typed over.
     selection.clear();
     selection.insert(path);
+    const int row = rowOfPath(path);
+    revealRow(row);
+    if (row >= 0) beginRename(row);
 }
 
 void App::renameSelection() {
     auto paths = selectedPaths();
     if (paths.size() != 1) return;
-    // In the current listing: rename in place, over the row's name.
-    for (int i = 0; i < (int)entries.size(); ++i)
-        if (_wcsicmp(entries[i].path.c_str(), paths.front().c_str()) == 0) {
-            beginRename(i);
-            return;
-        }
+    // In the current listing: rename in place, over the row's name (whole
+    // in view, should only its top or bottom line have been).
+    const int row = rowOfPath(paths.front());
+    if (row >= 0) {
+        revealRow(row);
+        beginRename(row);
+        return;
+    }
     // Not visible here (e.g. a tree-only folder): fall back to a prompt.
     std::wstring full = paths.front();
     std::wstring name = fsx::fileName(full);
@@ -880,6 +892,25 @@ void App::scrollTreeToSelection() {
     const int bottom = lay.treeViewport.bottom;
     if (r.top < top) treeScroll -= (top - r.top);
     else if (r.bottom > bottom) treeScroll += (r.bottom - bottom);
+    clampScroll();
+}
+
+int App::rowOfPath(const std::wstring& path) const {
+    for (int i = 0; i < (int)entries.size(); ++i)
+        if (_wcsicmp(entries[i].path.c_str(), path.c_str()) == 0) return i;
+    return -1;
+}
+
+// Scrolls the file view just enough that the row is whole inside it, the way
+// scrollTreeToSelection does for the tree.
+void App::revealRow(int row) {
+    if (row < 0 || row >= (int)entries.size()) return;
+    const bool details = mode == ViewMode::Details;
+    const RECT r = details ? listRowRect(row) : gridCellRect(row);
+    const RECT vp = details ? lay.listViewport : lay.gridViewport;
+    int& scroll = details ? listScroll : gridScroll;
+    if (r.top < vp.top) scroll -= vp.top - r.top;
+    else if (r.bottom > vp.bottom) scroll += r.bottom - vp.bottom;
     clampScroll();
 }
 

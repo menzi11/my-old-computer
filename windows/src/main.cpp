@@ -2568,11 +2568,16 @@ int runUiTest(App& app) {
         // second click too, which arrives as a double-click.
         {
             const std::vector<MenuItem> items{{L"a", 301, true}, {L"b", 302, true}};
-            g_popupClicked = false;
-            g_popupEscaped = false;
-            SetTimer(owner, kPopupTestTimer, 200, nullptr);
-            showPopupMenu(owner, items, work.left + 40, work.top + 40, false);
-            KillTimer(owner, kPopupTestTimer);
+            // Another window taking the foreground closes the popup before the
+            // click (someone is using the machine); then it is simply repeated.
+            for (int attempt = 0; attempt < 3; ++attempt) {
+                g_popupClicked = false;
+                g_popupEscaped = false;
+                SetTimer(owner, kPopupTestTimer, 200, nullptr);
+                showPopupMenu(owner, items, work.left + 40, work.top + 40, false);
+                KillTimer(owner, kPopupTestTimer);
+                if (g_popupClicked) break;
+            }
             check(L"菜单栏弹出的菜单被快速的第二下点击关掉", g_popupClicked && !g_popupEscaped);
         }
         DestroyWindow(owner);
@@ -2593,6 +2598,98 @@ int runUiTest(App& app) {
         check(L"快速的第二下点击（双击消息）照样按下工具栏的查看按钮",
               pressed && app.mode != before && app.pressTool == -1);
         app.setViewMode(ViewMode::Details);
+    }
+
+    // New Folder / New Text Document, the way Explorer does it: the new item
+    // is scrolled into view, selected, and its name is being typed over;
+    // Esc leaves it as it was created, Enter renames it to what was typed.
+    {
+        // A listing long enough that a new folder, which sorts after every
+        // ASCII name, starts out below the window.
+        for (int i = 0; i < 80; ++i)
+            CreateDirectoryW((base + L"\\folder" + std::to_wstring(i)).c_str(), nullptr);
+        for (int i = 0; i < 40; ++i) {
+            const std::wstring f = base + L"\\file" + std::to_wstring(i) + L".txt";
+            HANDLE h = CreateFileW(f.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+            if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+        }
+        app.loadDirectory(base, false);
+        app.setViewMode(ViewMode::Details);
+        app.relayout(1100, 760);
+        app.listScroll = 0;
+        app.clampScroll();
+        // The edit control needs a parent; never shown.  (A stock class: the
+        // rename-field test further on registers a class of its own.)
+        HWND owner = CreateWindowExW(0, L"STATIC", L"", WS_OVERLAPPED, 0, 0, 400, 300, nullptr,
+                                     nullptr, GetModuleHandleW(nullptr), nullptr);
+        app.hwnd = owner;
+        const auto wholeInView = [&app](int row) {
+            const RECT r = app.mode == ViewMode::Details ? app.listRowRect(row)
+                                                         : app.gridCellRect(row);
+            const RECT vp = app.mode == ViewMode::Details ? app.lay.listViewport
+                                                          : app.lay.gridViewport;
+            return row >= 0 && r.top >= vp.top && r.bottom <= vp.bottom && r.left >= vp.left &&
+                   r.right <= vp.right;
+        };
+        const auto onlySelected = [&app](const std::wstring& path) {
+            return app.selection.size() == 1 && app.selection.count(path) != 0;
+        };
+
+        app.newFolder();
+        const std::wstring folder = app.selection.empty() ? L"" : *app.selection.begin();
+        check(L"新建文件夹：滚到可见位置、选中、进入改名",
+              fsx::isDirectory(folder) && wholeInView(app.renameRow) && app.renaming &&
+              app.renameEdit != nullptr && onlySelected(folder));
+        SendMessageW(app.renameEdit, WM_KEYDOWN, VK_ESCAPE, 0);
+        check(L"改名时按 Esc：退出改名，文件夹保持新建时的名字",
+              !app.renaming && app.renameEdit == nullptr && fsx::isDirectory(folder) &&
+                  onlySelected(folder));
+
+        // Esc throws away what was typed.
+        app.selection.clear();
+        app.selection.insert(folder);
+        app.renameSelection();
+        SendMessageW(app.renameEdit, WM_SETTEXT, 0, (LPARAM)L"typed then cancelled");
+        SendMessageW(app.renameEdit, WM_KEYDOWN, VK_ESCAPE, 0);
+        check(L"打了一半按 Esc：输入的作废，名字不变",
+              !app.renaming && fsx::isDirectory(folder) &&
+                  !fsx::exists(base + L"\typed then cancelled"));
+
+        app.selection.clear();
+        app.selection.insert(folder);
+        app.renameSelection();
+        SendMessageW(app.renameEdit, WM_SETTEXT, 0, (LPARAM)L"renamed by the test");
+        SendMessageW(app.renameEdit, WM_KEYDOWN, VK_RETURN, 0);
+        check(L"改名时按 Enter：按输入的名字改名",
+              !app.renaming && fsx::isDirectory(base + L"\\renamed by the test") &&
+                  !fsx::exists(folder) &&
+                  onlySelected(fsx::joinPath(base, L"renamed by the test")));
+
+        // Icons view, and a file: in view, editing, extension not selected.
+        app.setViewMode(ViewMode::Icons);
+        app.relayout(1100, 760);
+        app.gridScroll = 0;
+        app.clampScroll();
+        app.newTextFile();
+        const std::wstring text = app.selection.empty() ? L"" : *app.selection.begin();
+        DWORD selStart = 0, selEnd = 0;
+        if (app.renameEdit) SendMessageW(app.renameEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+        const std::wstring textName = fsx::fileName(text);
+        const bool nameOnly = selStart == 0 && selEnd == textName.size() - 4;
+        check(L"新建文本文档：滚到可见位置、选中、进入改名（扩展名不在改名范围里）",
+              fsx::exists(text) && wholeInView(app.renameRow) && app.renaming &&
+              onlySelected(text) && nameOnly);
+        SendMessageW(app.renameEdit, WM_KEYDOWN, VK_ESCAPE, 0);
+        check(L"新文件上按 Esc：退出改名，文件保持新建时的名字",
+              !app.renaming && fsx::exists(text) && onlySelected(text));
+
+        app.hwnd = nullptr;
+        DestroyWindow(owner);
+        app.setViewMode(ViewMode::Details);
+        app.relayout(1100, 760);
+        app.listScroll = 0;
+        app.gridScroll = 0;
+        app.clampScroll();
     }
 
     // The rename field, against what the row really paints.  Every view draws

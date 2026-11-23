@@ -236,6 +236,8 @@ public:
     void flattenTree();
     int treeSelectedRow() const;
     void scrollTreeToSelection();
+    int rowOfPath(const std::wstring& path) const;
+    void revealRow(int row);  // scrolls the file view just enough to show the row
     bool treeHasSubdir(const std::wstring& path);
     void noteChildren(const std::wstring& dir, bool hasSubdir);
 
