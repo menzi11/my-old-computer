@@ -11,6 +11,7 @@
 
 #include "debug.h"
 #include "fs.h"
+#include "settings.h"
 
 namespace shellmenu {
 namespace {
@@ -35,6 +36,10 @@ enum CustomId {
     kRename,
     kNewFolder,
     kNewTextFile,
+    kSettings,
+    kPreview,
+    kReveal,
+    kCopyPath,
 };
 
 IContextMenu2* g_menu2 = nullptr;
@@ -109,32 +114,48 @@ bool bindFolder(const std::wstring& folder, IShellFolder** out) {
 }
 
 void addViewAndSort(HMENU menu, const ViewState& state) {
-    HMENU view = CreatePopupMenu();
-    AppendMenuW(view, MF_STRING, kViewBig, L"大图标");
-    AppendMenuW(view, MF_STRING, kViewList, L"列表");
-    AppendMenuW(view, MF_STRING, kViewDetails, L"详细信息");
-    const UINT viewId = state.mode == 1 ? kViewBig : (state.mode == 2 ? kViewList : kViewDetails);
-    CheckMenuRadioItem(view, kViewBig, kViewDetails, viewId, MF_BYCOMMAND);
+    const bool wantView = (state.menuMask & kMenuBgView) != 0;
+    const bool wantSort = (state.menuMask & kMenuBgSort) != 0;
+    const bool wantNew = (state.menuMask & kMenuBgNew) != 0;
+    const bool wantRefresh = (state.menuMask & kMenuBgRefresh) != 0;
 
-    HMENU sort = CreatePopupMenu();
-    AppendMenuW(sort, MF_STRING, kSortName, L"名称");
-    AppendMenuW(sort, MF_STRING, kSortSize, L"大小");
-    AppendMenuW(sort, MF_STRING, kSortType, L"类型");
-    AppendMenuW(sort, MF_STRING, kSortDate, L"修改日期");
-    CheckMenuRadioItem(sort, kSortName, kSortDate, kSortName + state.sortColumn, MF_BYCOMMAND);
+    HMENU view = nullptr;
+    if (wantView) {
+        view = CreatePopupMenu();
+        AppendMenuW(view, MF_STRING, kViewBig, L"大图标");
+        AppendMenuW(view, MF_STRING, kViewList, L"列表");
+        AppendMenuW(view, MF_STRING, kViewDetails, L"详细信息");
+        const UINT viewId =
+            state.mode == 1 ? kViewBig : (state.mode == 2 ? kViewList : kViewDetails);
+        CheckMenuRadioItem(view, kViewBig, kViewDetails, viewId, MF_BYCOMMAND);
+    }
 
-    // The shell's New command needs Explorer's view to finish the rename, so
-    // it would leave nothing behind; these two create the item themselves.
-    HMENU newMenu = CreatePopupMenu();
-    AppendMenuW(newMenu, MF_STRING, kNewFolder, L"文件夹");
-    AppendMenuW(newMenu, MF_STRING, kNewTextFile, L"文本文档");
+    HMENU sort = nullptr;
+    if (wantSort) {
+        sort = CreatePopupMenu();
+        AppendMenuW(sort, MF_STRING, kSortName, L"名称");
+        AppendMenuW(sort, MF_STRING, kSortSize, L"大小");
+        AppendMenuW(sort, MF_STRING, kSortType, L"类型");
+        AppendMenuW(sort, MF_STRING, kSortDate, L"修改日期");
+        CheckMenuRadioItem(sort, kSortName, kSortDate, kSortName + state.sortColumn,
+                           MF_BYCOMMAND);
+    }
+
+    HMENU newMenu = nullptr;
+    if (wantNew) {
+        // The shell's New command needs Explorer's view to finish the rename,
+        // so it would leave nothing behind; these create the item themselves.
+        newMenu = CreatePopupMenu();
+        AppendMenuW(newMenu, MF_STRING, kNewFolder, L"文件夹");
+        AppendMenuW(newMenu, MF_STRING, kNewTextFile, L"文本文档");
+    }
 
     // Insert from the bottom up: each insert lands at position 0.
     InsertMenuW(menu, 0, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
-    InsertMenuW(menu, 0, MF_BYPOSITION | MF_POPUP, (UINT_PTR)newMenu, L"新建");
-    InsertMenuW(menu, 0, MF_BYPOSITION | MF_STRING, kRefresh, L"刷新");
-    InsertMenuW(menu, 0, MF_BYPOSITION | MF_POPUP, (UINT_PTR)sort, L"排序方式");
-    InsertMenuW(menu, 0, MF_BYPOSITION | MF_POPUP, (UINT_PTR)view, L"查看");
+    if (newMenu) InsertMenuW(menu, 0, MF_BYPOSITION | MF_POPUP, (UINT_PTR)newMenu, L"新建");
+    if (wantRefresh) InsertMenuW(menu, 0, MF_BYPOSITION | MF_STRING, kRefresh, L"刷新");
+    if (sort) InsertMenuW(menu, 0, MF_BYPOSITION | MF_POPUP, (UINT_PTR)sort, L"排序方式");
+    if (view) InsertMenuW(menu, 0, MF_BYPOSITION | MF_POPUP, (UINT_PTR)view, L"查看");
 }
 
 Command commandFor(UINT id) {
@@ -154,6 +175,10 @@ Command commandFor(UINT id) {
     case kRename: return Command::Rename;
     case kNewFolder: return Command::NewFolder;
     case kNewTextFile: return Command::NewTextFile;
+    case kSettings: return Command::Settings;
+    case kPreview: return Command::Preview;
+    case kReveal: return Command::Reveal;
+    case kCopyPath: return Command::CopyPath;
     default: return Command::None;
     }
 }
@@ -224,35 +249,51 @@ bool buildMenu(HWND owner, const std::wstring& folderPath, const std::vector<std
                                 {L"查看", L"排序方式", L"分组依据", L"刷新", L"新建"});
         addViewAndSort(out->menu, state);
         AppendMenuW(out->menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(out->menu, MF_STRING, kTerminal, L"在命令提示符中打开");
-        AppendMenuW(out->menu, MF_STRING | (state.showHidden ? MF_CHECKED : 0), kToggleHidden,
-                    L"显示隐藏文件");
+        if (state.menuMask & kMenuBgTerminal)
+            AppendMenuW(out->menu, MF_STRING, kTerminal, L"在命令提示符中打开");
+        if (state.menuMask & kMenuBgHidden)
+            AppendMenuW(out->menu, MF_STRING | (state.showHidden ? MF_CHECKED : 0), kToggleHidden,
+                        L"显示隐藏文件");
+        if (state.menuMask & kMenuBgSettings)
+            AppendMenuW(out->menu, MF_STRING, kSettings, L"设置…");
     } else {
         const bool single = paths.size() == 1;
         const bool isDir = fsx::isDirectory(paths.front());
-        UINT insert = 0;
-        if (!menuHasText(out->menu, L"打开")) {
-            InsertMenuW(out->menu, insert++, MF_BYPOSITION | MF_STRING, kOpen, L"打开");
-            InsertMenuW(out->menu, insert++, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
-            SetMenuDefaultItem(out->menu, kOpen, FALSE);
-        }
-        if (isDir && single) {
-            // Explorer adds this one itself; the raw shell menu does not have it.
-            int openPos = -1;
-            for (int i = 0; i < GetMenuItemCount(out->menu); ++i) {
-                const std::wstring text = itemText(out->menu, i);
-                if (startsWith(text, L"打开") && text.find(L"方式") == std::wstring::npos) {
-                    openPos = i;
-                    break;
-                }
+
+        // Find the shell's default verb so our extras sit right below it.
+        int openPos = -1;
+        for (int i = 0; i < GetMenuItemCount(out->menu); ++i) {
+            const std::wstring text = itemText(out->menu, i);
+            if (startsWith(text, L"打开") && text.find(L"方式") == std::wstring::npos) {
+                openPos = i;
+                break;
             }
-            if (openPos >= 0 && !menuHasText(out->menu, L"在新窗口中打开"))
-                InsertMenuW(out->menu, openPos + 1, MF_BYPOSITION | MF_STRING, kOpenNewWindow,
-                            L"在新窗口中打开");
         }
+        if (openPos < 0) {
+            InsertMenuW(out->menu, 0, MF_BYPOSITION | MF_STRING, kOpen, L"打开");
+            SetMenuDefaultItem(out->menu, kOpen, FALSE);
+            openPos = 0;
+        }
+        int at = openPos + 1;
+        if ((state.menuMask & kMenuItemPreview) && single)
+            InsertMenuW(out->menu, at++, MF_BYPOSITION | MF_STRING, kPreview, L"快速查看");
+        if ((state.menuMask & kMenuItemNewWindow) && isDir && single &&
+            !menuHasText(out->menu, L"在新窗口中打开"))
+            InsertMenuW(out->menu, at++, MF_BYPOSITION | MF_STRING, kOpenNewWindow,
+                        L"在新窗口中打开");
+        if (state.menuMask & kMenuItemReveal)
+            InsertMenuW(out->menu, at++, MF_BYPOSITION | MF_STRING, kReveal,
+                        L"在资源管理器中显示");
+        if (state.menuMask & kMenuItemCopyPath)
+            InsertMenuW(out->menu, at++, MF_BYPOSITION | MF_STRING, kCopyPath, L"复制路径");
+        if (state.menuMask & kMenuItemTerminal)
+            InsertMenuW(out->menu, at++, MF_BYPOSITION | MF_STRING, kTerminal,
+                        L"在命令提示符中打开");
+        if (at > openPos + 1) InsertMenuW(out->menu, at++, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
+
         // The shell's Rename verb needs an Explorer view; ours opens the
         // rename prompt instead.
-        if (single) {
+        if (single && (state.menuMask & kMenuItemRename)) {
             removeItemsStartingWith(out->menu, {L"重命名"});
             int propsPos = -1;
             for (int i = 0; i < GetMenuItemCount(out->menu); ++i) {

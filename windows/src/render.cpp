@@ -317,6 +317,40 @@ void drawStatusBar(Canvas& c, App& a) {
 
 // ---------------------------------------------------------------- content
 
+// One list row; also used to repaint a single row while a rubber band is
+// dragged, so selection feedback costs one row instead of the whole window.
+void drawDetailsRow(Canvas& c, App& a, int i) {
+    RECT r = a.listRowRect(i);
+    const Entry& e = a.entries[i];
+    const bool sel = a.selection.count(e.path) > 0;
+    c.fill(r, Theme::white);
+    const int extent = std::min(a.lay.nameW, a.nameExtent(i));
+    if (sel) c.fill(RECT{r.left, r.top, r.left + extent, r.bottom}, Theme::select);
+    const int s16 = c.px(16);
+    RECT iconRect{r.left + c.px(3), r.top + c.px(2), r.left + c.px(3) + s16,
+                  r.top + c.px(2) + s16};
+    if (!drawShellIcon(c, a, iconRect, e.path, e.isDir)) {
+        if (e.isDir) {
+            Icon::folder(c, iconRect);
+        } else {
+            Icon::file(c, iconRect, fsx::extensionLower(e.name));
+        }
+    }
+    RECT nameRect{r.left + c.px(22), r.top, r.left + a.lay.nameW - c.px(4), r.bottom};
+    c.textClip(e.name, nameRect, sel ? Theme::white : Theme::text, Align::Left);
+    if (e.hasSize)
+        c.textClip(fsx::formatSize(e.size),
+                   RECT{a.lay.colX[1], r.top, a.lay.colX[1] + a.lay.colW[1] - c.px(8), r.bottom},
+                   Theme::text, Align::Right);
+    c.textClip(e.type,
+               RECT{a.lay.colX[2] + c.px(5), r.top, a.lay.colX[2] + a.lay.colW[2], r.bottom},
+               Theme::text, Align::Left);
+    if (e.hasTime)
+        c.textClip(fsx::formatDate(e.mtime),
+                   RECT{a.lay.colX[3] + c.px(5), r.top, a.lay.colX[3] + a.lay.colW[3], r.bottom},
+                   Theme::text, Align::Left);
+}
+
 void drawDetails(Canvas& c, App& a) {
     RECT content = a.lay.content;
     const int contentW = content.right - content.left;
@@ -359,41 +393,61 @@ void drawDetails(Canvas& c, App& a) {
         for (int i = 0; i < (int)a.entries.size(); ++i) {
             RECT r = a.listRowRect(i);
             if (r.bottom <= vp.top || r.top >= vp.bottom) continue;
-            const Entry& e = a.entries[i];
-            const bool sel = a.selection.count(e.path) > 0;
-            c.fill(r, Theme::white);
-            const int extent = std::min(a.lay.nameW, a.nameExtent(i));
-            if (sel) c.fill(RECT{r.left, r.top, r.left + extent, r.bottom}, Theme::select);
-            const int s16 = c.px(16);
-            RECT iconRect{r.left + c.px(3), r.top + c.px(2), r.left + c.px(3) + s16,
-                          r.top + c.px(2) + s16};
-            if (!drawShellIcon(c, a, iconRect, e.path, e.isDir)) {
-                if (e.isDir) {
-                    Icon::folder(c, iconRect);
-                } else {
-                    Icon::file(c, iconRect, fsx::extensionLower(e.name));
-                }
-            }
-            RECT nameRect{r.left + c.px(22), r.top, r.left + a.lay.nameW - c.px(4), r.bottom};
-            c.textClip(e.name, nameRect, sel ? Theme::white : Theme::text, Align::Left);
-            if (e.hasSize)
-                c.textClip(fsx::formatSize(e.size),
-                           RECT{a.lay.colX[1], r.top, a.lay.colX[1] + a.lay.colW[1] - c.px(8),
-                                r.bottom},
-                           Theme::text, Align::Right);
-            c.textClip(e.type,
-                       RECT{a.lay.colX[2] + c.px(5), r.top, a.lay.colX[2] + a.lay.colW[2],
-                            r.bottom},
-                       Theme::text, Align::Left);
-            if (e.hasTime)
-                c.textClip(fsx::formatDate(e.mtime),
-                           RECT{a.lay.colX[3] + c.px(5), r.top, a.lay.colX[3] + a.lay.colW[3],
-                                r.bottom},
-                           Theme::text, Align::Left);
+            drawDetailsRow(c, a, i);
         }
     }
     c.frame(RECT{vp.left - 1, vp.top - 1, vp.right + 1, vp.bottom + 1}, Theme::shadow);
     drawScrollBarAt(c, a, a.lay.listBar, a.listContentHeight(), vp.bottom - vp.top, a.listScroll);
+}
+
+// One list/icon cell; also used for single-cell repaints during a drag.
+void drawGridCell(Canvas& c, App& a, int i) {
+    RECT r = a.gridCellRect(i);
+    const Entry& e = a.entries[i];
+    const bool sel = a.selection.count(e.path) > 0;
+    const int s16 = c.px(16);
+    c.fill(r, Theme::white);
+    if (a.mode == ViewMode::List) {
+        RECT iconRect{r.left + c.px(2), r.top + c.px(2), r.left + c.px(2) + s16,
+                      r.top + c.px(2) + s16};
+        if (!drawShellIcon(c, a, iconRect, e.path, e.isDir)) {
+            if (e.isDir) Icon::folder(c, iconRect);
+            else Icon::file(c, iconRect, fsx::extensionLower(e.name));
+        }
+        const int textLeft = iconRect.right + c.px(4);
+        std::wstring label = ellipsize(c, e.name, (int)(r.right - c.px(4)) - textLeft);
+        if (sel) {
+            int tw = c.textWidth(label);
+            c.fill(RECT{r.left + c.px(1), r.top, textLeft + tw + c.px(3), r.bottom},
+                   Theme::select);
+        }
+        c.textClip(label, RECT{textLeft, r.top, r.right - c.px(2), r.bottom},
+                   sel ? Theme::white : Theme::text, Align::Left);
+        return;
+    }
+    const int iconSize = c.px(48);
+    RECT iconBox{(r.left + r.right) / 2 - iconSize / 2, r.top + c.px(4),
+                 (r.left + r.right) / 2 + iconSize / 2, r.top + c.px(4) + iconSize};
+    if (!drawShellIcon(c, a, iconBox, e.path, e.isDir)) {
+        if (e.isDir) {
+            Icon::folder(c, iconBox);
+        } else {
+            const int inset = c.px(8);
+            Icon::file(c,
+                       RECT{iconBox.left + inset, iconBox.top + inset, iconBox.right - inset,
+                            iconBox.bottom - inset},
+                       fsx::extensionLower(e.name));
+        }
+    }
+    const int bandTop = r.top + c.px(54);
+    const int bandH = std::max(0, (int)(r.bottom - c.px(2)) - bandTop);
+    std::wstring label = ellipsize(c, e.name, (int)(r.right - r.left) - c.px(10));
+    const int tw = c.textWidth(label);
+    const int lh = c.lineHeight();
+    const int lx = (r.left + r.right - tw) / 2;
+    const int ly = bandTop + std::max(0, (bandH - lh) / 2);
+    if (sel) c.fill(RECT{lx - c.px(3), ly, lx + tw + c.px(3), ly + lh}, Theme::select);
+    c.text(label, lx, ly, sel ? Theme::white : Theme::text);
 }
 
 void drawGrid(Canvas& c, App& a) {
@@ -408,58 +462,12 @@ void drawGrid(Canvas& c, App& a) {
     c.bevelSunken(area);
 
     RECT vp = a.lay.gridViewport;
-    const int s16 = c.px(16);
     {
         ClipScope clip(c.dc(), vp);
         for (int i = 0; i < (int)a.entries.size(); ++i) {
             RECT r = a.gridCellRect(i);
             if (r.bottom <= vp.top || r.top >= vp.bottom) continue;
-            const Entry& e = a.entries[i];
-            const bool sel = a.selection.count(e.path) > 0;
-            if (a.mode == ViewMode::List) {
-                RECT iconRect{r.left + c.px(2), r.top + c.px(2), r.left + c.px(2) + s16,
-                              r.top + c.px(2) + s16};
-                if (!drawShellIcon(c, a, iconRect, e.path, e.isDir)) {
-                    if (e.isDir) Icon::folder(c, iconRect);
-                    else Icon::file(c, iconRect, fsx::extensionLower(e.name));
-                }
-                const int textLeft = iconRect.right + c.px(4);
-                std::wstring label =
-                    ellipsize(c, e.name, (int)(r.right - c.px(4)) - textLeft);
-                if (sel) {
-                    int tw = c.textWidth(label);
-                    c.fill(RECT{r.left + c.px(1), r.top, textLeft + tw + c.px(3), r.bottom},
-                           Theme::select);
-                }
-                c.textClip(label,
-                           RECT{textLeft, r.top, r.right - c.px(2), r.bottom},
-                           sel ? Theme::white : Theme::text, Align::Left);
-                continue;
-            }
-            const int iconSize = c.px(48);
-            RECT iconBox{(r.left + r.right) / 2 - iconSize / 2, r.top + c.px(4),
-                         (r.left + r.right) / 2 + iconSize / 2, r.top + c.px(4) + iconSize};
-            if (!drawShellIcon(c, a, iconBox, e.path, e.isDir)) {
-                if (e.isDir) {
-                    Icon::folder(c, iconBox);
-                } else {
-                    const int inset = c.px(8);
-                    Icon::file(c,
-                               RECT{iconBox.left + inset, iconBox.top + inset, iconBox.right - inset,
-                                    iconBox.bottom - inset},
-                               fsx::extensionLower(e.name));
-                }
-            }
-            const int bandTop = r.top + c.px(54);
-            const int bandH = std::max(0, (int)(r.bottom - c.px(2)) - bandTop);
-            std::wstring label = ellipsize(c, e.name, (int)(r.right - r.left) - c.px(10));
-            const int tw = c.textWidth(label);
-            const int lh = c.lineHeight();
-            const int lx = (r.left + r.right - tw) / 2;
-            const int ly = bandTop + std::max(0, (bandH - lh) / 2);
-            if (sel)
-                c.fill(RECT{lx - c.px(3), ly, lx + tw + c.px(3), ly + lh}, Theme::select);
-            c.text(label, lx, ly, sel ? Theme::white : Theme::text);
+            drawGridCell(c, a, i);
         }
     }
     c.frame(RECT{vp.left - 1, vp.top - 1, vp.right + 1, vp.bottom + 1}, Theme::shadow);
@@ -526,3 +534,9 @@ void renderApp(Canvas& c, App& a) {
 }
 
 void renderMarquee(Canvas& c, App& a) { drawMarquee(c, a); }
+
+void renderItemRow(Canvas& c, App& a, int index) {
+    if (index < 0 || index >= (int)a.entries.size()) return;
+    if (a.mode == ViewMode::Details) drawDetailsRow(c, a, index);
+    else drawGridCell(c, a, index);
+}

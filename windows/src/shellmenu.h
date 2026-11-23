@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include "settings.h"
+
 namespace shellmenu {
 
 enum class Command {
@@ -27,6 +29,10 @@ enum class Command {
     Rename,
     NewFolder,
     NewTextFile,
+    Settings,
+    Preview,
+    Reveal,
+    CopyPath,
 };
 
 // State needed to draw our own working view/sort items in the background menu.
@@ -34,6 +40,7 @@ struct ViewState {
     int mode = 0;  // 0 details, 1 icons, 2 list
     int sortColumn = 0;
     bool showHidden = false;
+    unsigned menuMask = kMenuDefaults;  // MenuOption flags from settings.h
 };
 
 struct Result {

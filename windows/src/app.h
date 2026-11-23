@@ -63,6 +63,7 @@ public:
 
     std::wstring current;
     std::vector<Entry> entries;
+    std::vector<int> nameWidths;
     std::vector<std::wstring> back;
     std::vector<std::wstring> forward;
     int sortColumn = 0;
@@ -206,6 +207,9 @@ public:
     // Right edge of the icon plus the name text, relative to the row start.
     // Clicks beyond it must not select the row (no full-row select).
     int nameExtent(int row) const;
+    // Name widths are measured once per listing (and on DPI change): measuring
+    // them inside hit tests and paint made dragging in large folders crawl.
+    void rebuildNameWidths();
     // True when p is on an item's icon or its name (not on the empty part of a
     // row or a grid cell) - only there may a click select and start a drag.
     bool hitTestItem(POINT p, int* index) const;

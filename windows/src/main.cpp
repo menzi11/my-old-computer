@@ -102,6 +102,9 @@ RECT marqueeBand(const App& a) {
     r.top = std::max(r.top, (LONG)vp.top);
     r.right = std::min(r.right, (LONG)vp.right);
     r.bottom = std::min(r.bottom, (LONG)vp.bottom);
+    // A perfectly vertical/horizontal drag is zero-sized as a RECT.
+    r.right = std::max(r.right, r.left + 1);
+    r.bottom = std::max(r.bottom, r.top + 1);
     return r;
 }
 
@@ -135,6 +138,46 @@ void freePaintCache() {
     g_paint.w = g_paint.h = 0;
 }
 
+// The rubber band lives directly on the window surface: waiting for the next
+// WM_PAINT made it lag behind a fast mouse, so it is drawn and erased in the
+// mouse handler itself.
+RECT g_band{};
+bool g_bandVisible = false;
+
+void drawBandDots(HDC dc, const RECT& r) {
+    if (r.right <= r.left || r.bottom <= r.top) return;
+    for (int x = r.left; x < r.right; x += 2) {
+        SetPixelV(dc, x, r.top, Theme::dark);
+        SetPixelV(dc, x, r.bottom - 1, Theme::dark);
+    }
+    for (int y = r.top; y < r.bottom; y += 2) {
+        SetPixelV(dc, r.left, y, Theme::dark);
+        SetPixelV(dc, r.right - 1, y, Theme::dark);
+    }
+}
+
+void eraseBand(HWND hwnd) {
+    if (!g_bandVisible) return;
+    g_bandVisible = false;
+    if (!g_paint.mem || g_band.right <= g_band.left || g_band.bottom <= g_band.top) return;
+    HDC dc = GetDC(hwnd);
+    if (!dc) return;
+    BitBlt(dc, g_band.left, g_band.top, g_band.right - g_band.left, g_band.bottom - g_band.top,
+           g_paint.mem, g_band.left, g_band.top, SRCCOPY);
+    ReleaseDC(hwnd, dc);
+}
+
+void drawBand(HWND hwnd, App& a) {
+    g_band = marqueeBand(a);
+    g_bandVisible = false;
+    if (g_band.right <= g_band.left || g_band.bottom <= g_band.top) return;
+    HDC dc = GetDC(hwnd);
+    if (!dc) return;
+    drawBandDots(dc, g_band);
+    ReleaseDC(hwnd, dc);
+    g_bandVisible = true;
+}
+
 void paintWindow(HWND hwnd) {
     PAINTSTRUCT ps;
     HDC dc = BeginPaint(hwnd, &ps);
@@ -161,13 +204,37 @@ void paintWindow(HWND hwnd) {
         }
         BitBlt(dc, 0, 0, rc.right, rc.bottom, g_paint.mem, 0, 0, SRCCOPY);
         if (g_app.marquee) {
-            // The rubber band is the only thing that moves during a selection
-            // drag; drawing it over the cached frame keeps the drag smooth.
-            Canvas overlay(dc, g_app.scale);
-            renderMarquee(overlay, g_app);
+            // Keep the rubber band on top of whatever area was repainted.
+            g_band = marqueeBand(g_app);
+            drawBandDots(dc, g_band);
+            g_bandVisible = true;
         }
     }
     EndPaint(hwnd, &ps);
+}
+
+// Repaints individual rows: update the cached frame for those rows and let the
+// paint handler blit them, instead of re-rendering the whole window.
+void repaintRows(HWND hwnd, App& a, const std::vector<int>& rows) {
+    if (rows.empty()) return;
+    if (!g_paint.mem) {
+        repaint(hwnd);
+        return;
+    }
+    const RECT& vp = a.mode == ViewMode::Details ? a.lay.listViewport : a.lay.gridViewport;
+    for (int i : rows) {
+        RECT r = a.mode == ViewMode::Details ? a.listRowRect(i) : a.gridCellRect(i);
+        RECT clip{};
+        if (!IntersectRect(&clip, &r, &vp)) continue;
+        const int saved = SaveDC(g_paint.mem);
+        IntersectClipRect(g_paint.mem, clip.left, clip.top, clip.right, clip.bottom);
+        {
+            Canvas c(g_paint.mem, a.scale);
+            renderItemRow(c, a, i);
+        }
+        RestoreDC(g_paint.mem, saved);
+        InvalidateRect(hwnd, &clip, FALSE);
+    }
 }
 
 // ---------------------------------------------------------------- selection
@@ -243,31 +310,73 @@ void moveSelection(App& a, int dx, int dy) {
     ensureVisible(a, idx);
 }
 
-bool marqueeUpdate(App& a) {
-    // +1 on the far edges: a perfectly vertical/horizontal drag has zero width
-    // as a RECT and would otherwise select nothing.
-    RECT r{std::min(a.marqueeStart.x, a.marqueeEnd.x), std::min(a.marqueeStart.y, a.marqueeEnd.y),
-           std::max(a.marqueeStart.x, a.marqueeEnd.x) + 1,
-           std::max(a.marqueeStart.y, a.marqueeEnd.y) + 1};
+bool bandHits(const RECT& hit, const RECT& band) {
+    RECT inter{};
+    return IntersectRect(&inter, &hit, &band) != 0;
+}
+
+// Rows/cells a band rectangle can reach, so a drag never walks the whole
+// listing.
+void collectBandRows(const App& a, const RECT& band, std::vector<int>& out) {
+    const int count = (int)a.entries.size();
+    if (count == 0 || band.right <= band.left || band.bottom <= band.top) return;
+    if (a.mode == ViewMode::Details) {
+        const RECT& vp = a.lay.listViewport;
+        const int rowH = std::max(1, (int)a.m.rowH);
+        int first = (band.top - vp.top + a.listScroll) / rowH - 1;
+        int last = (band.bottom - vp.top + a.listScroll) / rowH + 1;
+        first = std::clamp(first, 0, count - 1);
+        last = std::clamp(last, 0, count - 1);
+        for (int i = first; i <= last; ++i) out.push_back(i);
+    } else {
+        const int cols = std::max(1, a.gridCols());
+        const int cw = std::max(1, a.gridCellW());
+        const int ch = std::max(1, a.gridCellH());
+        const int originX = a.lay.gridViewport.left + (int)(4 * a.scale + 0.5);
+        const int originY = a.lay.gridViewport.top + (int)(4 * a.scale + 0.5);
+        int col0 = std::clamp((int)((band.left - originX) / cw), 0, cols - 1);
+        int col1 = std::clamp((int)((band.right - originX) / cw), 0, cols - 1);
+        int row0 = std::max(0, (int)((band.top - originY + a.gridScroll) / ch));
+        int row1 = std::max(row0 - 1, (int)((band.bottom - originY + a.gridScroll) / ch));
+        for (int row = row0; row <= row1; ++row)
+            for (int col = col0; col <= col1; ++col) {
+                const int index = row * cols + col;
+                if (index >= 0 && index < count) out.push_back(index);
+            }
+    }
+}
+
+// Recomputes the selection for the current band and returns the rows whose
+// selected state changed, so only those rows need repainting.
+std::vector<int> marqueeUpdate(App& a, const RECT& previousBand) {
+    const RECT band = marqueeBand(a);
+    std::vector<int> candidates;
+    collectBandRows(a, previousBand, candidates);
+    collectBandRows(a, band, candidates);
+    std::sort(candidates.begin(), candidates.end());
+    candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+
     const bool additive = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
     std::set<std::wstring> next;
     if (additive) next = a.selection;
-    for (int i = 0; i < (int)a.entries.size(); ++i) {
-        // Only items the band actually touches: the icon and the name text.
-        // A band drawn in the blank part of the row must not pick anything.
-        RECT hit{};
-        if (a.mode == ViewMode::Details) {
-            hit = a.listRowRect(i);
-            hit.right = hit.left + std::min(a.lay.nameW, a.nameExtent(i));
-        } else {
-            hit = a.gridCellRect(i);
+    std::vector<int> changed;
+    for (int i : candidates) {
+        if (i < 0 || i >= (int)a.entries.size()) continue;
+        const std::wstring& path = a.entries[i].path;
+        const bool was = a.selection.count(path) != 0;
+        bool now = was && additive;
+        if (!now) {
+            RECT hit = a.mode == ViewMode::Details ? a.listRowRect(i) : a.gridCellRect(i);
+            if (a.mode == ViewMode::Details)
+                hit.right = hit.left + std::min(a.lay.nameW, a.nameExtent(i));
+            now = bandHits(hit, band);
         }
-        RECT inter{};
-        if (IntersectRect(&inter, &hit, &r)) next.insert(a.entries[i].path);
+        if (now) next.insert(path);
+        if (was != now) changed.push_back(i);
     }
-    if (next == a.selection) return false;
+    if (changed.empty()) return changed;
     a.selection.swap(next);
-    return true;
+    return changed;
 }
 
 void startMarquee(HWND hwnd, App& a, POINT p) {
@@ -277,6 +386,7 @@ void startMarquee(HWND hwnd, App& a, POINT p) {
     a.marquee = true;
     a.dragArmed = false;
     a.dragPath.clear();
+    g_bandVisible = false;
     SetCapture(hwnd);
     repaint(hwnd);
 }
@@ -346,7 +456,10 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
     state.mode = (int)a.mode;
     state.sortColumn = a.sortColumn;
     state.showHidden = a.showHidden;
-    shellmenu::Result result = shellmenu::show(hwnd, folder, paths, screen, state);
+    state.menuMask = a.settings.menuMask;
+    shellmenu::Result result;
+    if (a.settings.menuMask & kMenuShell)
+        result = shellmenu::show(hwnd, folder, paths, screen, state);
 
     if (!result.shown) {
         // The shell could not build a menu (unusual path): fall back to the
@@ -371,6 +484,14 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
         case shellmenu::Command::Rename: a.renameSelection(); break;
         case shellmenu::Command::NewFolder: a.newFolder(); break;
         case shellmenu::Command::NewTextFile: a.newTextFile(); break;
+        case shellmenu::Command::Preview:
+            if (std::wstring p = a.firstSelectedPath(); !p.empty()) preview::show(hwnd, p);
+            break;
+        case shellmenu::Command::Reveal: a.revealSelection(); break;
+        case shellmenu::Command::CopyPath: a.copyPaths(); break;
+        case shellmenu::Command::Settings:
+            if (showMenuOptions(hwnd, &a.settings.menuMask)) a.settings.save();
+            break;
         case shellmenu::Command::None: break;
         }
         if (result.invokedShell) a.reload();
@@ -443,7 +564,8 @@ void onMouseMove(HWND hwnd, App& a, POINT p) {
         }
     }
     if (a.marquee) {
-        const RECT before = marqueeBand(a);
+        const RECT previousBand = marqueeBand(a);
+        eraseBand(hwnd);
         const int scrollBefore = a.mode == ViewMode::Details ? a.listScroll : a.gridScroll;
         // Auto-scroll when the pointer is dragged past the edge of the list.
         const RECT& vp = a.mode == ViewMode::Details ? a.lay.listViewport : a.lay.gridViewport;
@@ -456,18 +578,14 @@ void onMouseMove(HWND hwnd, App& a, POINT p) {
             else a.scrollGridBy(step);
         }
         a.marqueeEnd = p;
-        const bool selChanged = marqueeUpdate(a);
+        const std::vector<int> changed = marqueeUpdate(a, previousBand);
         const int scrollAfter = a.mode == ViewMode::Details ? a.listScroll : a.gridScroll;
-        if (selChanged || scrollAfter != scrollBefore) {
-            repaint(hwnd);  // selection or content changed: re-render the frame
+        if (scrollAfter != scrollBefore) {
+            repaint(hwnd);  // everything moved: one full redraw
         } else {
-            // Only the band moved: repaint that small area over the cached frame.
-            const RECT after = marqueeBand(a);
-            RECT dirty{};
-            UnionRect(&dirty, &before, &after);
-            InflateRect(&dirty, 2, 2);
-            InvalidateRect(hwnd, &dirty, FALSE);
+            repaintRows(hwnd, a, changed);
         }
+        drawBand(hwnd, a);
         return;
     }
 
@@ -609,6 +727,7 @@ void onLButtonDown(HWND hwnd, App& a, POINT p) {
                         a.sortAsc = true;
                     }
                     fsx::sortEntries(a.entries, a.sortColumn, a.sortAsc);
+                    a.rebuildNameWidths();
                     repaint(hwnd);
                     break;
                 }
@@ -716,6 +835,7 @@ void onLButtonUp(HWND hwnd, App& a, POINT p) {
         return;
     }
     if (a.marquee) {
+        eraseBand(hwnd);
         a.marquee = false;
         repaint(hwnd);
         return;
@@ -774,6 +894,7 @@ void onKeyDown(HWND hwnd, App& a, WPARAM key) {
         break;
     case VK_ESCAPE:
         if (a.marquee || a.dragging) {
+            eraseBand(hwnd);
             a.marquee = false;
             a.dragging = false;
             a.dragArmed = false;
@@ -959,7 +1080,10 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CAPTURECHANGED:
         // Something stole the mouse: never leave a rubber band or a pending
         // drag armed.
-        if (a.marquee) a.marquee = false;
+        if (a.marquee) {
+            eraseBand(hwnd);
+            a.marquee = false;
+        }
         if (a.dragArmed && !a.dragging) {
             a.dragArmed = false;
             a.dragPath.clear();
@@ -1255,6 +1379,31 @@ int runUiTest(App& app) {
     app.marquee = false;
     app.marqueeEnd = app.marqueeStart;
 
+    // A large listing must not make the rubber band re-measure every name.
+    const std::wstring bigDir = base + L"\\big";
+    CreateDirectoryW(bigDir.c_str(), nullptr);
+    for (int i = 0; i < 1200; ++i) {
+        const std::wstring file = bigDir + L"\\f" + std::to_wstring(i) + L".bin";
+        HANDLE h = CreateFileW(file.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    }
+    app.loadDirectory(bigDir, false);
+    app.setViewMode(ViewMode::Details);
+    app.relayout(1100, 760);
+    app.marquee = true;
+    app.marqueeStart = POINT{app.lay.listViewport.left + 30, app.lay.listViewport.top + 10};
+    const ULONGLONG dragStart = GetTickCount64();
+    for (int k = 0; k < 40; ++k) {
+        const RECT previousBand = marqueeBand(app);
+        app.marqueeEnd =
+            POINT{app.lay.listViewport.left + 240, app.lay.listViewport.top + 10 + k * 12};
+        marqueeUpdate(app, previousBand);
+    }
+    const ULONGLONG dragMs = GetTickCount64() - dragStart;
+    app.marquee = false;
+    std::wstring dragLabel = L"1200 项框选40次 " + std::to_wstring(dragMs) + L"ms";
+    check(dragLabel.c_str(), dragMs < 400);
+
     // Paint benchmark: catches accidental full-window repaint storms.
     app.setViewMode(ViewMode::Details);
     app.relayout(1100, 760);
@@ -1379,6 +1528,7 @@ int runSnapshot(App& app, const std::vector<std::wstring>& args) {
         app.sortColumn = col;
         app.sortAsc = asc;
         fsx::sortEntries(app.entries, col, asc);
+        app.rebuildNameWidths();
     }
 
     if (auto sel = argValue(args, L"--select"); !sel.empty()) {

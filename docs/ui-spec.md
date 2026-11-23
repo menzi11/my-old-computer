@@ -98,10 +98,12 @@ the hand-drawn set.  macOS draws the icons in `Icons.swift` per extension.
 - The address bar always shows the real path (no `~` abbreviation) and accepts a
   path typed by hand.
 - The window has one context menu for an item: it hosts the real Windows shell
-  menu (`IContextMenu`), so every installed shell extension shows up.  The file
-  list and the tree show the same menu for a folder.  The empty area uses our
-  own working View / Sort / Refresh / New commands plus the shell's Paste,
-  Properties and extensions.
+  menu (`IContextMenu`), so every installed shell extension shows up, plus this
+  app's own commands.  The file list and the tree show the same menu for a
+  folder.  The empty area uses our own working View / Sort / Refresh / New
+  commands plus the shell's Paste, Properties and extensions.  Every entry this
+  app adds can be turned off in Tools → Context menu settings (stored in the
+  `[menu]` section of settings.ini).
 
 ## Platform mapping
 

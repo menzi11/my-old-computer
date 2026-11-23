@@ -38,5 +38,6 @@ enum MenuId {
     ID_SORT_SIZE,
     ID_SORT_TYPE,
     ID_SORT_DATE,
+    ID_SETTINGS,
     ID_FAV_BASE = 1000,
 };

@@ -14,3 +14,6 @@ bool promptText(HWND owner, const std::wstring& title, const std::wstring& label
                 const std::wstring& initial, std::wstring* result);
 void showAbout(HWND owner);
 void showError(HWND owner, const std::wstring& title, const std::wstring& text);
+
+// Lets the user choose which entries the context menus contain.
+bool showMenuOptions(HWND owner, unsigned* mask);

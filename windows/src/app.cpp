@@ -61,6 +61,7 @@ void App::init(HWND h) {
 void App::setScale(double s) {
     scale = s;
     m = metricsFor(s);
+    rebuildNameWidths();
     relayout(width, height);
 }
 
@@ -174,6 +175,7 @@ void App::loadDirectory(const std::wstring& path, bool recordHistory, bool fromT
     selection.clear();
     entries = fsx::listDirectory(current, showHidden);
     fsx::sortEntries(entries, sortColumn, sortAsc);
+    rebuildNameWidths();
     listScroll = 0;
     gridScroll = 0;
     if (fromTreeClick) {
@@ -192,6 +194,7 @@ void App::loadDirectory(const std::wstring& path, bool recordHistory, bool fromT
 void App::reload() {
     entries = fsx::listDirectory(current, showHidden);
     fsx::sortEntries(entries, sortColumn, sortAsc);
+    rebuildNameWidths();
     std::set<std::wstring> keep;
     for (auto& e : entries)
         if (selection.count(e.path)) keep.insert(e.path);
@@ -340,6 +343,7 @@ void App::sortBy(int column) {
     sortColumn = std::clamp(column, 0, 3);
     sortAsc = true;
     fsx::sortEntries(entries, sortColumn, sortAsc);
+    rebuildNameWidths();
     clampScroll();
 }
 
@@ -923,10 +927,16 @@ int App::listVisibleRows() const {
 }
 
 int App::nameExtent(int row) const {
-    if (row < 0 || row >= (int)entries.size()) return 0;
+    if (row < 0 || row >= (int)nameWidths.size()) return 0;
+    return nameWidths[row];
+}
+
+void App::rebuildNameWidths() {
     const int fontPx = (int)(14.6667 * scale + 0.5);
-    return (int)(22 * scale + 0.5) + measureUiText(entries[row].name, fontPx) +
-           (int)(6 * scale + 0.5);
+    const int lead = (int)(22 * scale + 0.5) + (int)(6 * scale + 0.5);
+    nameWidths.resize(entries.size());
+    for (size_t i = 0; i < entries.size(); ++i)
+        nameWidths[i] = lead + measureUiText(entries[i].name, fontPx);
 }
 
 // Only the icon and the name text belong to an item.  Everything else inside
@@ -1107,7 +1117,7 @@ std::vector<MenuItem> App::menuFor(const std::wstring& name) const {
     } else if (name == L"工具") {
         m.push_back({L"在命令提示符中打开", ID_OPEN_TERMINAL, true});
         m.push_back({L"", 0, false, false, true});
-        m.push_back({L"文件夹选项", 0, false});
+        m.push_back({L"右键菜单设置…", ID_SETTINGS, true});
     } else if (name == L"帮助") {
         m.push_back({L"关于 My Old Computer", ID_ABOUT, true});
     }
@@ -1236,6 +1246,9 @@ void App::performMenuAction(int id, const std::wstring& arg) {
     case ID_ADD_FAV_CURRENT: addFavorite(current); break;
     case ID_REMOVE_FAV: removeFavorite(contextFolder.empty() ? current : contextFolder); break;
     case ID_OPEN_TERMINAL: openTerminalForSelection(); break;
+    case ID_SETTINGS:
+        if (showMenuOptions(hwnd, &settings.menuMask)) settings.save();
+        break;
     case ID_ABOUT: showAbout(hwnd); break;
     default:
         if (id >= ID_FAV_BASE) {
