@@ -153,18 +153,15 @@ void addViewAndSort(HMENU menu, const ViewState& state) {
                            MF_BYCOMMAND);
     }
 
-    HMENU newMenu = nullptr;
-    if (wantNew) {
-        // The shell's New command needs Explorer's view to finish the rename,
-        // so it would leave nothing behind; these create the item themselves.
-        newMenu = CreatePopupMenu();
-        AppendMenuW(newMenu, MF_STRING, kNewFolder, L"文件夹");
-        AppendMenuW(newMenu, MF_STRING, kNewTextFile, L"文本文档");
-    }
-
     // Insert from the bottom up: each insert lands at position 0.
     InsertMenuW(menu, 0, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
-    if (newMenu) InsertMenuW(menu, 0, MF_BYPOSITION | MF_POPUP, (UINT_PTR)newMenu, L"新建");
+    if (wantNew) {
+        // Flat items, no submenu: one click, nothing to hover into.  The
+        // shell's New command needs Explorer's view to finish the rename, so
+        // these create the item themselves.
+        InsertMenuW(menu, 0, MF_BYPOSITION | MF_STRING, kNewTextFile, L"新建文本文档");
+        InsertMenuW(menu, 0, MF_BYPOSITION | MF_STRING, kNewFolder, L"新建文件夹");
+    }
     if (wantRefresh) InsertMenuW(menu, 0, MF_BYPOSITION | MF_STRING, kRefresh, L"刷新");
     if (sort) InsertMenuW(menu, 0, MF_BYPOSITION | MF_POPUP, (UINT_PTR)sort, L"排序方式");
     if (view) InsertMenuW(menu, 0, MF_BYPOSITION | MF_POPUP, (UINT_PTR)view, L"查看");

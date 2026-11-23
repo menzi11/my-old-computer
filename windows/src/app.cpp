@@ -401,7 +401,7 @@ void App::openMenuSettings() {
             if (t.empty()) continue;
             if (background) {
                 if (t == L"查看" || t == L"排序方式" || t == L"分组依据" || t == L"刷新" ||
-                    t == L"新建")
+                    t == L"新建" || t == L"新建文件夹" || t == L"新建文本文档")
                     continue;
             } else if (t == L"重命名") {
                 continue;

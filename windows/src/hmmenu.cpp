@@ -285,29 +285,9 @@ void closeChild(Node* n) {
     g_active = parent;
 }
 
-constexpr UINT_PTR kCloseSub = 2;
-
 LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     Node* n = (Node*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     switch (msg) {
-    case WM_TIMER: {
-        // The delayed close of an open submenu.  The pointer had left the
-        // opening row; if it has not reached the submenu by now, close it.
-        if (wp != kCloseSub || !n || n->children.empty()) break;
-        KillTimer(hwnd, kCloseSub);
-        POINT sp{};
-        if (!GetCursorPos(&sp)) break;
-        HWND under = WindowFromPoint(sp);
-        if (under == hwnd) break;
-        bool inChild = false;
-        for (auto* c : n->children)
-            if (c->hwnd == under) inChild = true;
-        if (!inChild) {
-            destroyChildren(n);
-            InvalidateRect(hwnd, nullptr, FALSE);
-        }
-        return 0;
-    }
     case WM_ERASEBKGND:
         return 1;
     case WM_PAINT:
@@ -316,33 +296,20 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSEMOVE:
         if (n) {
             POINT p{(short)LOWORD(lp), (short)HIWORD(lp)};
-            // The pointer is inside this submenu: whatever delayed close the
-            // parent scheduled is cancelled - the user is using the submenu.
-            if (n->parent) {
-                Node* root = n;
-                while (root->parent) root = root->parent;
-                if (root->hwnd) KillTimer(root->hwnd, kCloseSub);
-            }
             int index = hitItem(n, p);
             if (index >= 0 && n->seps[index]) index = -1;
             diagLog(L"hmmenu move %d,%d idx=%d hover=%d sub=%d", p.x, p.y, index, n->hover,
                     (index >= 0 && index < (int)n->subs.size()) ? (int)n->subs[index] : -1);
             if (index != n->hover) {
                 // Travelling the wedge to an open submenu: nothing changes.
+                // Everywhere else the menu tracks the pointer instantly -
+                // highlight on the move, submenu closed the moment the
+                // pointer leaves its row.  No delays.
                 if (!n->children.empty() && inCorridor(n, p)) return 0;
-                // Otherwise the highlight follows the pointer immediately.
-                const bool hadSubmenu = !n->children.empty();
                 n->hover = index;
                 InvalidateRect(hwnd, nullptr, FALSE);
-                if (index >= 0 && n->subs[index]) {
-                    KillTimer(hwnd, kCloseSub);
-                    openChild(n, index);
-                } else if (hadSubmenu) {
-                    // Left the opening row for a plain row (or no row): the
-                    // submenu closes on a short delay, so an L-shaped move
-                    // (down first, then right) still reaches it in time.
-                    SetTimer(hwnd, kCloseSub, 350, nullptr);
-                }
+                if (index >= 0 && n->subs[index]) openChild(n, index);
+                else destroyChildren(n);
             }
         }
         return 0;
