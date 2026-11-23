@@ -17,6 +17,7 @@
 #include "dialog.h"
 #include "dnd.h"
 #include "fs.h"
+#include "hmmenu.h"
 #include "ids.h"
 #include "preview.h"
 #include "render.h"
@@ -412,7 +413,19 @@ void showAppMenu(HWND hwnd, App& a, int index, POINT p) {
     (void)p;
 }
 
+bool g_menuPending = false;
+POINT g_menuPendingPoint{};
+
 void showContextMenu(HWND hwnd, App& a, POINT p) {
+    if (menuIsOpen()) {
+        // A menu is already up (its message loop is running further down the
+        // stack).  Remember where the user clicked, close it, and reopen there
+        // once this call returns.
+        g_menuPending = true;
+        g_menuPendingPoint = p;
+        menuClose();
+        return;
+    }
     std::vector<std::wstring> paths;
     std::wstring folder = a.current;
     bool fromTree = false;
@@ -498,6 +511,13 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
     a.contextFolder.clear();
     a.contextIsFavorite = false;
     repaint(hwnd);
+
+    if (g_menuPending) {
+        // The user right-clicked somewhere else while the menu was open: show
+        // that menu now instead of losing the click.
+        g_menuPending = false;
+        showContextMenu(hwnd, a, g_menuPendingPoint);
+    }
 }
 
 // ---------------------------------------------------------------- input
@@ -1103,6 +1123,10 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_LBUTTONDOWN: {
         POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        if (menuIsOpen()) {
+            menuClose();
+            return 0;
+        }
         onLButtonDown(hwnd, a, p);
         return 0;
     }

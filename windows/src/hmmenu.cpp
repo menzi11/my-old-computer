@@ -29,6 +29,7 @@ struct Node {
 };
 
 Node* g_active = nullptr;
+Node* g_root = nullptr;
 bool g_finished = false;
 
 void destroyChildren(Node* n);
@@ -58,7 +59,7 @@ std::wstring itemText(HMENU menu, int index) {
     info.cch = 512;
     if (!GetMenuItemInfoW(menu, index, TRUE, &info)) return L"";
     std::wstring text = buffer;
-    // "打开(&O)" -> "打开": Win98 menus did not show accelerators.
+    // "鎵撳紑(&O)" -> "鎵撳紑": Win98 menus did not show accelerators.
     const size_t amp = text.find(L"(&");
     if (amp != std::wstring::npos && text.size() > amp + 3 && text.back() == L')')
         text = text.substr(0, amp);
@@ -350,6 +351,12 @@ void ensureClass() {
 
 }  // namespace
 
+bool menuIsOpen() { return g_root != nullptr; }
+
+void menuClose() {
+    if (g_root && g_root->hwnd) PostMessageW(g_root->hwnd, WM_CLOSE, 0, 0);
+}
+
 int showHMenu(HWND owner, HMENU root, POINT point) {
     if (!root) return 0;
     ensureClass();
@@ -374,6 +381,7 @@ int showHMenu(HWND owner, HMENU root, POINT point) {
     }
 
     g_active = node;
+    g_root = node;
     g_finished = false;
     SetForegroundWindow(node->hwnd);
     SetFocus(node->hwnd);
@@ -385,6 +393,7 @@ int showHMenu(HWND owner, HMENU root, POINT point) {
     }
     const int chosen = node->chosen;
     g_active = nullptr;
+    g_root = nullptr;
     if (node->hwnd) {
         destroyChildren(node);
         DestroyWindow(node->hwnd);
@@ -393,3 +402,4 @@ int showHMenu(HWND owner, HMENU root, POINT point) {
     delete node;
     return chosen;
 }
+

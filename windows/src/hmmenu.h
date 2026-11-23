@@ -6,3 +6,8 @@
 
 // Shows `root` at screenPoint and returns the chosen command id, or 0.
 int showHMenu(HWND owner, HMENU root, POINT screenPoint);
+
+// While a menu is up: right-clicking elsewhere must close it and open the new
+// one afterwards.
+bool menuIsOpen();
+void menuClose();
