@@ -104,8 +104,27 @@ the hand-drawn set.  macOS draws the icons in `Icons.swift` per extension.
   View / Sort / Refresh / New commands plus the shell's Paste, Properties and
   extensions.
 - Tools → Context menu settings lists the app's own entries and the shell's
-  top-level entries (read from the registry); each can be hidden.  Hidden shell
-  labels are stored in the `[menu]` section of settings.ini.
+  entries grouped by where the right-click happened (empty area, folder, file
+  without an extension, one group per file extension); each is hidden in that
+  group only, in the `[menu-bg]`, `[menu-folder]`, `[menu-file]` and
+  `[menu-ext.<ext>]` sections of settings.ini.
+- New Folder and New Text Document are flat items of the empty-area menu: one
+  click, no submenu.
+
+## Responsiveness contract
+
+Lag is never traded for anything. For menus and hover feedback in particular:
+
+- The highlight follows the pointer with nothing in between. A hover change
+  repaints the affected rows on the spot, before any other work runs, and no
+  timer, grace period or delay stands between the pointer and the screen.
+- A submenu opens the moment its row is hovered and closes the moment the
+  pointer leaves that row.
+- The one exception is the diagonal path from the opening row to its submenu:
+  while the straight line from the pointer's last position in that row to its
+  current position meets the submenu, the selection is held so the submenu can
+  be reached. Moving straight up or down selects the row under the pointer on
+  its first pixel; a corridor must never reach into the neighbouring rows.
 
 ## Platform mapping
 

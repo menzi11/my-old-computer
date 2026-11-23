@@ -27,6 +27,11 @@ struct Node {
     int hover = -1;
     int chosen = 0;
     double scale = 1.0;
+    // Last pointer position inside the row whose submenu is open: the apex of
+    // the corridor toward that submenu.
+    POINT anchor{};
+    // The pointer was last inside our submenu (it is on its way back out).
+    bool childHadMouse = false;
 };
 
 Node* g_active = nullptr;
@@ -159,28 +164,40 @@ void paintNode(HWND hwnd) {
     EndPaint(hwnd, &ps);
 }
 
-// True while p (client coords of n) sits in the corridor between the row
-// that opened the submenu and the submenu window itself - the path a
-// diagonal mouse move takes to get there.  Explorer keeps the submenu alive
-// while the pointer travels it; without this, crossing a neighbouring row
-// on the way closed the submenu and the item could never be reached.
-bool inCorridor(Node* n, POINT p) {
+// Responsiveness rule for this menu: a hover change puts its highlight on
+// screen before anything else runs, and no timer stands between the pointer
+// and what the user sees.  Submenus open and close on the spot.
+
+// True while p (client coordinates of n) lies on a straight line from where
+// the pointer left the opening row toward the submenu: the triangle spanned by
+// that one point and the submenu's near edge.  Anchoring it at the pointer's
+// actual last position is what keeps it honest - it covers the diagonal path
+// to the submenu and nothing else, so moving straight down to the next row
+// always selects that row.  (A wedge built from the whole row reached into
+// the row below it and made that row's submenu impossible to open.)
+bool inCorridor(const Node* n, POINT p) {
     if (n->children.empty() || n->hover < 0 || n->hover >= (int)n->rects.size()) return false;
-    Node* child = n->children.front();
+    const Node* child = n->children.front();
     if (!child->hwnd) return false;
     RECT sub{};
     GetWindowRect(child->hwnd, &sub);
     MapWindowPoints(nullptr, n->hwnd, (LPPOINT)&sub, 2);
-    const RECT& row = n->rects[n->hover];
-    if (p.x < row.left || p.x > sub.right) return false;
-    if (p.x >= sub.left) return p.y >= sub.top - 2 && p.y <= sub.bottom + 2;
-    // Between the row and the submenu: the wedge between the two diagonals
-    // from the row's ends to the submenu's ends (what Win98 menus use).
-    const int span = std::max(1L, (long)sub.right - row.left);
-    const double t = (double)(p.x - row.left) / (double)span;
-    const int top = row.top + (int)(t * (sub.top - row.top)) - 4;
-    const int bottom = row.bottom + (int)(t * (sub.bottom - row.bottom)) + 4;
-    return p.y >= top && p.y <= bottom;
+    const POINT a = n->anchor;
+    const LONG dx = p.x - a.x;
+    // Straight down, straight up or back to the left never aims at the
+    // submenu: the row under the pointer is selected on the very first pixel.
+    if (dx <= 0 || p.x > sub.right) return false;
+    const LONG run = std::max(1L, (long)sub.left - a.x);
+    // Where the straight line from the anchor through the pointer meets the
+    // submenu's near edge.  Inside the corridor exactly when that point is
+    // on the edge - no tolerance band that the pointer would have to cross.
+    const double atEdge = a.y + (double)(p.y - a.y) * (double)run / (double)dx;
+    return atEdge >= sub.top - 2 && atEdge <= sub.bottom + 2;
+}
+
+void repaintRow(HWND hwnd, const Node* n, int index) {
+    if (index < 0 || index >= (int)n->rects.size()) return;
+    InvalidateRect(hwnd, &n->rects[index], FALSE);
 }
 
 int hitItem(Node* n, POINT p) {
@@ -239,6 +256,9 @@ void openChild(Node* n, int index) {
     diagLog(L"openChild idx=%d", index);
     if (index < 0 || index >= (int)n->subs.size() || !n->subs[index] || !n->enabled[index]) return;
     if (!n->children.empty() && n->children.size() == 1 && n->hover == index) return;
+    const RECT& row = n->rects[index];
+    if (n->anchor.y < row.top || n->anchor.y >= row.bottom)
+        n->anchor = POINT{row.right, (row.top + row.bottom) / 2};
     destroyChildren(n);
     HMENU sub = GetSubMenu(n->menu, index);
     if (!sub) return;
@@ -296,20 +316,36 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSEMOVE:
         if (n) {
             POINT p{(short)LOWORD(lp), (short)HIWORD(lp)};
+            // Coming back out of the submenu: the pointer is on its way to
+            // wherever it is now, so this move is never "toward the submenu".
+            const bool fromSubmenu = n->childHadMouse;
+            n->childHadMouse = false;
+            if (n->parent) n->parent->childHadMouse = true;
             int index = hitItem(n, p);
             if (index >= 0 && n->seps[index]) index = -1;
+            const bool hasSub = index >= 0 && index < (int)n->subs.size() && n->subs[index];
             diagLog(L"hmmenu move %d,%d idx=%d hover=%d sub=%d", p.x, p.y, index, n->hover,
-                    (index >= 0 && index < (int)n->subs.size()) ? (int)n->subs[index] : -1);
-            if (index != n->hover) {
-                // Travelling the wedge to an open submenu: nothing changes.
-                // Everywhere else the menu tracks the pointer instantly -
-                // highlight on the move, submenu closed the moment the
-                // pointer leaves its row.  No delays.
-                if (!n->children.empty() && inCorridor(n, p)) return 0;
+                    (int)hasSub);
+            if (index == n->hover) {
+                if (hasSub) n->anchor = p;  // still inside the opening row
+            } else {
+                // Only the diagonal path from the opening row to its submenu
+                // holds the current selection.  Everything else follows the
+                // pointer right now.
+                if (!fromSubmenu && !n->children.empty() && inCorridor(n, p)) return 0;
+                const int previous = n->hover;
                 n->hover = index;
-                InvalidateRect(hwnd, nullptr, FALSE);
-                if (index >= 0 && n->subs[index]) openChild(n, index);
-                else destroyChildren(n);
+                // Highlight first and on screen before any submenu work, so a
+                // slow shell extension can never hold the highlight back.
+                repaintRow(hwnd, n, previous);
+                repaintRow(hwnd, n, index);
+                UpdateWindow(hwnd);
+                if (hasSub) {
+                    n->anchor = p;
+                    openChild(n, index);
+                } else {
+                    destroyChildren(n);
+                }
             }
         }
         return 0;
