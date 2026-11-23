@@ -104,8 +104,19 @@ void paintDialog(HWND hwnd) {
     EndPaint(hwnd, &ps);
 }
 
+// What is in the prompt's edit box.  It has to be read while the box still
+// exists: the box is a child of the dialog window and goes with it.
+std::wstring editText(const DialogState& st) {
+    wchar_t buf[32768]{};
+    if (st.edit && IsWindow(st.edit)) GetWindowTextW(st.edit, buf, 32768);
+    return buf;
+}
+
 void finishDialog(DialogState& st, bool accepted) {
     st.accepted = accepted;
+    // Before the window (and with it the edit box) goes.  Reading it
+    // afterwards gave an empty string: every prompt came back with nothing.
+    st.input = editText(st);
     st.done = true;
     DestroyWindow(st.hwnd);
 }
@@ -299,11 +310,13 @@ bool runDialog(HWND owner, const std::wstring& title, const std::wstring& label,
     if (owner) EnableWindow(owner, TRUE);
     SetForegroundWindow(owner);
     if (prompt && st.edit) {
-        wchar_t buf[32768]{};
-        GetWindowTextW(st.edit, buf, 32768);
-        st.input = buf;
-        SetWindowLongPtrW(st.edit, GWLP_WNDPROC, (LONG_PTR)g_editProc);
-        DestroyWindow(st.edit);
+        // The dialog was not finished (the loop ended on WM_QUIT): the edit
+        // box is still there and still has to be read and removed.
+        if (IsWindow(st.edit)) {
+            st.input = editText(st);
+            SetWindowLongPtrW(st.edit, GWLP_WNDPROC, (LONG_PTR)g_editProc);
+            DestroyWindow(st.edit);
+        }
         st.edit = nullptr;
         g_dlg = nullptr;
     }

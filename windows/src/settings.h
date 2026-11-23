@@ -32,6 +32,13 @@ constexpr unsigned kMenuDefaults =
     kMenuItemTerminal | kMenuItemRename | kMenuBgView | kMenuBgSort | kMenuBgRefresh |
     kMenuBgNew | kMenuBgTerminal | kMenuBgHidden | kMenuBgSettings;
 
+// One entry of the sidebar's Favorites: a folder, shown under `name` when
+// that is set and under the folder's own name otherwise.
+struct Favorite {
+    std::wstring path;
+    std::wstring name;
+};
+
 struct Settings {
     int x = -1, y = -1, w = 1000, h = 640;
     int sidebarWidth = 200;
@@ -48,10 +55,13 @@ struct Settings {
     std::vector<std::wstring> hiddenFolder;
     std::vector<std::wstring> hiddenFile;
     std::map<std::wstring, std::vector<std::wstring>> hiddenExt;
-    std::vector<std::wstring> favorites;
+    std::vector<Favorite> favorites;
 
     void load();
     void save() const;
 };
 
 std::wstring settingsPath();
+
+// How many Favorites the settings file holds.
+constexpr int kMaxFavorites = 256;

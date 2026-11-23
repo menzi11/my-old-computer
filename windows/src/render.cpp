@@ -255,7 +255,19 @@ void drawTree(Canvas& c, App& a) {
                 }
             }
             RECT textRect{iconRect.right + c.px(3), r.top, r.right - c.px(4), r.bottom};
-            c.textClip(n->title, textRect, selected ? Theme::white : Theme::text, Align::Left);
+            c.textClip(n->title, textRect,
+                       selected ? Theme::white : (n->missing ? Theme::dim : Theme::text),
+                       Align::Left);
+        }
+        // A favorite dragged to another place in its group: the line it would
+        // drop onto.
+        if (a.favDragging && a.favLine.right > a.favLine.left) {
+            c.fill(a.favLine, Theme::dark);
+            const int y = (a.favLine.top + a.favLine.bottom) / 2;
+            POINT tip[3] = {{a.favLine.left, y - c.px(3)},
+                            {a.favLine.left + c.px(4), y},
+                            {a.favLine.left, y + c.px(3)}};
+            c.polygonFill(tip, 3, Theme::dark);
         }
     }
     c.frame(RECT{vp.left - 1, vp.top - 1, vp.right + 1, vp.bottom + 1}, Theme::shadow);

@@ -569,6 +569,23 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
     std::wstring folder = a.current;
     bool fromTree = false;
     bool selectionChanged = false;
+    bool favoriteNode = false;  // the menu is on a favorite's own row in the tree
+    // A menu of our own (not the shell's) right here, for tree rows that are
+    // no folder the shell could build a menu for.
+    const auto ownPopup = [&](const std::vector<MenuItem>& items) {
+        POINT screen = p;
+        ClientToScreen(hwnd, &screen);
+        const int id = showPopupMenu(hwnd, items, screen.x, screen.y, false);
+        if (id == ID_REFRESH) {
+            a.refreshTree();  // re-enumerates drives too (USB plugged in, ...)
+            a.reload();
+        } else if (id) {
+            a.performMenuAction(id);
+        }
+        a.contextFolder.clear();
+        a.contextTreeRow = -1;
+        repaint(hwnd);
+    };
     if (a.sidebarVisible && PtInRect(&a.lay.sidebar, p)) {
         // The tree shows the very same shell menu as the file list does for
         // that folder, so the commands behave identically in both places.
@@ -578,29 +595,33 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
             a.hoverTree = row;
             a.contextTreeRow = row;  // the selected row of the tree while its menu is up
             selectionChanged = true;
+            if (n->kind == TreeNode::Favorites) {
+                // The Favorites' header: what can be done with the group.
+                ownPopup({{n->expanded ? L"折叠" : L"展开", ID_TREE_TOGGLE, n->hasChildren},
+                          {L"添加当前文件夹到收藏夹", ID_ADD_FAV_CURRENT,
+                           fsx::isDirectory(a.current) && a.favoriteIndex(a.current) < 0}});
+                return;
+            }
+            if (n->kind == TreeNode::Favorite && n->missing) {
+                // A favorite whose folder is gone: no folder to build a menu
+                // for, only what can still be done with the entry itself.
+                a.contextFolder = n->path;
+                ownPopup({{L"从收藏夹中移除", ID_REMOVE_FAV, true},
+                          {L"重命名收藏项…", ID_FAV_RENAME, true}});
+                return;
+            }
             if (n->path.empty()) {
-                // Headers without a folder (我的电脑, 收藏夹) get a small menu of
-                // their own instead of one borrowed from the current directory.
-                std::vector<MenuItem> items;
-                items.push_back({n->expanded ? L"折叠" : L"展开", ID_TREE_TOGGLE, n->hasChildren});
-                items.push_back({L"", 0, false, false, true});
-                items.push_back({L"刷新", ID_REFRESH, true});
-                POINT screen = p;
-                ClientToScreen(hwnd, &screen);
-                int id = showPopupMenu(hwnd, items, screen.x, screen.y, false);
-                if (id == ID_REFRESH) {
-                    a.refreshTree();  // re-enumerates drives too (USB plugged in, ...)
-                    a.reload();
-                } else if (id) {
-                    a.performMenuAction(id);
-                }
-                a.contextTreeRow = -1;
-                repaint(hwnd);
+                // A header without a folder (我的电脑) gets a small menu of
+                // its own instead of one borrowed from the current directory.
+                ownPopup({{n->expanded ? L"折叠" : L"展开", ID_TREE_TOGGLE, n->hasChildren},
+                          {L"", 0, false, false, true},
+                          {L"刷新", ID_REFRESH, true}});
                 return;
             }
             a.selection.clear();
             a.contextFolder = n->path;
             a.contextIsFavorite = (n->kind == TreeNode::Favorite);
+            favoriteNode = a.contextIsFavorite;
             paths.push_back(n->path);
             folder = n->path;
         }
@@ -648,6 +669,8 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
     state.showHidden = a.showHidden;
     state.menuMask = a.settings.menuMask;
     state.hidden = a.hiddenFor(paths);
+    state.isFavorite = paths.size() == 1 && a.favoriteIndex(paths.front()) >= 0;
+    state.favoriteNode = favoriteNode;
     shellmenu::Result result;
     if (a.settings.menuMask & kMenuShell)
         result = shellmenu::show(hwnd, folder, paths, screen, state);
@@ -673,6 +696,15 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
         case shellmenu::Command::ToggleHidden: a.performMenuAction(ID_TOGGLE_HIDDEN); break;
         case shellmenu::Command::Terminal: a.openTerminalForSelection(); break;
         case shellmenu::Command::Rename: a.renameSelection(); break;
+        case shellmenu::Command::AddFavorite:
+            if (!paths.empty()) a.addFavorite(paths.front());
+            break;
+        case shellmenu::Command::RemoveFavorite:
+            if (!paths.empty()) a.removeFavorite(paths.front());
+            break;
+        case shellmenu::Command::RenameFavorite:
+            if (!paths.empty()) a.promptRenameFavorite(paths.front());
+            break;
         case shellmenu::Command::NewFolder: a.newFolder(); break;
         case shellmenu::Command::NewTextFile: a.newTextFile(); break;
         case shellmenu::Command::Preview:
@@ -701,6 +733,99 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
 }
 
 // ---------------------------------------------------------------- input
+
+// --------------------------------------------------------- pressing a tree row
+
+// Forgets the pressed tree row and the favorite being dragged; nothing in
+// the tree changes.
+void cancelTreePress(HWND hwnd, App& a) {
+    const bool wasDragging = a.favDragging;
+    a.treePressRow = -1;
+    a.treePressPath.clear();
+    a.favDragArmed = false;
+    a.favDragging = false;
+    a.favDragPath.clear();
+    a.favInsert = -1;
+    a.favLine = RECT{};
+    if (GetCapture() == hwnd) ReleaseCapture();
+    if (wasDragging) repaint(hwnd);
+}
+
+// The pointer moves while a tree row is pressed.  A favorite moves only up
+// and down inside its group - that is how the group is reordered; any other
+// folder is dragged off like an item of the list, to be dropped on a folder,
+// on the Favorites or in another program.
+void treePressMove(HWND hwnd, App& a, POINT p) {
+    const int tx = std::max(3, GetSystemMetrics(SM_CXDRAG) / 2);
+    const int ty = std::max(3, GetSystemMetrics(SM_CYDRAG) / 2);
+    const bool moved =
+        std::abs(p.x - a.treePressPoint.x) > tx || std::abs(p.y - a.treePressPoint.y) > ty;
+    if (a.favDragArmed && !a.favDragging) {
+        if (!moved) return;
+        a.favDragArmed = false;
+        a.favDragging = true;
+        a.favDragPath = a.treePressPath;
+        a.hoverTree = -1;
+    }
+    if (a.favDragging) {
+        // Past either end of the tree the rows scroll past under the pointer.
+        if (p.y < a.lay.treeViewport.top)
+            scrollPaneAndRepaint(hwnd, a, 3, -a.m.rowH);
+        else if (p.y >= a.lay.treeViewport.bottom)
+            scrollPaneAndRepaint(hwnd, a, 3, a.m.rowH);
+        int insert = -1;
+        RECT line{};
+        a.favoriteDropPosition(p, &insert, &line);
+        if (insert != a.favInsert || !EqualRect(&line, &a.favLine)) {
+            a.favInsert = insert;
+            a.favLine = line;
+            repaint(hwnd);
+        }
+        return;
+    }
+    if (!moved || a.treePressPath.empty() || !fsx::isDirectory(a.treePressPath)) return;
+    DWORD effect = 0;
+    a.dragging = true;  // before the capture goes: losing it must not read as a cancelled press
+    if (GetCapture() == hwnd) ReleaseCapture();
+    diagLog(L"startTreeDrag %ls", a.treePressPath.c_str());
+    dnd::dragOut(hwnd, {a.treePressPath}, &effect);
+    a.dragging = false;
+    a.treePressRow = -1;
+    a.treePressPath.clear();
+    a.dragTargetFolder.clear();
+    a.dragTargetIsTree = false;
+    a.dragTargetRow = -1;
+    a.dragTargetFavorites = false;
+    a.reload();
+    repaint(hwnd);
+}
+
+// The button comes back up on a pressed tree row: a drag would have started
+// already, so this is a click - it navigates - or the end of a reorder.
+void treePressRelease(HWND hwnd, App& a, POINT p) {
+    const std::wstring path = a.treePressPath;
+    const bool reordered = a.favDragging;
+    const int insert = a.favInsert;
+    const std::wstring dragged = a.favDragPath;
+    cancelTreePress(hwnd, a);
+    if (reordered) {
+        if (insert >= 0) a.moveFavorite(a.favoriteIndex(dragged), insert);
+        return;
+    }
+    int row = a.treeRowAt(p);
+    if (row < 0) return;
+    TreeNode* n = a.treeFlat[row];
+    if (_wcsicmp(n->path.c_str(), path.c_str()) != 0) return;
+    if (!fsx::isDirectory(path)) {
+        MessageBeep(MB_ICONASTERISK);  // a favorite whose folder is gone
+        return;
+    }
+    // Tree clicks only select and update the right pane; expanding and
+    // scrolling here made the tree jump under the pointer.
+    a.treeClickRow = row;
+    a.loadDirectory(path, true, true);
+    repaint(hwnd);
+}
 
 void onMouseMove(HWND hwnd, App& a, POINT p) {
     if (a.splitterDrag) {
@@ -734,6 +859,10 @@ void onMouseMove(HWND hwnd, App& a, POINT p) {
         return;
     }
 
+    if (a.treePressRow >= 0) {
+        treePressMove(hwnd, a, p);
+        return;
+    }
     if (a.dragArmed && !a.dragging) {
         int dx = p.x - a.marqueeStart.x, dy = p.y - a.marqueeStart.y;
         const int tx = std::max(3, GetSystemMetrics(SM_CXDRAG) / 2);
@@ -883,10 +1012,16 @@ void onLButtonDown(HWND hwnd, App& a, POINT p) {
             } else if (n->hasChildren && PtInRect(&boxHit, p)) {
                 a.toggleTreeNode(*n);
             } else if (!n->path.empty()) {
-                // Tree clicks only select and update the right pane; expanding
-                // and scrolling here made the tree jump under the pointer.
-                a.treeClickRow = row;
-                a.loadDirectory(n->path, true, true);
+                // Pressed, not clicked yet: the row is navigated to when the
+                // button comes back up on it, and dragged if the pointer
+                // moves first - the way Explorer's tree works.  (Tree clicks
+                // only ever select and update the right pane; expanding and
+                // scrolling here made the tree jump under the pointer.)
+                a.treePressRow = row;
+                a.treePressPath = n->path;
+                a.treePressPoint = p;
+                a.favDragArmed = n->kind == TreeNode::Favorite;
+                SetCapture(hwnd);
             }
             repaint(hwnd);
             return;
@@ -990,6 +1125,11 @@ void onLButtonDown(HWND hwnd, App& a, POINT p) {
 }
 
 void onLButtonUp(HWND hwnd, App& a, POINT p) {
+    // Before the capture goes back: what the press was is still needed.
+    if (a.treePressRow >= 0) {
+        treePressRelease(hwnd, a, p);
+        return;
+    }
     if (GetCapture() == hwnd) ReleaseCapture();
     if (a.pressTitle >= 0) {
         int i = a.pressTitle;
@@ -1118,6 +1258,8 @@ void onKeyDown(HWND hwnd, App& a, WPARAM key) {
             a.marquee = false;
             a.dragging = false;
             a.dragArmed = false;
+        } else if (a.treePressRow >= 0) {
+            cancelTreePress(hwnd, a);  // a favorite being dragged to a new place stays where it is
         } else {
             a.clearSelection();
         }
@@ -1310,6 +1452,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             a.dragArmed = false;
             a.dragPath.clear();
         }
+        if (a.treePressRow >= 0 && !a.dragging) cancelTreePress(hwnd, a);
         a.scrollDrag = 0;
         a.splitterDrag = false;
         a.pressSelectedRow = -1;
@@ -1453,6 +1596,40 @@ bool hasArg(const std::vector<std::wstring>& args, const wchar_t* name) {
     for (auto& a : args)
         if (a == name) return true;
     return false;
+}
+
+// ------------------------------------------------------------- text prompt test
+// Drives a text prompt while its own message loop runs: a timer on a window
+// of this thread fires inside that loop, types into the prompt's edit box
+// and presses the key.
+constexpr UINT_PTR kPromptTestTimer = 0x4D45;
+constexpr wchar_t kPromptTestClass[] = L"MyOldComputerPromptTest";
+UINT g_promptKey = VK_RETURN;  // the key pressed after typing
+
+BOOL CALLBACK findPromptDialog(HWND h, LPARAM lp) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(h, &pid);
+    wchar_t cls[64]{};
+    if (pid == GetCurrentProcessId() && GetClassNameW(h, cls, 64) &&
+        lstrcmpW(cls, L"MyOldComputerDialog") == 0) {
+        *(HWND*)lp = h;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+LRESULT CALLBACK promptTestProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_TIMER && wp == kPromptTestTimer) {
+        KillTimer(hwnd, kPromptTestTimer);
+        HWND dialog = nullptr;
+        EnumWindows(findPromptDialog, (LPARAM)&dialog);
+        const HWND edit = dialog ? FindWindowExW(dialog, nullptr, L"Edit", nullptr) : nullptr;
+        if (edit) {
+            SetWindowTextW(edit, L"typed in the box");
+            PostMessageW(edit, WM_KEYDOWN, g_promptKey, 0);
+        }
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
 // ---------------------------------------------------------------- menu test
@@ -2600,6 +2777,285 @@ int runUiTest(App& app) {
         app.setViewMode(ViewMode::Details);
     }
 
+    // The Favorites in the sidebar - this app's own, not Explorer's: add,
+    // remove, rename, reorder, drop on, and what the tree and the menus show.
+    {
+        const std::wstring favA = base + L"\\favA", favB = base + L"\\favB", favC = base + L"\\favC";
+        const std::wstring favD = base + L"\\favD", favGone = base + L"\\favGone";
+        for (const std::wstring& d : {favA, favB, favC, favD, favGone})
+            CreateDirectoryW(d.c_str(), nullptr);
+        // The favorites as a set: paths only, order ignored.
+        const auto sameSet = [](const std::vector<Favorite>& favs,
+                                std::initializer_list<const std::wstring*> want) {
+            std::vector<std::wstring> a, b;
+            for (auto& f : favs) a.push_back(f.path);
+            for (auto* w : want) b.push_back(*w);
+            auto less = [](const std::wstring& x, const std::wstring& y) {
+                return _wcsicmp(x.c_str(), y.c_str()) < 0;
+            };
+            std::sort(a.begin(), a.end(), less);
+            std::sort(b.begin(), b.end(), less);
+            return a == b;
+        };
+        // The favorites in their order.
+        const auto inOrder = [](const std::vector<Favorite>& favs,
+                                std::initializer_list<const std::wstring*> want) {
+            if (favs.size() != want.size()) return false;
+            size_t i = 0;
+            for (auto* w : want)
+                if (_wcsicmp(favs[i++].path.c_str(), w->c_str()) != 0) return false;
+            return true;
+        };
+        const auto groupRow = [&app]() {
+            for (int i = 0; i < (int)app.treeFlat.size(); ++i)
+                if (app.treeFlat[i]->kind == TreeNode::Favorites) return i;
+            return -1;
+        };
+        const auto favRows = [&app]() {
+            std::vector<int> rows;
+            for (int i = 0; i < (int)app.treeFlat.size(); ++i)
+                if (app.treeFlat[i]->kind == TreeNode::Favorite) rows.push_back(i);
+            return rows;
+        };
+        const auto titleOf = [&app](int row) { return app.treeFlat[row]->title; };
+        const auto center = [&app](int row) {
+            const RECT r = app.treeRowRect(row);
+            return POINT{(r.left + r.right) / 2, (r.top + r.bottom) / 2};
+        };
+
+        // Add
+        app.settings.favorites.clear();
+        app.refreshTree();
+        check(L"收藏夹一组始终在树的最上面，空的时候也在", groupRow() == 0 && favRows().empty());
+        app.addFavorite(favA);
+        app.addFavorite(favB);
+        app.addFavorite(favC);
+        app.addFavorite(favA);
+        app.addFavorite(base + L"\\item0.txt");
+        check(L"加入收藏夹：文件夹收下，重复的和文件不收",
+              sameSet(app.settings.favorites, {&favA, &favB, &favC}));
+        check(L"树里的收藏夹一组按顺序列出它们",
+              favRows().size() == 3 && titleOf(favRows()[0]) == L"favA" &&
+                  titleOf(favRows()[1]) == L"favB" && titleOf(favRows()[2]) == L"favC");
+
+        // Rename
+        app.renameFavorite(favB, L"  工作  ");
+        check(L"收藏项可以起自己的名字（两端的空格不算）",
+              app.settings.favorites[1].name == L"工作" && titleOf(favRows()[1]) == L"工作");
+        app.renameFavorite(favB, L"favB");
+        check(L"改回文件夹自己的名字，就不再带别名",
+              app.settings.favorites[1].name.empty() && titleOf(favRows()[1]) == L"favB");
+
+        // A favorite whose folder is gone
+        app.addFavorite(favGone);
+        RemoveDirectoryW(favGone.c_str());
+        app.refreshTree();
+        check(L"目标没了的收藏项照样列出，并标成失效",
+              favRows().size() == 4 && app.treeFlat[favRows()[3]]->missing &&
+                  titleOf(favRows()[3]) == L"favGone");
+
+        // The Favorites menu
+        const std::vector<MenuItem> favMenu = app.menuFor(L"收藏");
+        const MenuItem* itemA = nullptr;
+        const MenuItem* itemGone = nullptr;
+        for (auto& it : favMenu) {
+            if (it.title == L"favA") itemA = &it;
+            if (it.title == L"favGone（已失效）") itemGone = &it;
+        }
+        check(L"“收藏”菜单按名字列出收藏项，失效的那项变灰并注明",
+              itemA && itemA->enabled && itemGone && !itemGone->enabled);
+        app.performMenuAction(itemA->id);
+        check(L"“收藏”菜单里点一项就跳过去", app.current == favA);
+        app.performMenuAction(itemGone->id);
+        check(L"失效的那项点了不跳", app.current == favA);
+        check(L"当前文件夹已在收藏夹里：“添加当前文件夹”变灰", !favMenu.empty() &&
+              !app.menuFor(L"收藏")[0].enabled);
+
+        // Remove
+        app.removeFavorite(favGone);
+        app.removeFavorite(favC);
+        check(L"从收藏夹移除", sameSet(app.settings.favorites, {&favA, &favB}));
+
+        // Move
+        app.moveFavorite(0, 1);
+        const bool moved = inOrder(app.settings.favorites, {&favB, &favA});
+        app.moveFavorite(1, 0);
+        app.moveFavorite(0, 7);  // no such place: nothing happens
+        check(L"收藏项能调整位置，调到不存在的地方则不动",
+              moved && inOrder(app.settings.favorites, {&favA, &favB}));
+
+        // Dropped on the Favorites
+        const bool dropped = app.performDrop({favA, favC, base + L"\\item0.txt"}, L"", true);
+        check(L"拖到收藏夹上：文件夹加入，已有的和文件不算，文件夹本身不动",
+              dropped && sameSet(app.settings.favorites, {&favA, &favB, &favC}) &&
+                  fsx::isDirectory(favC));
+        check(L"只拖着文件拖到收藏夹上：不算放下",
+              !app.performDrop({base + L"\\item0.txt"}, L"", true) &&
+                  sameSet(app.settings.favorites, {&favA, &favB, &favC}));
+
+        // The context menus
+        const auto has = [](const std::vector<std::wstring>& labels, const wchar_t* text) {
+            return std::find(labels.begin(), labels.end(), text) != labels.end();
+        };
+        shellmenu::ViewState view;
+        const auto notYet = shellmenu::labels(base, {favD}, view);
+        check(L"文件夹的右键菜单：还没收藏的是“添加到收藏夹”",
+              has(notYet, L"添加到收藏夹") && !has(notYet, L"从收藏夹中移除"));
+        view.isFavorite = true;
+        const auto already = shellmenu::labels(base, {favC}, view);
+        check(L"已收藏的文件夹：右键菜单是“从收藏夹中移除”",
+              has(already, L"从收藏夹中移除") && !has(already, L"添加到收藏夹") &&
+                  !has(already, L"重命名收藏项…"));
+        view.favoriteNode = true;
+        check(L"树里收藏项那一行：还能“重命名收藏项…”",
+              has(shellmenu::labels(base, {favC}, view), L"重命名收藏项…"));
+
+        // Saved and read back
+        app.renameFavorite(favB, L"工作");
+        app.settings.save();
+        Settings again;
+        again.load();
+        check(L"收藏夹存盘再读回：路径、名字、顺序都不变",
+              inOrder(again.favorites, {&favA, &favB, &favC}) && again.favorites[1].name == L"工作");
+        // A settings file from before favorites had names of their own.
+        const std::wstring ini = settingsPath();
+        WritePrivateProfileStringW(L"favorites", nullptr, nullptr, ini.c_str());
+        WritePrivateProfileStringW(L"favorites", L"fav0", favA.c_str(), ini.c_str());
+        WritePrivateProfileStringW(L"favorites", L"fav1", favB.c_str(), ini.c_str());
+        Settings old;
+        old.load();
+        check(L"旧版 settings.ini（只有路径）照常读入",
+              old.favorites.size() == 2 && old.favorites[0].path == favA &&
+                  old.favorites[0].name.empty() && old.favorites[1].path == favB);
+
+        // Reordered by dragging in the tree, through the input handlers
+        app.loadDirectory(base, false);
+        app.treeScroll = 0;
+        app.clampScroll();
+        std::vector<int> rows = favRows();
+        check(L"拖动排序的前提：收藏项在树里按顺序排着", rows.size() == 3 && rows[0] == 1);
+        POINT press = center(rows[0]);
+        onLButtonDown(nullptr, app, press);
+        check(L"按下收藏项那一行：先不跳转", app.treePressRow == rows[0] && app.current == base);
+        const RECT rowB = app.treeRowRect(rows[1]);
+        POINT onto{press.x, rowB.bottom - 2};  // the lower half of favB's row
+        onMouseMove(nullptr, app, onto);
+        check(L"拖到另一项的下半格：出现插入线，位置还没变",
+              app.favDragging && app.favLine.top == rowB.bottom - 1 &&
+                  inOrder(app.settings.favorites, {&favA, &favB, &favC}));
+        onLButtonUp(nullptr, app, onto);
+        check(L"松开：拖的那项落到插入线的位置",
+              inOrder(app.settings.favorites, {&favB, &favA, &favC}) && !app.favDragging);
+        // Onto the header: the top.  Esc: nothing moves.
+        onLButtonDown(nullptr, app, center(favRows()[2]));
+        onMouseMove(nullptr, app, center(groupRow()));
+        check(L"拖到表头上：插入线在第一项上面",
+              app.favDragging && app.favLine.top == app.treeRowRect(groupRow() + 1).top - 1);
+        onKeyDown(nullptr, app, VK_ESCAPE);
+        check(L"拖动中按 Esc：位置不变",
+              !app.favDragging && inOrder(app.settings.favorites, {&favB, &favA, &favC}));
+        // A click: navigate when the button comes back up on the row.
+        press = center(favRows()[1]);
+        onLButtonDown(nullptr, app, press);
+        check(L"按下收藏项：等松开才跳转", app.current == base);
+        onLButtonUp(nullptr, app, press);
+        check(L"松开在原来那一行：跳到那个文件夹", app.current == favA && app.treePressRow < 0);
+        // Released somewhere else: not a click.
+        app.loadDirectory(base, false);
+        app.treeScroll = 0;
+        app.clampScroll();
+        onLButtonDown(nullptr, app, center(favRows()[0]));
+        onLButtonUp(nullptr, app, POINT{app.lay.listViewport.left + 50, app.lay.listViewport.top + 50});
+        check(L"按下后挪到别处松开：不算点击", app.current == base && app.treePressRow < 0);
+
+        // The receiving side of a drag, driven the way Windows drives it.
+        app.loadDirectory(base, false);
+        app.treeScroll = 0;
+        app.listScroll = 0;
+        app.clampScroll();
+        HWND owner = CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, 1100, 760, nullptr, nullptr,
+                                     GetModuleHandleW(nullptr), nullptr);  // never shown; client = screen
+        dnd::registerTarget(owner, &app);
+        IDropTarget* target = dnd::dropTarget();
+        IDataObject* data = dnd::makeData({favD, base + L"\\item0.txt"});
+        const RECT group = app.treeRowRect(groupRow());
+        const POINTL overGroup{group.left + 40, (group.top + group.bottom) / 2};
+        // Windows hands the target the effects the source allows.
+        DWORD effect = DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK;
+        const HRESULT entered = target ? target->DragEnter(data, 0, overGroup, &effect) : E_FAIL;
+        check(L"拖着文件夹经过“收藏夹”那一组：高亮它，光标是链接",
+              SUCCEEDED(entered) && app.dragTargetFavorites && app.dragTargetRow == groupRow() &&
+                  effect == DROPEFFECT_LINK);
+        const RECT listRow = app.listRowRect(app.rowOfPath(favD));
+        const POINTL overFolder{listRow.left + 40, (listRow.top + listRow.bottom) / 2};
+        effect = 0;
+        if (target) target->DragOver(0, overFolder, &effect);
+        check(L"拖着文件夹经过列表里的文件夹：是移动或复制，不是收藏",
+              !app.dragTargetFavorites && app.dragTargetFolder == favD && effect != DROPEFFECT_LINK &&
+                  effect != DROPEFFECT_NONE);
+        effect = 0;
+        if (target) target->Drop(data, 0, overGroup, &effect);
+        check(L"在“收藏夹”上松手：文件夹进了收藏夹，文件没进，什么都没被移动",
+              inOrder(app.settings.favorites, {&favB, &favA, &favC, &favD}) &&
+                  effect == DROPEFFECT_LINK && fsx::isDirectory(favD));
+        check(L"松手后高亮消失", !app.dragTargetFavorites && !app.dragTargetIsTree);
+        IDataObject* files = dnd::makeData({base + L"\\item0.txt"});
+        effect = 1;
+        if (target) target->DragEnter(files, 0, overGroup, &effect);
+        check(L"只拖着文件经过“收藏夹”：不能放", effect == DROPEFFECT_NONE);
+        if (target) target->DragLeave();
+        files->Release();
+        data->Release();
+        dnd::revokeTarget(owner);
+        DestroyWindow(owner);
+
+        app.settings.favorites.clear();
+        app.settings.save();
+        app.refreshTree();
+        app.loadDirectory(base, false);
+    }
+
+    // The text prompt returns what was typed.  Its edit box is destroyed with
+    // the dialog window, so the text has to be read before that; it used to
+    // be read after, and every prompt came back empty.
+    {
+        WNDCLASSEXW wc{sizeof(WNDCLASSEXW)};
+        wc.lpfnWndProc = promptTestProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = kPromptTestClass;
+        RegisterClassExW(&wc);
+        HWND owner = CreateWindowExW(0, kPromptTestClass, L"", WS_OVERLAPPED, 0, 0, 100, 100,
+                                     nullptr, nullptr, wc.hInstance, nullptr);  // never shown
+        std::wstring typed = L"(untouched)";
+        g_promptKey = VK_RETURN;
+        SetTimer(owner, kPromptTestTimer, 200, nullptr);
+        const bool accepted = promptText(owner, L"标题", L"提示：", L"初始", &typed);
+        check(L"文字输入对话框：按回车，输入的文字原样返回",
+              accepted && typed == L"typed in the box");
+        std::wstring cancelled = L"(untouched)";
+        g_promptKey = VK_ESCAPE;
+        SetTimer(owner, kPromptTestTimer, 200, nullptr);
+        const bool ok = promptText(owner, L"标题", L"提示：", L"初始", &cancelled);
+        check(L"文字输入对话框：按 Esc 是取消", !ok);
+        // The whole of "重命名收藏项…": the name typed is the name shown.
+        app.settings.favorites.clear();
+        const std::wstring favC = base + L"\\favC";
+        app.addFavorite(favC);
+        app.hwnd = owner;
+        g_promptKey = VK_RETURN;
+        SetTimer(owner, kPromptTestTimer, 200, nullptr);
+        app.promptRenameFavorite(favC);
+        app.hwnd = nullptr;
+        check(L"“重命名收藏项…”：输入的名字成为收藏项显示的名字",
+              app.settings.favorites.size() == 1 &&
+                  app.settings.favorites[0].name == L"typed in the box" &&
+                  app.treeFlat[1]->title == L"typed in the box");
+        app.settings.favorites.clear();
+        app.settings.save();
+        app.refreshTree();
+        DestroyWindow(owner);
+    }
+
     // New Folder / New Text Document, the way Explorer does it: the new item
     // is scrolled into view, selected, and its name is being typed over;
     // Esc leaves it as it was created, Enter renames it to what was typed.
@@ -3165,6 +3621,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
         return code;
     }
     if (hasArg(args, L"--uitest")) {
+        // The tests start from default settings and save to a scratch file:
+        // whatever they do must never reach the user's settings.ini.
+        wchar_t temp[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, temp);
+        const std::wstring scratch = std::wstring(temp) + L"moc-uitest-settings.ini";
+        DeleteFileW(scratch.c_str());
+        SetEnvironmentVariableW(L"MOC_SETTINGS_FILE", scratch.c_str());
         App app;
         int code = runUiTest(app);
         OleUninitialize();

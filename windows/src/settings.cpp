@@ -65,6 +65,10 @@ void writeHidden(const std::wstring& path, const wchar_t* section,
 }  // namespace
 
 std::wstring settingsPath() {
+    // --uitest points this at a scratch file: the tests must never write over
+    // the user's settings.
+    wchar_t scratch[MAX_PATH]{};
+    if (GetEnvironmentVariableW(L"MOC_SETTINGS_FILE", scratch, MAX_PATH) > 0) return scratch;
     std::wstring dir;
     PWSTR p = nullptr;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, nullptr, &p)) && p) {
@@ -111,12 +115,16 @@ void Settings::load() {
         readHidden(path, s.c_str(), hiddenExt[ext]);
     }
 
+    // fav<n> is the folder, favName<n> the name it is shown under when it
+    // has one of its own (files from before that have only the first).
     favorites.clear();
-    for (int i = 0; i < 64; ++i) {
+    for (int i = 0; i < kMaxFavorites; ++i) {
         wchar_t key[16];
         swprintf_s(key, L"fav%d", i);
         std::wstring v = iniRead(path, L"favorites", key, L"");
-        if (!v.empty()) favorites.push_back(v);
+        if (v.empty()) continue;
+        swprintf_s(key, L"favName%d", i);
+        favorites.push_back(Favorite{v, iniRead(path, L"favorites", key, L"")});
     }
 }
 
@@ -162,9 +170,16 @@ void Settings::save() const {
     }
 
     WritePrivateProfileStringW(L"favorites", nullptr, nullptr, path.c_str());
-    for (size_t i = 0; i < favorites.size() && i < 64; ++i) {
+    for (size_t i = 0; i < favorites.size() && i < (size_t)kMaxFavorites; ++i) {
         wchar_t key[16];
         swprintf_s(key, L"fav%zu", i);
-        WritePrivateProfileStringW(L"favorites", key, favorites[i].c_str(), path.c_str());
+        WritePrivateProfileStringW(L"favorites", key, favorites[i].path.c_str(), path.c_str());
+        // A null value removes the key: a favorite shown under its folder's
+        // own name leaves no name behind.
+        swprintf_s(key, L"favName%zu", i);
+        WritePrivateProfileStringW(L"favorites", key,
+                                   favorites[i].name.empty() ? nullptr
+                                                             : favorites[i].name.c_str(),
+                                   path.c_str());
     }
 }

@@ -42,6 +42,9 @@ enum CustomId {
     kPreview,
     kReveal,
     kCopyPath,
+    kFavoriteAdd,
+    kFavoriteRemove,
+    kFavoriteRename,
 };
 
 IContextMenu2* g_menu2 = nullptr;
@@ -73,11 +76,13 @@ bool menuHasText(HMENU menu, const wchar_t* needle) {
     return false;
 }
 
-void removeItemsStartingWith(HMENU menu, std::initializer_list<const wchar_t*> prefixes) {
+// `keep`: an item of ours that may start like one of the prefixes.
+void removeItemsStartingWith(HMENU menu, std::initializer_list<const wchar_t*> prefixes,
+                             UINT keep = 0) {
     for (int i = GetMenuItemCount(menu) - 1; i >= 0; --i) {
         const std::wstring text = itemText(menu, i);
         for (auto* prefix : prefixes) {
-            if (startsWith(text, prefix)) {
+            if (startsWith(text, prefix) && GetMenuItemID(menu, i) != keep) {
                 DeleteMenu(menu, i, MF_BYPOSITION);
                 break;
             }
@@ -173,6 +178,9 @@ void addViewAndSort(HMENU menu, const ViewState& state) {
 
 Command commandFor(UINT id) {
     switch (id) {
+    case kFavoriteAdd: return Command::AddFavorite;
+    case kFavoriteRemove: return Command::RemoveFavorite;
+    case kFavoriteRename: return Command::RenameFavorite;
     case kOpen: return Command::Open;
     case kOpenNewWindow: return Command::OpenNewWindow;
     case kViewBig: return Command::ViewBig;
@@ -309,6 +317,23 @@ bool buildMenu(HWND owner, const std::wstring& folderPath, const std::vector<std
             !menuHasText(out->menu, L"在新窗口中打开"))
             InsertMenuW(out->menu, at++, MF_BYPOSITION | MF_STRING, kOpenNewWindow,
                         L"在新窗口中打开");
+        // The sidebar's Favorites: a folder joins them from its own menu and
+        // leaves them the same way; on its row in the tree it can be given a
+        // name of its own too.
+        if (isDir && single) {
+            if (state.favoriteNode) {
+                InsertMenuW(out->menu, at++, MF_BYPOSITION | MF_STRING, kFavoriteRemove,
+                            L"从收藏夹中移除");
+                InsertMenuW(out->menu, at++, MF_BYPOSITION | MF_STRING, kFavoriteRename,
+                            L"重命名收藏项…");
+            } else if (state.isFavorite) {
+                InsertMenuW(out->menu, at++, MF_BYPOSITION | MF_STRING, kFavoriteRemove,
+                            L"从收藏夹中移除");
+            } else {
+                InsertMenuW(out->menu, at++, MF_BYPOSITION | MF_STRING, kFavoriteAdd,
+                            L"添加到收藏夹");
+            }
+        }
         if (state.menuMask & kMenuItemReveal)
             InsertMenuW(out->menu, at++, MF_BYPOSITION | MF_STRING, kReveal,
                         L"在资源管理器中显示");
@@ -322,7 +347,8 @@ bool buildMenu(HWND owner, const std::wstring& folderPath, const std::vector<std
         // The shell's Rename verb needs an Explorer view; ours opens the
         // rename prompt instead.
         if (single && (state.menuMask & kMenuItemRename)) {
-            removeItemsStartingWith(out->menu, {L"重命名"});
+            // ("重命名收藏项…" is ours and stays.)
+            removeItemsStartingWith(out->menu, {L"重命名"}, kFavoriteRename);
             int propsPos = -1;
             for (int i = 0; i < GetMenuItemCount(out->menu); ++i) {
                 if (itemText(out->menu, i).find(L"属性") != std::wstring::npos) {

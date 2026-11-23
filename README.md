@@ -86,8 +86,10 @@ happened - empty area, folder, file, per file type - and each one can be hidden
 in that context only; any extension can be added to the list by hand.
 
 **A sidebar that knows the machine** — My Computer with every drive or mounted
-volume, folders that expand with `+` / `−`, a Favorites group, a draggable splitter
-and a tree that reveals the folder you are browsing.
+volume, folders that expand with `+` / `−`, a Favorites group at the top (a folder
+joins it from its context menu or by being dropped on it; its favorites rename,
+remove and reorder by dragging), a draggable splitter and a tree that reveals the
+folder you are browsing.
 
 **File operations, not just browsing** — new folder, rename, move to Trash or the
 Recycle Bin, copy / cut / paste through the system clipboard, drag & drop between

@@ -22,6 +22,7 @@ struct TreeNode {
     bool expanded = false;
     bool loaded = false;
     bool hasChildren = true;
+    bool missing = false;  // a favorite whose folder is gone: shown, but it leads nowhere
     std::vector<TreeNode> children;
 };
 
@@ -139,6 +140,21 @@ public:
     std::wstring dragTargetFolder;
     bool dragTargetIsTree = false;
     int dragTargetRow = -1;
+    bool dragTargetFavorites = false;  // the drag is over the Favorites group
+
+    // A press on a tree row: a click that navigates when the button comes up
+    // where it went down, or a drag when the pointer moves first.
+    int treePressRow = -1;
+    std::wstring treePressPath;
+    POINT treePressPoint{};
+    // A favorite pressed in the tree is dragged only up and down inside its
+    // group: this is that drag, the place the favorite would land, and the
+    // line to draw there.
+    bool favDragArmed = false;
+    bool favDragging = false;
+    std::wstring favDragPath;
+    int favInsert = -1;
+    RECT favLine{};
 
     // Scrollbar dragging: 0 none, 1 list, 2 grid, 3 tree.
     int scrollDrag = 0;
@@ -209,7 +225,10 @@ public:
     void showSelectionProperties();
     void sortBy(int column);
     void openMenuSettings();
-    bool performDrop(const std::vector<std::wstring>& paths, const std::wstring& folder);
+    // `toFavorites`: dropped on the Favorites group - every folder among the
+    // paths becomes a favorite instead of being moved or copied.
+    bool performDrop(const std::vector<std::wstring>& paths, const std::wstring& folder,
+                     bool toFavorites = false);
 
     // Explorer-style rename: an edit control over the row's name, the base
     // name pre-selected.  commit=false restores the old name.
@@ -221,9 +240,21 @@ public:
     // Favorites
     void addFavorite(const std::wstring& path);
     void removeFavorite(const std::wstring& path);
+    void renameFavorite(const std::wstring& path, const std::wstring& name);  // empty: the folder's own name
+    void promptRenameFavorite(const std::wstring& path);
+    void moveFavorite(int from, int to);  // `to`: its index in the list afterwards
+    int favoriteIndex(const std::wstring& path) const;
+    std::wstring favoriteTitle(const Favorite& f) const;
+    int dropOnFavorites(const std::vector<std::wstring>& paths);  // returns how many were new
+    void refreshFavorites();  // rebuilds the Favorites group, and nothing else
+    // Where the favorite being dragged lands if the pointer lets go at p: its
+    // index in the list, and the line to draw.  -1 and an empty rect when p
+    // is not over the group.
+    void favoriteDropPosition(POINT p, int* insert, RECT* line) const;
 
     // Tree
     void buildTree();
+    void buildFavoriteNode(TreeNode& fav, const Favorite& f);
     void loadTreeChildren(TreeNode& node);
     void refreshTree();
     // Keeps the tree in sync after a file operation: deleted folders leave the
@@ -297,7 +328,6 @@ public:
     void endAddressEdit(bool commit);
 
 private:
-    std::vector<std::wstring> menuFavorites() const;
     bool isEditingText() const;
 
 public:

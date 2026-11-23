@@ -112,6 +112,21 @@ the hand-drawn set.  macOS draws the icons in `Icons.swift` per extension.
   `[menu-ext.<ext>]` sections of settings.ini.
 - The empty-area menu starts with View, Sort by and Refresh, then **New** as
   a submenu holding Folder and Text Document - Explorer's order, nothing flat.
+- The sidebar's Favorites are this app's own, not Explorer's: an ordered list
+  of folders in the `[favorites]` section of settings.ini (`fav<n>` the
+  folder, `favName<n>` a name of its own when it has one). The group is the
+  first thing in the tree and is always there, so it is in reach.
+- A folder joins them from its own context menu (Add to Favorites), by being
+  dropped on the group (files are not taken, and nothing is moved), or
+  through Favorites → Add current folder. It leaves them the same way, from
+  the context menu of the folder or of its row in the group.
+- A favorite may have a name of its own (its row's context menu → Rename
+  favorite) and is shown under it, else under its folder's name. It is
+  reordered by dragging its row up or down inside the group; a line shows
+  where it will land, Esc cancels. A favorite whose folder is gone stays,
+  greyed out, so that it can be removed.
+- Pressing a tree row navigates when the button comes back up on that row,
+  and drags the folder when the pointer moves first - as Explorer's tree does.
 - New Folder and New Text Document end in that edit, as in Explorer: the new
   item is scrolled into view, selected, and its name is being typed over
   (a file's extension is left out). Esc leaves it with the name it got.

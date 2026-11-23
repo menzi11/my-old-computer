@@ -27,6 +27,9 @@ enum class Command {
     ToggleHidden,
     Terminal,
     Rename,
+    AddFavorite,
+    RemoveFavorite,
+    RenameFavorite,
     NewFolder,
     NewTextFile,
     Settings,
@@ -42,6 +45,8 @@ struct ViewState {
     bool showHidden = false;
     unsigned menuMask = kMenuDefaults;  // MenuOption flags from settings.h
     std::vector<std::wstring> hidden;   // top-level labels to leave out
+    bool isFavorite = false;    // the folder is in the sidebar's Favorites
+    bool favoriteNode = false;  // ... and the menu is opened on its row there, where it can be renamed too
 };
 
 struct Result {

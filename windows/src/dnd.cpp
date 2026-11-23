@@ -56,7 +56,7 @@ public:
                 GlobalFree(mem);
                 return E_OUTOFMEMORY;
             }
-            *effect = DROPEFFECT_COPY | DROPEFFECT_MOVE;
+            *effect = DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK;
             GlobalUnlock(mem);
             stg->tymed = TYMED_HGLOBAL;
             stg->hGlobal = mem;
@@ -182,33 +182,41 @@ public:
     HRESULT STDMETHODCALLTYPE DragOver(DWORD keys, POINTL pt, DWORD* effect) override {
         POINT p{pt.x, pt.y};
         ScreenToClient(hwnd_, &p);
-        std::wstring target;
-        bool isTree = false;
-        int row = -1;
-        computeTarget(p, target, isTree, row);
+        const DropWhere w = where(p);
         // Repaint only when the highlighted drop target changes: invalidating
         // on every mouse move made dragging in large folders crawl.
-        const bool changed = target != app_->dragTargetFolder ||
-                             isTree != app_->dragTargetIsTree || row != app_->dragTargetRow;
-        app_->dragTargetFolder = target;
-        app_->dragTargetIsTree = isTree;
-        app_->dragTargetRow = row;
+        const bool changed = w.folder != app_->dragTargetFolder ||
+                             w.isTree != app_->dragTargetIsTree || w.row != app_->dragTargetRow ||
+                             w.favorites != app_->dragTargetFavorites;
+        app_->dragTargetFolder = w.folder;
+        app_->dragTargetIsTree = w.isTree;
+        app_->dragTargetRow = w.row;
+        app_->dragTargetFavorites = w.favorites;
 
         DWORD allowed = effect ? *effect : (DROPEFFECT_COPY | DROPEFFECT_MOVE);
         DWORD want;
-        if (keys & MK_CONTROL) want = DROPEFFECT_COPY;
-        else if (keys & MK_SHIFT) want = DROPEFFECT_MOVE;
-        else {
+        if (w.favorites) {
+            // The Favorites keep a folder where it is: that is a link, and the
+            // cursor says so.  Files are nothing they can hold.
+            want = anyFolder() ? DROPEFFECT_LINK : DROPEFFECT_NONE;
+            if (!(allowed & want)) want = DROPEFFECT_NONE;
+        } else if (keys & MK_CONTROL) {
+            want = DROPEFFECT_COPY;
+        } else if (keys & MK_SHIFT) {
+            want = DROPEFFECT_MOVE;
+        } else {
             // The same one rule performDrop applies: same volume moves,
             // different volumes copy - cursor and action can't disagree.
-            const std::wstring& dest = target.empty() ? app_->current : target;
+            const std::wstring& dest = w.folder.empty() ? app_->current : w.folder;
             want = fsx::dropShouldMove(paths_, dest) ? DROPEFFECT_MOVE : DROPEFFECT_COPY;
         }
-        if (!(allowed & want))
+        // An effect the source does not allow falls back to one it does -
+        // but "cannot drop" is a verdict, not an effect to replace.
+        if (want != DROPEFFECT_NONE && !(allowed & want))
             want = (allowed & DROPEFFECT_COPY) ? DROPEFFECT_COPY : DROPEFFECT_MOVE;
         // Nothing to do when the files are already in the folder under the
         // pointer: show the "no drop" cursor instead of a move cursor.
-        if (target.empty() && allFromCurrent()) want = DROPEFFECT_NONE;
+        if (w.folder.empty() && !w.favorites && allFromCurrent()) want = DROPEFFECT_NONE;
         if (effect) *effect = want;
         if (changed) {
             app_->paintDirty = true;
@@ -231,17 +239,17 @@ public:
         (void)keys;
         POINT p{pt.x, pt.y};
         ScreenToClient(hwnd_, &p);
-        std::wstring target;
-        bool isTree = false;
-        int row = -1;
-        computeTarget(p, target, isTree, row);
+        const DropWhere w = where(p);
         clearHighlight();
         std::vector<std::wstring> paths = pathsFromDataObject(data);
-        diagLog(L"drop target=%ls paths=%d", target.c_str(), (int)paths.size());
+        diagLog(L"drop target=%ls favorites=%d paths=%d", w.folder.c_str(), (int)w.favorites,
+                (int)paths.size());
         DWORD performed = DROPEFFECT_NONE;
-        if (!paths.empty() && app_->performDrop(paths, target)) {
-            const std::wstring& dest = target.empty() ? app_->current : target;
-            performed = fsx::dropShouldMove(paths, dest) ? DROPEFFECT_MOVE : DROPEFFECT_COPY;
+        if (!paths.empty() && app_->performDrop(paths, w.folder, w.favorites)) {
+            const std::wstring& dest = w.folder.empty() ? app_->current : w.folder;
+            performed = w.favorites ? DROPEFFECT_LINK
+                                    : (fsx::dropShouldMove(paths, dest) ? DROPEFFECT_MOVE
+                                                                        : DROPEFFECT_COPY);
         }
         if (effect) *effect = performed;
         if (data_) {
@@ -259,37 +267,52 @@ private:
         return true;
     }
 
+    bool anyFolder() const {
+        for (auto& p : paths_)
+            if (fsx::isDirectory(p)) return true;
+        return false;
+    }
+
     void clearHighlight() {
         app_->dragTargetFolder.clear();
         app_->dragTargetIsTree = false;
         app_->dragTargetRow = -1;
+        app_->dragTargetFavorites = false;
         paths_.clear();
         app_->paintDirty = true;
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
 
-    void computeTarget(POINT p, std::wstring& target, bool& isTree, int& row) {
-        target.clear();
-        isTree = false;
-        row = -1;
+    // What is under the pointer while something is dragged.
+    struct DropWhere {
+        std::wstring folder;  // empty: the folder shown in the list
+        bool isTree = false;
+        int row = -1;
+        bool favorites = false;  // the Favorites group of the tree: folders land in it
+    };
+
+    DropWhere where(POINT p) const {
+        DropWhere w;
         if (app_->sidebarVisible && PtInRect(&app_->lay.sidebar, p)) {
-            int r = app_->treeRowAt(p);
+            const int r = app_->treeRowAt(p);
             if (r >= 0) {
-                TreeNode* n = app_->treeFlat[r];
-                if (!n->path.empty()) {
-                    target = n->path;
-                    isTree = true;
-                    row = r;
-                }
+                const TreeNode* n = app_->treeFlat[r];
+                if (n->kind == TreeNode::Favorites)
+                    w.favorites = true;
+                else if (!n->path.empty())
+                    w.folder = n->path;
+                w.isTree = true;
+                w.row = r;
             }
-            return;
+            return w;
         }
-        if (!PtInRect(&app_->lay.content, p)) return;
+        if (!PtInRect(&app_->lay.content, p)) return w;
         // Highlight a folder only under its icon or name - the seam between
         // entries is the current folder, the same hit rule as clicks.
         int idx = -1;
         if (app_->hitTestItem(p, &idx) && app_->entries[idx].isDir)
-            target = app_->entries[idx].path;
+            w.folder = app_->entries[idx].path;
+        return w;
     }
 
     LONG ref_ = 1;
@@ -302,6 +325,10 @@ private:
 DropTargetImpl* g_target = nullptr;
 
 }  // namespace
+
+IDropTarget* dropTarget() { return g_target; }
+
+IDataObject* makeData(const std::vector<std::wstring>& paths) { return new HdropData(paths); }
 
 void registerTarget(HWND hwnd, App* app) {
     if (g_target) return;
@@ -324,7 +351,7 @@ void revokeTarget(HWND hwnd) {
 bool dragOut(HWND hwnd, const std::vector<std::wstring>& paths, DWORD* effect) {
     (void)hwnd;  // the OLE drag runs its own loop; no window handle needed
     if (paths.empty()) return false;
-    auto* data = new HdropData(paths);
+    IDataObject* data = makeData(paths);
     auto* source = new DragSource();
 
     // A small drag image: the first item's icon and name.
@@ -391,8 +418,10 @@ bool dragOut(HWND hwnd, const std::vector<std::wstring>& paths, DWORD* effect) {
         }
     }
 
+    // LINK is among the allowed effects: dropping on the Favorites is one.
     DWORD performed = DROPEFFECT_NONE;
-    HRESULT hr = DoDragDrop(data, source, DROPEFFECT_COPY | DROPEFFECT_MOVE, &performed);
+    HRESULT hr = DoDragDrop(data, source, DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK,
+                            &performed);
     if (dragImage) DeleteObject(dragImage);
     data->Release();
     source->Release();

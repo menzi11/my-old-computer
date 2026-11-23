@@ -661,7 +661,15 @@ void App::openTerminalForSelection() {
     fsx::openTerminalAt(dir);
 }
 
-bool App::performDrop(const std::vector<std::wstring>& paths, const std::wstring& folder) {
+bool App::performDrop(const std::vector<std::wstring>& paths, const std::wstring& folder,
+                      bool toFavorites) {
+    if (toFavorites) {
+        // Nothing is moved or copied here: a folder dropped on the Favorites
+        // is kept there, where it is.
+        const int added = dropOnFavorites(paths);
+        if (!added) MessageBeep(MB_ICONASTERISK);
+        return added != 0;
+    }
     std::wstring dest = folder.empty() ? current : folder;
     if (!fsx::isDirectory(dest)) {
         MessageBeep(MB_ICONASTERISK);
@@ -688,24 +696,180 @@ bool App::performDrop(const std::vector<std::wstring>& paths, const std::wstring
 
 // ---------------------------------------------------------------- favorites
 
-void App::addFavorite(const std::wstring& path) {
+int App::favoriteIndex(const std::wstring& path) const {
+    for (int i = 0; i < (int)settings.favorites.size(); ++i)
+        if (_wcsicmp(settings.favorites[i].path.c_str(), path.c_str()) == 0) return i;
+    return -1;
+}
+
+std::wstring App::favoriteTitle(const Favorite& f) const {
+    if (!f.name.empty()) return f.name;
+    const std::wstring name = fsx::fileName(f.path);
+    return name.empty() ? f.path : name;
+}
+
+namespace {
+std::wstring favoritePath(const std::wstring& path) {
     std::wstring p = path;
     while (p.size() > 3 && p.back() == L'\\') p.pop_back();
-    if (p.empty()) return;
-    for (auto& f : settings.favorites)
-        if (_wcsicmp(f.c_str(), p.c_str()) == 0) return;
-    settings.favorites.push_back(p);
+    return p;
+}
+}  // namespace
+
+void App::addFavorite(const std::wstring& path) {
+    const std::wstring p = favoritePath(path);
+    // The Favorites hold folders, and each of them once.
+    if (p.empty() || !fsx::isDirectory(p) || favoriteIndex(p) >= 0) return;
+    settings.favorites.push_back(Favorite{p, L""});
     settings.save();
-    refreshTree();
+    refreshFavorites();
 }
 
 void App::removeFavorite(const std::wstring& path) {
-    settings.favorites.erase(
-        std::remove_if(settings.favorites.begin(), settings.favorites.end(),
-                       [&](const std::wstring& f) { return _wcsicmp(f.c_str(), path.c_str()) == 0; }),
-        settings.favorites.end());
+    const int i = favoriteIndex(path);
+    if (i < 0) return;
+    settings.favorites.erase(settings.favorites.begin() + i);
     settings.save();
-    refreshTree();
+    refreshFavorites();
+}
+
+void App::renameFavorite(const std::wstring& path, const std::wstring& name) {
+    const int i = favoriteIndex(path);
+    if (i < 0) return;
+    // Blanks around what was typed are not part of the name, and the folder's
+    // own name is no name of its own (it would go stale once the folder is
+    // renamed).
+    const wchar_t* first = name.c_str();
+    while (*first == L' ' || *first == L'	') ++first;
+    std::wstring own = first;
+    while (!own.empty() && (own.back() == L' ' || own.back() == L'	')) own.pop_back();
+    const std::wstring folderName = favoriteTitle(Favorite{settings.favorites[i].path, L""});
+    settings.favorites[i].name = _wcsicmp(own.c_str(), folderName.c_str()) == 0 ? L"" : own;
+    settings.save();
+    refreshFavorites();
+}
+
+void App::promptRenameFavorite(const std::wstring& path) {
+    const int i = favoriteIndex(path);
+    if (i < 0) return;
+    std::wstring name = settings.favorites[i].name;
+    if (!promptText(hwnd, L"重命名收藏项", L"显示名称：", name, &name)) return;
+    renameFavorite(path, name);
+}
+
+void App::moveFavorite(int from, int to) {
+    const int n = (int)settings.favorites.size();
+    if (from < 0 || from >= n || to < 0 || to >= n || from == to) return;
+    const Favorite f = settings.favorites[from];
+    settings.favorites.erase(settings.favorites.begin() + from);
+    settings.favorites.insert(settings.favorites.begin() + to, f);
+    settings.save();
+    refreshFavorites();
+}
+
+int App::dropOnFavorites(const std::vector<std::wstring>& paths) {
+    int added = 0;
+    for (auto& p : paths) {
+        const std::wstring path = favoritePath(p);
+        if (path.empty() || !fsx::isDirectory(path) || favoriteIndex(path) >= 0) continue;
+        settings.favorites.push_back(Favorite{path, L""});
+        ++added;
+    }
+    if (!added) return 0;
+    settings.save();
+    refreshFavorites();
+    return added;
+}
+
+void App::buildFavoriteNode(TreeNode& fav, const Favorite& f) {
+    fav.kind = TreeNode::Favorite;
+    fav.path = f.path;
+    fav.title = favoriteTitle(f);
+    fav.depth = 1;
+    fav.missing = !fsx::isDirectory(f.path);
+    fav.hasChildren = !fav.missing && treeHasSubdir(f.path);
+}
+
+// Rebuilds the Favorites group where it stands; the rest of the tree keeps
+// its expansion state, which a full refresh would throw away.
+void App::refreshFavorites() {
+    TreeNode* group = nullptr;
+    for (auto& r : treeRoots)
+        if (r.kind == TreeNode::Favorites) {
+            group = &r;
+            break;
+        }
+    if (!group) {
+        flattenTree();
+        return;
+    }
+    std::vector<std::pair<std::wstring, bool>> wasExpanded;
+    for (auto& c : group->children) wasExpanded.emplace_back(c.path, c.expanded);
+    group->children.clear();
+    for (auto& f : settings.favorites) {
+        TreeNode fav;
+        buildFavoriteNode(fav, f);
+        for (auto& [path, expanded] : wasExpanded)
+            if (_wcsicmp(path.c_str(), f.path.c_str()) == 0) fav.expanded = expanded;
+        if (fav.expanded) loadTreeChildren(fav);
+        group->children.push_back(std::move(fav));
+    }
+    group->hasChildren = !group->children.empty();
+    flattenTree();
+    clampScroll();
+}
+
+void App::favoriteDropPosition(POINT p, int* insert, RECT* line) const {
+    *insert = -1;
+    *line = RECT{};
+    const int n = (int)settings.favorites.size();
+    const int dragged = favoriteIndex(favDragPath);
+    if (n == 0 || dragged < 0) return;
+    const int row = treeRowAt(p);
+    if (row < 0) return;
+    const TreeNode* node = treeFlat[row];
+    if (node->kind == TreeNode::Favorites) {
+        // The group's header: the very top of the group.
+        *insert = 0;
+        const RECT r = treeRowRect(row);
+        *line = RECT{r.left + (int)(2 * scale + 0.5), r.bottom - 1,
+                     r.right - (int)(6 * scale + 0.5), r.bottom + 1};
+        return;
+    }
+    int target = 0;       // the favorite the pointer is on
+    bool after = false;  // ... below its middle (or inside what it has expanded)
+    {
+        // A favorite itself, or a row inside one that is expanded.  Anything
+        // else - the rows above the group, the roots below it - is no place.
+        target = -1;
+        for (int r = row; r >= 0 && target < 0; --r) {
+            if (treeFlat[r]->kind == TreeNode::Favorite)
+                target = favoriteIndex(treeFlat[r]->path);
+            else if (treeFlat[r]->depth == 0)
+                return;
+        }
+        if (target < 0) return;
+        if (node->kind == TreeNode::Favorite) {
+            const RECT r = treeRowRect(row);
+            after = p.y >= (r.top + r.bottom) / 2;
+        } else {
+            after = true;
+        }
+    }
+    // Where it lands: the same count of other favorites before it.
+    *insert = after ? (dragged <= target ? target : target + 1)
+                    : (dragged < target ? target - 1 : target);
+    // The line: over the favourite the pointer is on, or under the last row
+    // of what it has expanded; on the group's header, under the header.
+    int lineRow = row;
+    if (node->kind == TreeNode::Favorite && after) {
+        int r = row + 1;
+        while (r < (int)treeFlat.size() && treeFlat[r]->depth > node->depth) ++r;
+        lineRow = r - 1;
+    }
+    const RECT r = treeRowRect(lineRow);
+    const int y = after ? r.bottom : r.top;
+    *line = RECT{r.left + (int)(2 * scale + 0.5), y - 1, r.right - (int)(6 * scale + 0.5), y + 1};
 }
 
 // ---------------------------------------------------------------- tree
@@ -779,32 +943,26 @@ void App::buildTree() {
         }
     }
     machine.hasChildren = !machine.children.empty();
-    treeRoots.push_back(std::move(machine));
 
-    if (!settings.favorites.empty()) {
-        TreeNode group;
-        group.kind = TreeNode::Favorites;
-        group.title = L"收藏夹";
-        group.path = L"";  // a header, not a folder: no menu or navigation of its own
-        group.depth = 0;
-        group.expanded = true;
-        group.loaded = true;
-        for (auto& f : settings.favorites) {
-            if (!fsx::exists(f) || !fsx::isDirectory(f)) continue;
-            TreeNode fav;
-            fav.kind = TreeNode::Favorite;
-            fav.path = f;
-            fav.title = fsx::fileName(f);
-            if (fav.title.empty()) fav.title = f;
-            fav.depth = 1;
-            fav.hasChildren = treeHasSubdir(f);
-            group.children.push_back(std::move(fav));
-        }
-        if (!group.children.empty()) {
-            group.hasChildren = true;
-            treeRoots.push_back(std::move(group));
-        }
+    // Favorites first, always: folders are dropped on the group and its rows
+    // are dragged up and down, so it has to be in reach - not below a whole
+    // expanded drive.  A favorite whose folder is gone stays too, greyed out,
+    // so that it can be removed.
+    TreeNode group;
+    group.kind = TreeNode::Favorites;
+    group.title = L"收藏夹";
+    group.path = L"";  // a header, not a folder: it takes drops and has a menu of its own, and is never opened
+    group.depth = 0;
+    group.expanded = true;
+    group.loaded = true;
+    for (auto& f : settings.favorites) {
+        TreeNode fav;
+        buildFavoriteNode(fav, f);
+        group.children.push_back(std::move(fav));
     }
+    group.hasChildren = !group.children.empty();
+    treeRoots.push_back(std::move(group));
+    treeRoots.push_back(std::move(machine));
 
     struct Special { const wchar_t* title; REFKNOWNFOLDERID id; };
     const Special specials[] = {
@@ -969,7 +1127,7 @@ void App::pruneTree() {
     std::function<void(std::vector<TreeNode>&)> walk = [&](std::vector<TreeNode>& nodes) {
         for (auto it = nodes.begin(); it != nodes.end();) {
             const bool check = it->kind != TreeNode::Machine && it->kind != TreeNode::Favorites &&
-                               !it->path.empty();
+                               it->kind != TreeNode::Favorite && !it->path.empty();
             if (check && !fsx::isDirectory(it->path)) {
                 it = nodes.erase(it);
                 continue;
@@ -1298,13 +1456,6 @@ std::wstring App::statusLeftText() const {
 
 // ---------------------------------------------------------------- menus
 
-std::vector<std::wstring> App::menuFavorites() const {
-    std::vector<std::wstring> out;
-    for (auto& f : settings.favorites)
-        if (fsx::exists(f)) out.push_back(f);
-    return out;
-}
-
 std::wstring App::menuTitle(int index) const {
     static const wchar_t* titles[6] = {L"文件", L"编辑", L"查看", L"收藏", L"工具", L"帮助"};
     if (index < 0 || index >= 6) return L"";
@@ -1342,12 +1493,16 @@ std::vector<MenuItem> App::menuFor(const std::wstring& name) const {
         items.push_back({L"列表", ID_VIEW_LIST, true, mode == ViewMode::List});
         items.push_back({L"详细信息", ID_VIEW_DETAILS, true, mode == ViewMode::Details});
     } else if (name == L"收藏") {
-        items.push_back({L"添加当前文件夹到收藏夹", ID_ADD_FAV_CURRENT, true});
-        auto favs = menuFavorites();
-        if (!favs.empty()) {
+        items.push_back({L"添加当前文件夹到收藏夹", ID_ADD_FAV_CURRENT,
+                         fsx::isDirectory(current) && favoriteIndex(current) < 0});
+        if (!settings.favorites.empty()) {
             items.push_back({L"", 0, false, false, true});
-            for (size_t i = 0; i < favs.size(); ++i)
-                items.push_back({fsx::fileName(favs[i]), (int)(ID_FAV_BASE + i), true});
+            for (size_t i = 0; i < settings.favorites.size(); ++i) {
+                const Favorite& f = settings.favorites[i];
+                const bool there = fsx::isDirectory(f.path);
+                items.push_back({favoriteTitle(f) + (there ? L"" : L"（已失效）"),
+                                 (int)(ID_FAV_BASE + i), there});
+            }
         }
     } else if (name == L"工具") {
         items.push_back({L"在命令提示符中打开", ID_OPEN_TERMINAL, true});
@@ -1481,6 +1636,7 @@ void App::performMenuAction(int id, const std::wstring& arg) {
     case ID_ADD_FAV: addFavorite(contextFolder.empty() ? current : contextFolder); break;
     case ID_ADD_FAV_CURRENT: addFavorite(current); break;
     case ID_REMOVE_FAV: removeFavorite(contextFolder.empty() ? current : contextFolder); break;
+    case ID_FAV_RENAME: promptRenameFavorite(contextFolder.empty() ? current : contextFolder); break;
     case ID_OPEN_TERMINAL: openTerminalForSelection(); break;
     case ID_SETTINGS: openMenuSettings(); break;
     case ID_TREE_TOGGLE:
@@ -1505,8 +1661,9 @@ void App::performMenuAction(int id, const std::wstring& arg) {
                 if (!p.empty()) loadDirectory(p);
                 return;
             }
-            auto favs = menuFavorites();
-            if (k >= 0 && k < (int)favs.size()) loadDirectory(favs[k]);
+            if (k >= 0 && k < (int)settings.favorites.size() &&
+                fsx::isDirectory(settings.favorites[k].path))
+                loadDirectory(settings.favorites[k].path);
         }
         break;
     }
