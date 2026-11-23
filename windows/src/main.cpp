@@ -557,7 +557,7 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
         case shellmenu::Command::Settings: a.openMenuSettings(); break;
         case shellmenu::Command::None: break;
         }
-        if (result.invokedShell) a.reload();
+        if (result.invokedShell) a.refreshAfterChange();
     }
 
     if (fromTree) a.selection.clear();
@@ -1416,6 +1416,42 @@ int runUiTest(App& app) {
         if (text.find(L"重命名") != std::wstring::npos) hasRename = true;
     }
     check(L"文件夹菜单有新窗口和重命名", hasNewWindow && hasRename);
+
+    // A deleted folder must disappear from the tree model.
+    const std::wstring live = base + L"\\tree-live";
+    CreateDirectoryW(live.c_str(), nullptr);
+    TreeNode keepNode;
+    keepNode.kind = TreeNode::Folder;
+    keepNode.path = live;
+    keepNode.title = L"tree-live";
+    TreeNode goneNode;
+    goneNode.kind = TreeNode::Folder;
+    goneNode.path = base + L"\\tree-gone";
+    goneNode.title = L"tree-gone";
+    app.treeRoots.push_back(keepNode);
+    app.treeRoots.push_back(goneNode);
+    app.flattenTree();
+    auto hasTreePath = [&app](const std::wstring& p) {
+        for (auto* node : app.treeFlat)
+            if (_wcsicmp(node->path.c_str(), p.c_str()) == 0) return true;
+        return false;
+    };
+    const bool hadGone = hasTreePath(goneNode.path);
+    app.pruneTree();
+    check(L"删除的树节点消失", hadGone && !hasTreePath(goneNode.path) && hasTreePath(live));
+
+    // The whole refresh path: delete a folder, then refresh like the menu does.
+    const std::wstring victim = base + L"\\tree-victim";
+    CreateDirectoryW(victim.c_str(), nullptr);
+    TreeNode victimNode;
+    victimNode.kind = TreeNode::Folder;
+    victimNode.path = victim;
+    victimNode.title = L"tree-victim";
+    app.treeRoots.push_back(victimNode);
+    app.flattenTree();
+    RemoveDirectoryW(victim.c_str());
+    app.refreshAfterChange();
+    check(L"刷新后删除的文件夹离开树", !hasTreePath(victim));
 
     app.contextFolder = base;
     app.newTextFile();

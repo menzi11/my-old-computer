@@ -186,6 +186,11 @@ public:
     void buildTree();
     void loadTreeChildren(TreeNode& node);
     void refreshTree();
+    // Keeps the tree in sync after a file operation: deleted folders leave the
+    // tree, renamed/new ones are re-read, and a deleted current folder is left.
+    void pruneTree();
+    void reloadTreeChildrenAt(const std::wstring& dir);
+    void refreshAfterChange();
     void toggleTreeNode(TreeNode& node);
     void revealInTree();
     void flattenTree();

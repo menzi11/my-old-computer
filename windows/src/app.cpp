@@ -328,7 +328,7 @@ void App::createShortcutForSelection() {
         showError(hwnd, L"创建快捷方式", L"无法创建快捷方式。");
         return;
     }
-    if (_wcsicmp(dir.c_str(), current.c_str()) == 0) reload();
+    if (_wcsicmp(dir.c_str(), current.c_str()) == 0) refreshAfterChange();
     else loadDirectory(dir);
     selection.clear();
     selection.insert(created);
@@ -390,7 +390,7 @@ void App::newFolder() {
         return;
     }
     if (_wcsicmp(base.c_str(), current.c_str()) != 0) loadDirectory(base);
-    else reload();
+    else refreshAfterChange();
     selection.clear();
     selection.insert(created);
 }
@@ -407,7 +407,7 @@ void App::newTextFile() {
         return;
     }
     CloseHandle(h);
-    if (_wcsicmp(base.c_str(), current.c_str()) == 0) reload();
+    if (_wcsicmp(base.c_str(), current.c_str()) == 0) refreshAfterChange();
     else loadDirectory(base);
     selection.clear();
     selection.insert(path);
@@ -426,7 +426,7 @@ void App::renameSelection() {
         return;
     }
     std::wstring renamed = fsx::joinPath(fsx::parentPath(full), name);
-    reload();
+    refreshAfterChange();
     selection.clear();
     selection.insert(renamed);
 }
@@ -436,7 +436,7 @@ void App::deleteSelection() {
     if (paths.empty()) return;
     if (!fsx::recycle(paths)) showError(hwnd, L"删除", L"无法将选定的项目移入回收站。");
     selection.clear();
-    reload();
+    refreshAfterChange();
 }
 
 void App::copySelection(bool cut) {
@@ -519,7 +519,7 @@ void App::paste() {
         clip.clear();
         clipCut = false;
     }
-    reload();
+    refreshAfterChange();
 }
 
 void App::copyPaths() {
@@ -576,7 +576,7 @@ bool App::performDrop(const std::vector<std::wstring>& paths, const std::wstring
     bool ok = fsx::sameVolume(items.front(), dest) ? fsx::moveItems(items, dest)
                                                   : fsx::copyItems(items, dest);
     if (!ok) MessageBeep(MB_ICONASTERISK);
-    reload();
+    refreshAfterChange();
     return ok;
 }
 
@@ -849,6 +849,61 @@ void App::refreshTree() {
     buildTree();
     revealInTree();
     flattenTree();
+}
+
+// Drops tree nodes whose folder no longer exists; keeps the expansion state.
+void App::pruneTree() {
+    std::function<void(std::vector<TreeNode>&)> walk = [&](std::vector<TreeNode>& nodes) {
+        for (auto it = nodes.begin(); it != nodes.end();) {
+            const bool check = it->kind != TreeNode::Machine && it->kind != TreeNode::Favorites &&
+                               !it->path.empty();
+            if (check && !fsx::isDirectory(it->path)) {
+                it = nodes.erase(it);
+                continue;
+            }
+            walk(it->children);
+            ++it;
+        }
+    };
+    walk(treeRoots);
+    flattenTree();
+}
+
+void App::reloadTreeChildrenAt(const std::wstring& dir) {
+    std::function<bool(TreeNode&)> visit = [&](TreeNode& node) -> bool {
+        if (node.kind != TreeNode::Favorites && !node.path.empty() &&
+            _wcsicmp(node.path.c_str(), dir.c_str()) == 0) {
+            node.loaded = false;
+            node.children.clear();
+            loadTreeChildren(node);
+            return true;
+        }
+        for (auto& child : node.children)
+            if (visit(child)) return true;
+        return false;
+    };
+    for (auto& root : treeRoots)
+        if (visit(root)) break;
+    flattenTree();
+}
+
+void App::refreshAfterChange() {
+    // A deleted folder must leave the tree, and if it was the current folder
+    // (or an ancestor of it) move up to whatever still exists.
+    std::wstring dir = current;
+    while (!dir.empty() && !fsx::isDirectory(dir)) {
+        const std::wstring parent = fsx::parentPath(dir);
+        if (_wcsicmp(parent.c_str(), dir.c_str()) == 0) break;
+        dir = parent;
+    }
+    if (_wcsicmp(dir.c_str(), current.c_str()) != 0) {
+        loadDirectory(dir, false);
+        pruneTree();
+        return;
+    }
+    pruneTree();
+    reloadTreeChildrenAt(current);
+    reload();
 }
 
 // ---------------------------------------------------------------- geometry
