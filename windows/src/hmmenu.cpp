@@ -285,9 +285,41 @@ void closeChild(Node* n) {
     g_active = parent;
 }
 
+constexpr UINT_PTR kSubmenuGrace = 2;
+
 LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     Node* n = (Node*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     switch (msg) {
+    case WM_TIMER: {
+        if (wp != kSubmenuGrace || !n || n->children.empty()) break;
+        KillTimer(hwnd, kSubmenuGrace);
+        // Where is the pointer really?  Still inside the submenu, back on
+        // the opening row, or travelling the wedge: keep the submenu.
+        POINT sp{};
+        if (!GetCursorPos(&sp)) break;
+        HWND under = WindowFromPoint(sp);
+        if (under == hwnd) {
+            POINT cp = sp;
+            ScreenToClient(hwnd, &cp);
+            const int index = hitItem(n, cp);
+            if (index == n->hover) break;
+            if (inCorridor(n, cp)) break;
+            n->hover = index;
+            InvalidateRect(hwnd, nullptr, FALSE);
+            if (index >= 0 && n->subs[index]) openChild(n, index);
+            else destroyChildren(n);
+        } else {
+            bool inChild = false;
+            for (auto* c : n->children)
+                if (c->hwnd == under) inChild = true;
+            if (!inChild) {
+                destroyChildren(n);
+                n->hover = -1;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+        }
+        return 0;
+    }
     case WM_ERASEBKGND:
         return 1;
     case WM_PAINT:
@@ -301,7 +333,16 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             diagLog(L"hmmenu move %d,%d idx=%d hover=%d sub=%d", p.x, p.y, index, n->hover,
                     (index >= 0 && index < (int)n->subs.size()) ? (int)n->subs[index] : -1);
             if (index != n->hover) {
-                if (!n->children.empty() && inCorridor(n, p)) return 0;  // keep the submenu
+                if (!n->children.empty()) {
+                    // A submenu is up.  While the pointer travels the wedge,
+                    // keep everything; once it leaves the wedge, give it a
+                    // short grace period before closing - L-shaped moves
+                    // (down first, then right) pass outside the wedge and
+                    // must not lose the submenu on the way.
+                    if (inCorridor(n, p)) return 0;
+                    SetTimer(hwnd, kSubmenuGrace, 250, nullptr);
+                    return 0;
+                }
                 n->hover = index;
                 InvalidateRect(hwnd, nullptr, FALSE);
                 if (index >= 0 && n->subs[index]) openChild(n, index);
