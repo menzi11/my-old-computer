@@ -987,34 +987,6 @@ void App::refreshAfterChange() {
 
 // ---------------------------------------------------------------- geometry
 
-// Text line height on the cached measurement font, so hit tests can match
-// the label band the painter draws (it uses Canvas::lineHeight).
-int measureLineHeight(int fontPx) {
-    static HDC dc = nullptr;
-    static HFONT font = nullptr;
-    static int px = -1;
-    static int height = 0;
-    static bool selected = false;
-    if (px != fontPx) {
-        if (!dc) dc = CreateCompatibleDC(nullptr);
-        HFONT nf = dc ? CreateFontW(-fontPx, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                    CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Tahoma")
-                      : nullptr;
-        if (nf) {
-            HGDIOBJ prev = SelectObject(dc, nf);
-            if (selected && prev) DeleteObject(prev);
-            font = nf;
-            selected = true;
-            px = fontPx;
-            TEXTMETRICW tm{};
-            GetTextMetricsW(dc, &tm);
-            height = tm.tmHeight;
-        }
-    }
-    return height;
-}
-
 // Text measurement for the custom chrome.  Geometry and hit testing stay
 // identical to what the renderer draws; the measurement DC and font are kept
 // for the process lifetime so hit tests cost one GetTextExtentPoint32 call.
@@ -1147,47 +1119,37 @@ void App::rebuildNameWidths() {
     }
 }
 
-// Only the icon and the name text belong to an item.  Everything else inside
-// the view - the rest of a row horizontally, the padding above and below the
-// icon band vertically, the gap around a grid cell - is blank canvas: a press
-// there starts a rubber-band selection instead of picking or dragging
-// whatever row happens to be under the pointer.
+// An item owns its full row height - the visual gap between two names is
+// still one of those rows, clicking it picks that row, never blank canvas
+// (there is no seam to click *between* two items).  Horizontally only the
+// icon and the name text count: the rest of a row stays blank so the
+// rubber band can start there.
 bool App::hitTestItem(POINT p, int* index) const {
-    const int s16 = (int)(16 * scale + 0.5);
     if (mode == ViewMode::Details) {
         int row = listRowAt(p);
         if (row < 0) return false;
         const int limit = std::min(lay.nameW, nameExtent(row));
         if (p.x - lay.listViewport.left >= limit) return false;
-        RECT r = listRowRect(row);
-        const int top = r.top + (int)(2 * scale + 0.5);
-        if (p.y < top || p.y >= top + s16) return false;
         if (index) *index = row;
         return true;
     }
     int idx = gridIndexAt(p);
     if (idx < 0) return false;
     RECT r = gridCellRect(idx);
-    const int bandTop = r.top + (int)(2 * scale + 0.5);
+    const int s16 = (int)(16 * scale + 0.5);
     if (mode == ViewMode::List) {
         const int tw = idx < (int)textWidths.size() ? textWidths[idx] : 0;
         const int right = r.left + (int)(2 * scale + 0.5) + s16 + (int)(4 * scale + 0.5) + tw +
                           (int)(2 * scale + 0.5);
         if (p.x > right) return false;
-        if (p.y < bandTop || p.y >= bandTop + s16) return false;
         if (index) *index = idx;
         return true;
     }
     const int iconSize = (int)(48 * scale + 0.5);
     RECT icon{(r.left + r.right) / 2 - iconSize / 2, r.top + (int)(4 * scale + 0.5),
               (r.left + r.right) / 2 + iconSize / 2, r.top + (int)(4 * scale + 0.5) + iconSize};
-    // The label only counts where its text line actually sits - the same band
-    // the selection highlight paints - not the full padding under the icon.
-    const int labelTop = r.top + (int)(54 * scale + 0.5);
-    const int labelH = std::max(0, (int)(r.bottom - (int)(2 * scale + 0.5)) - labelTop);
-    const int lh = measureLineHeight((int)(14.6667 * scale + 0.5));
-    const int ly = labelTop + std::max(0, (labelH - lh) / 2);
-    RECT label{r.left + (int)(2 * scale + 0.5), ly, r.right - (int)(2 * scale + 0.5), ly + lh};
+    RECT label{r.left + (int)(2 * scale + 0.5), r.top + (int)(54 * scale + 0.5),
+               r.right - (int)(2 * scale + 0.5), r.bottom};
     if (!PtInRect(&icon, p) && !PtInRect(&label, p)) return false;
     if (index) *index = idx;
     return true;
