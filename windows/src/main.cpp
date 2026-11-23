@@ -551,13 +551,18 @@ bool g_menuPending = false;
 POINT g_menuPendingPoint{};
 
 void showContextMenu(HWND hwnd, App& a, POINT p) {
+    diagLog(L"rclick %d,%d menuOpen=%d", p.x, p.y, (int)menuIsOpen());
     if (menuIsOpen()) {
         // A menu is already up (its message loop is running further down the
         // stack).  Remember where the user clicked, close it, and reopen there
         // once this call returns.
         g_menuPending = true;
         g_menuPendingPoint = p;
+        // Take the foreground back first: the click that got here must not be
+        // the one Windows uses for activation (see WM_MOUSEACTIVATE).
+        SetForegroundWindow(hwnd);
         menuClose();
+        diagLog(L"rclick pending close+reopen at %d,%d", p.x, p.y);
         return;
     }
     std::vector<std::wstring> paths;
@@ -614,6 +619,9 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
 
     POINT screen = p;
     ClientToScreen(hwnd, &screen);
+
+    diagLog(L"rclick build folder=%ls paths=%d sel=%d", folder.c_str(),
+            (int)paths.size(), (int)a.selection.size());
 
     shellmenu::ViewState state;
     state.mode = (int)a.mode;
@@ -1049,20 +1057,14 @@ void onDoubleClick(HWND hwnd, App& a, POINT p) {
         }
         return;
     }
-    if (a.mode == ViewMode::Details) {
-        int row = a.listRowAt(p);
-        diagLog(L"DBLCLK %d,%d row=%d", p.x, p.y, row);
-        if (row >= 0) {
-            a.openEntry(a.entries[row]);
-            repaint(hwnd);
-        }
-    } else {
-        int idx = a.gridIndexAt(p);
+    // Only the icon and the name open an item - the same hit rule as a
+    // single click.  Double-clicking a row's blank part (size/type/date)
+    // must not open anything, exactly like Explorer.
+    int idx = -1;
+    if (a.hitTestItem(p, &idx)) {
         diagLog(L"DBLCLK %d,%d idx=%d", p.x, p.y, idx);
-        if (idx >= 0) {
-            a.openEntry(a.entries[idx]);
-            repaint(hwnd);
-        }
+        a.openEntry(a.entries[idx]);
+        repaint(hwnd);
     }
 }
 
@@ -1323,6 +1325,14 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         showContextMenu(hwnd, a, p);
         return 0;
     }
+    case WM_MOUSEACTIVATE:
+        // A click while one of our shell menus is up must not run the normal
+        // activation dance: activating the main window makes Windows destroy
+        // the foreground menu window mid-activation, and the click that
+        // started it is lost entirely.  Take the click without activating;
+        // the context-menu path closes and reopens the menu itself.
+        if (menuIsOpen()) return MA_NOACTIVATE;
+        break;
     case WM_MOUSEWHEEL: {
         POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         onMouseWheel(hwnd, a, p, GET_WHEEL_DELTA_WPARAM(wp));
@@ -1547,6 +1557,31 @@ int runUiTest(App& app) {
         if (text.find(L"重命名") != std::wstring::npos) hasRename = true;
     }
     check(L"文件夹菜单有新窗口和重命名", hasNewWindow && hasRename);
+
+    // Double-click opens only through the icon or the name; the blank rest of
+    // a row must stay inert, like Explorer.
+    {
+        app.loadDirectory(base, false);
+        app.setViewMode(ViewMode::Details);
+        app.relayout(1100, 760);
+        int subRow = -1;
+        for (int i = 0; i < (int)app.entries.size(); ++i)
+            if (app.entries[i].isDir) { subRow = i; break; }
+        RECT r = app.listRowRect(subRow);
+        const int midY = (r.top + r.bottom) / 2;
+        onDoubleClick(nullptr, app, POINT{r.left + 10, midY});
+        check(L"双击名称进入文件夹", app.current == sub);
+        app.loadDirectory(base, false);
+        onDoubleClick(nullptr, app, POINT{r.left + app.lay.nameW + 60, midY});
+        check(L"双击行空白不打开", app.current == base);
+        // Explorer-style rename starts in place and cancels cleanly.
+        app.selection.clear();
+        app.selection.insert(app.entries[subRow].path);
+        app.renameSelection();
+        check(L"就地重命名启动", app.renaming && app.renameRow == subRow);
+        app.endRename(false);
+        check(L"就地重命名取消", !app.renaming && fsx::exists(sub));
+    }
 
     // Per-context hiding: background, folder and per-extension lists are
     // independent, and a file gets its generic list plus its extension's.

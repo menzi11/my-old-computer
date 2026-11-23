@@ -148,6 +148,13 @@ public:
     bool addrEditing = false;
     HFONT addrFont = nullptr;  // rebuilt on DPI change, deleted then
 
+    // In-place rename, Explorer style: an edit control laid over the row's
+    // name.  Enter commits, Escape cancels, losing focus commits.
+    bool renaming = false;
+    int renameRow = -1;
+    HWND renameEdit = nullptr;
+    HFONT renameFont = nullptr;
+
     void init(HWND h);
     void setScale(double s);
 
@@ -192,6 +199,12 @@ public:
     void sortBy(int column);
     void openMenuSettings();
     bool performDrop(const std::vector<std::wstring>& paths, const std::wstring& folder);
+
+    // Explorer-style rename: an edit control over the row's name, the base
+    // name pre-selected.  commit=false restores the old name.
+    void beginRename(int row);
+    void endRename(bool commit);
+    RECT renameRect(int row) const;  // where the edit sits, per view mode
 
     // Favorites
     void addFavorite(const std::wstring& path);

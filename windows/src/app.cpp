@@ -66,6 +66,7 @@ void App::init(HWND h) {
 }
 
 void App::setScale(double s) {
+    if (renaming) endRename(false);  // the edit is laid out for the old DPI
     scale = s;
     m = metricsFor(s);
     rebuildNameWidths();
@@ -176,6 +177,7 @@ void App::relayout(int w, int h) {
 // ---------------------------------------------------------------- navigation
 
 void App::loadDirectory(const std::wstring& path, bool recordHistory, bool fromTreeClick) {
+    if (renaming) endRename(false);
     std::wstring target = path;
     while (target.size() > 3 && (target.back() == L'\\' || target.back() == L'/')) target.pop_back();
     if (target.empty()) target = fsx::rootOf(current);
@@ -267,6 +269,7 @@ bool App::goToTypedPath(const std::wstring& text) {
 
 void App::setViewMode(ViewMode v) {
     if (mode == v) return;
+    if (renaming) endRename(false);  // the edit belongs to the old view's geometry
     mode = v;
     clampScroll();
     settings.viewMode = (int)v;
@@ -502,6 +505,13 @@ void App::newTextFile() {
 void App::renameSelection() {
     auto paths = selectedPaths();
     if (paths.size() != 1) return;
+    // In the current listing: rename in place, over the row's name.
+    for (int i = 0; i < (int)entries.size(); ++i)
+        if (_wcsicmp(entries[i].path.c_str(), paths.front().c_str()) == 0) {
+            beginRename(i);
+            return;
+        }
+    // Not visible here (e.g. a tree-only folder): fall back to a prompt.
     std::wstring full = paths.front();
     std::wstring name = fsx::fileName(full);
     if (!promptText(hwnd, L"重命名", L"输入新名称：", name, &name)) return;
@@ -1204,6 +1214,12 @@ void App::clampScroll() {
     clamp(listScroll, listContentHeight(), listView);
     clamp(gridScroll, gridContentHeight(), gridView);
     clamp(treeScroll, treeContentHeight(), treeView);
+    // Scrolling moves the row; keep the in-place editor on top of its name.
+    if (renaming && renameEdit) {
+        RECT r = renameRect(renameRow);
+        SetWindowPos(renameEdit, HWND_TOP, r.left, r.top, std::max(60L, r.right - r.left),
+                     r.bottom - r.top, SWP_NOACTIVATE);
+    }
 }
 
 void App::scrollListBy(int delta) {
@@ -1507,6 +1523,121 @@ void App::endAddressEdit(bool commit) {
     ShowWindow(addrEdit, SW_HIDE);
     SetFocus(hwnd);
     if (commit) goToTypedPath(text);
+}
+
+// ------------------------------------------------------------- in-place rename
+
+namespace {
+App* g_renameOwner = nullptr;
+WNDPROC g_renameOldProc = nullptr;
+
+LRESULT CALLBACK renameEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_KEYDOWN && g_renameOwner) {
+        if (wp == VK_RETURN) {
+            g_renameOwner->endRename(true);
+            return 0;
+        }
+        if (wp == VK_ESCAPE) {
+            g_renameOwner->endRename(false);
+            return 0;
+        }
+        if (wp == VK_F2) {  // pressing F2 again selects the whole name
+            SendMessageW(hwnd, EM_SETSEL, 0, -1);
+            return 0;
+        }
+    }
+    if (msg == WM_KILLFOCUS && g_renameOwner && g_renameOwner->renaming)
+        g_renameOwner->endRename(true);
+    return CallWindowProcW(g_renameOldProc, hwnd, msg, wp, lp);
+}
+}  // namespace
+
+// Where the edit control sits: exactly over the row's name, in every view.
+RECT App::renameRect(int row) const {
+    if (mode == ViewMode::Details) {
+        RECT r = listRowRect(row);
+        return RECT{r.left + (int)(22 * scale + 0.5), r.top + 1,
+                    std::min(r.left + lay.nameW - 4, r.right - 2), r.bottom - 1};
+    }
+    RECT r = gridCellRect(row);
+    if (mode == ViewMode::List) {
+        const int s16 = (int)(16 * scale + 0.5);
+        const int left = r.left + (int)(2 * scale + 0.5) + s16 + (int)(4 * scale + 0.5);
+        const int tw = row < (int)textWidths.size() ? textWidths[row] : 0;
+        return RECT{left, r.top + 1, left + tw + (int)(40 * scale + 0.5), r.bottom - 1};
+    }
+    // Icons: the label band under the icon.
+    return RECT{r.left + (int)(2 * scale + 0.5), r.top + (int)(54 * scale + 0.5),
+                r.right - (int)(2 * scale + 0.5), r.bottom - 1};
+}
+
+void App::beginRename(int row) {
+    if (renaming) endRename(false);
+    if (row < 0 || row >= (int)entries.size()) return;
+    renaming = true;
+    renameRow = row;
+    // Keep the row highlighted while its name is edited.
+    selection.clear();
+    selection.insert(entries[row].path);
+    selAnchor = row;
+    RECT r = renameRect(row);
+    renameEdit = CreateWindowExW(
+        0, L"EDIT", entries[row].name.c_str(),
+        WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, r.left, r.top,
+        std::max(60L, r.right - r.left), r.bottom - r.top, hwnd, nullptr,
+        GetModuleHandleW(nullptr), nullptr);
+    if (!renameFont)
+        renameFont = CreateFontW(-(int)(14.6667 * scale + 0.5), 0, 0, 0, FW_NORMAL, 0, 0, 0,
+                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Tahoma");
+    if (renameEdit) {
+        if (renameFont) SendMessageW(renameEdit, WM_SETFONT, (WPARAM)renameFont, TRUE);
+        SendMessageW(renameEdit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(1, 1));
+        g_renameOwner = this;
+        g_renameOldProc =
+            (WNDPROC)SetWindowLongPtrW(renameEdit, GWLP_WNDPROC, (LONG_PTR)renameEditProc);
+        SetFocus(renameEdit);
+        // Explorer selects the base name; folders are selected in full.
+        const std::wstring& name = entries[row].name;
+        int selEnd = (int)name.size();
+        if (!entries[row].isDir) {
+            size_t dot = name.find_last_of(L'.');
+            if (dot != std::wstring::npos && dot > 0) selEnd = (int)dot;
+        }
+        SendMessageW(renameEdit, EM_SETSEL, 0, selEnd);
+    }
+    if (hwnd) InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+void App::endRename(bool commit) {
+    if (!renaming) return;
+    renaming = false;
+    std::wstring text;
+    wchar_t buf[1024]{};
+    if (renameEdit) GetWindowTextW(renameEdit, buf, 1024);
+    text = buf;
+    if (renameEdit) {
+        SetWindowLongPtrW(renameEdit, GWLP_WNDPROC, (LONG_PTR)g_renameOldProc);
+        DestroyWindow(renameEdit);
+        renameEdit = nullptr;
+        g_renameOwner = nullptr;
+    }
+    const int row = renameRow;
+    renameRow = -1;
+    if (hwnd) SetFocus(hwnd);
+    if (commit && row >= 0 && row < (int)entries.size() && !text.empty() &&
+        text != entries[row].name) {
+        std::wstring error;
+        if (fsx::renameItem(entries[row].path, text, &error)) {
+            std::wstring renamed = fsx::joinPath(fsx::parentPath(entries[row].path), text);
+            refreshAfterChange();
+            selection.clear();
+            selection.insert(renamed);
+            return;
+        }
+        showError(hwnd, L"重命名", error);
+    }
+    if (hwnd) InvalidateRect(hwnd, nullptr, FALSE);
 }
 
 void App::saveSettings() {
