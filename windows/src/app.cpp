@@ -377,6 +377,12 @@ void App::openInNewWindow() {
     openPathInNewWindow(paths.front());
 }
 
+std::wstring commandArgument(const std::wstring& s) {
+    size_t backs = 0;
+    while (backs < s.size() && s[s.size() - 1 - backs] == L'\\') ++backs;
+    return L"\"" + s + std::wstring(backs, L'\\') + L"\"";
+}
+
 DWORD App::openPathInNewWindow(const std::wstring& path) {
     if (path.empty() || !fsx::isDirectory(path)) return 0;
     wchar_t exe[MAX_PATH * 2]{};
@@ -385,7 +391,7 @@ DWORD App::openPathInNewWindow(const std::wstring& path) {
     // starts from the settings as they are now, not as they were when they
     // were last written.
     saveSettings();
-    std::wstring args = L"--path \"" + path + L"\"";
+    std::wstring args = L"--path " + commandArgument(path);
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi{};
@@ -396,6 +402,16 @@ DWORD App::openPathInNewWindow(const std::wstring& path) {
         return 0;
     }
     diagLog(L"new window: %ls started in %ls", exe, path.c_str());
+    // Its window is to be in front.  This process - the one the user just
+    // clicked in - may let it take the foreground itself, and brings it there
+    // itself as soon as it is up (raiseNewWindows, main.cpp).  An instance
+    // that stays in the background, a test's, does neither.
+    AllowSetForegroundWindow(pi.dwProcessId);
+    if (hwnd && !staysInBackground()) {
+        newWindowPids.push_back(pi.dwProcessId);
+        newWindowTicks = 0;
+        SetTimer(hwnd, kNewWindowTimer, 15, nullptr);
+    }
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     return pi.dwProcessId;

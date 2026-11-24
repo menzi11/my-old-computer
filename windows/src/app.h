@@ -12,6 +12,15 @@
 #include "settings.h"
 #include "theme.h"
 
+// The timer that waits for the window of a new instance to come up, so that
+// it can be brought to the front (App::openPathInNewWindow, raiseNewWindows).
+constexpr UINT_PTR kNewWindowTimer = 0x4D4E;
+
+// `s` as one argument of a command line, in quotes.  A backslash before the
+// closing quote would escape it - and the root of a drive, C:\, ends in one -
+// so the backslashes at the end are doubled.
+std::wstring commandArgument(const std::wstring& s);
+
 enum class ViewMode { Details = 0, Icons = 1, List = 2 };
 
 struct TreeNode {
@@ -279,7 +288,11 @@ public:
     // A folder in a new window: another instance of this program, started in
     // it and placed like this window (see cascadePosition).  Returns that
     // instance's id, 0 when there is nothing to open or it could not start.
+    // The window of that instance is to be in front: its id is kept until the
+    // window is there and has been brought to the front (raiseNewWindows).
     DWORD openPathInNewWindow(const std::wstring& path);
+    std::vector<DWORD> newWindowPids;  // the instances whose window is not up yet
+    int newWindowTicks = 0;            // how long the last of them has been waited for
     void createShortcutForSelection();
     void showSelectionProperties();
     void sortBy(int column);

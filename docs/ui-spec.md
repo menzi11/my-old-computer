@@ -93,15 +93,20 @@ the hand-drawn set.  macOS draws the icons in `Icons.swift` per extension.
   tree or on another application moves (or, across volumes, copies) the items.
 - Double-click opens; Enter opens; Backspace goes up; F2 renames; F5 refreshes;
   Delete moves to the Trash / Recycle Bin.
-- Ctrl and a double click on a folder, or Ctrl and Enter on the one folder
-  selected, opens it in a new window, as in Explorer: another instance of this
-  program, started in that folder and like this one - the settings as they are
-  now, so the same view and the same size, placed a title bar down and to the
-  right of this window. No instance opens exactly over the window of another:
-  the step repeats for every one already there, and the title bar stays on the
-  monitor. Ctrl and a click still adds an item to the selection or takes it
-  off; for a file, Ctrl changes nothing. The context menu's `在新窗口中打开`
-  is the same thing.
+- Ctrl and a click on a folder - in the list, or on its row in the tree -
+  opens it in a new window; so does Ctrl and Enter on the one folder
+  selected. (Ctrl and a double click is one click more than that: one
+  window.) The new window is another instance of this program, started in that
+  folder and like this one: the settings as they are now, so the same view and
+  the same size, placed a title bar down and to the right of this window. No
+  instance opens exactly over the window of another: the step repeats for
+  every one already there, and the title bar stays on the monitor. The new
+  window comes to the front: the window it was opened from hands it the
+  foreground as soon as it is up. A press with Ctrl on a folder still drags
+  it, and let go off the folder it opens nothing. A folder joins a selection
+  with Shift and a click or with the rubber band, not with Ctrl and a click;
+  for a file, Ctrl changes nothing. The context menu's `在新窗口中打开` is
+  the same thing.
 - Sizes use the same units on both platforms (`字节`/KB/MB/GB); dates are
   `yyyy/M/d HH:mm`.
 - The address bar (Windows build; the macOS build still shows the path as
