@@ -130,8 +130,9 @@ public:
     // kept while the button is down (a drag may still start) and collapsed to
     // this row on release if it never did.
     int pressSelectedRow = -1;
-    // Set whenever anything but the rubber band changes; lets the window reuse
-    // its cached frame while a selection drag is in progress.
+    // The frame on screen is out of date and has to be rendered again (see
+    // invalidate()).  Set whenever anything but the rubber band changes, so
+    // the window can reuse its cached frame while a selection drag goes on.
     bool paintDirty = true;
     bool dragArmed = false;
     bool dragging = false;
@@ -187,6 +188,12 @@ public:
 
     // Layout must be recomputed before painting or hit testing.
     void relayout(int w, int h);
+
+    // Says that the frame on screen no longer shows this state.  The window
+    // keeps its last frame and draws into it for hovering and scrolling, so
+    // it only renders again when told - and a change nobody announced stayed
+    // on screen as it was, old folder and all, until the next click.
+    void invalidate();
 
     // Navigation
     void loadDirectory(const std::wstring& path, bool recordHistory = true,
@@ -323,9 +330,10 @@ public:
     // Persistence
     void saveSettings();
 
-    // Address bar
+    // Address bar.  onlyIfChanged: the box lost its focus with the path as it
+    // was - nothing is gone to again then.
     void beginAddressEdit();
-    void endAddressEdit(bool commit);
+    void endAddressEdit(bool commit, bool onlyIfChanged = false);
 
 private:
     bool isEditingText() const;

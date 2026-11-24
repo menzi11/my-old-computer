@@ -218,10 +218,7 @@ public:
         // pointer: show the "no drop" cursor instead of a move cursor.
         if (w.folder.empty() && !w.favorites && allFromCurrent()) want = DROPEFFECT_NONE;
         if (effect) *effect = want;
-        if (changed) {
-            app_->paintDirty = true;
-            InvalidateRect(hwnd_, nullptr, FALSE);
-        }
+        if (changed) app_->invalidate();
         return S_OK;
     }
 
@@ -279,8 +276,7 @@ private:
         app_->dragTargetRow = -1;
         app_->dragTargetFavorites = false;
         paths_.clear();
-        app_->paintDirty = true;
-        InvalidateRect(hwnd_, nullptr, FALSE);
+        app_->invalidate();
     }
 
     // What is under the pointer while something is dragged.

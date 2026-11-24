@@ -24,3 +24,14 @@ void diagLog(const wchar_t* fmt, ...) {
         fclose(f);
     }
 }
+
+double diagMillis() {
+    static const LONGLONG freq = [] {
+        LARGE_INTEGER f{};
+        QueryPerformanceFrequency(&f);
+        return f.QuadPart;
+    }();
+    LARGE_INTEGER c{};
+    QueryPerformanceCounter(&c);
+    return (double)c.QuadPart * 1000.0 / (double)freq;
+}

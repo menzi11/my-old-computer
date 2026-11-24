@@ -3,6 +3,7 @@
 #include <wincodec.h>
 
 #include <string>
+#include <cstring>
 #include <vector>
 
 #include "app.h"
@@ -44,6 +45,15 @@ bool savePng(const std::wstring& path, const BYTE* bits, int w, int h, int strid
 
 }  // namespace
 
+bool writePng(const std::wstring& path, const void* bgrx, int w, int h) {
+    // GDI leaves the unused byte at zero; PNG consumers take it for alpha.
+    const size_t stride = (size_t)w * 4;
+    std::vector<BYTE> pixels(stride * h);
+    memcpy(pixels.data(), bgrx, pixels.size());
+    for (size_t i = 3; i < pixels.size(); i += 4) pixels[i] = 255;
+    return savePng(path, pixels.data(), w, h, (int)stride);
+}
+
 bool renderSnapshot(App& app, const std::wstring& path, int width, int height) {
     BITMAPINFO bmi{};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -71,18 +81,10 @@ bool renderSnapshot(App& app, const std::wstring& path, int width, int height) {
         renderApp(canvas, app);
     }
 
-    // GDI leaves the alpha channel at zero; PNG consumers expect opaque pixels.
-    BYTE* p = (BYTE*)bits;
-    const int stride = width * 4;
-    for (int y = 0; y < height; ++y) {
-        BYTE* row = p + (size_t)y * stride;
-        for (int x = 0; x < width; ++x) row[x * 4 + 3] = 255;
-    }
-
     SelectObject(mem, old);
 
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    bool ok = savePng(path, (const BYTE*)bits, width, height, stride);
+    bool ok = writePng(path, bits, width, height);
     // The DIB section must stay alive until the pixels have been read out.
     DeleteObject(bmp);
     DeleteDC(mem);

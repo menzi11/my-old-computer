@@ -206,9 +206,12 @@ void paintWindow(HWND hwnd) {
     }
     if (g_paint.mem) {
         if (g_app.paintDirty) {
+            const double t0 = diagMillis();
             Canvas canvas(g_paint.mem, g_app.scale);
             renderApp(canvas, g_app);
             g_app.paintDirty = false;
+            diagLog(L"frame rendered in %.1f ms (%d rows)", diagMillis() - t0,
+                    (int)g_app.entries.size());
         }
         BitBlt(dc, 0, 0, rc.right, rc.bottom, g_paint.mem, 0, 0, SRCCOPY);
     }
@@ -2145,6 +2148,276 @@ PixelBox find(const RowBitmap& bmp, const RECT& area, bool (*take)(COLORREF)) {
     return box;
 }
 
+// -------------------------------------------------------------- frame test
+// The window keeps its last frame: hovering and scrolling draw into it, and
+// it is rendered again only when the state says it changed.  So a change that
+// nobody announced stayed on screen as it was - after Enter in the address bar
+// the listing had changed and every check of the state passed, while the old
+// folder was still showing.  This drives the real window (its class, its
+// procedure, posted input) through the things that end inside App itself, and
+// holds what the desktop shows against a frame rendered fresh from the state.
+
+constexpr UINT_PTR kFrameTestTimer = 0x4D46;
+constexpr wchar_t kFrameTestClass[] = L"MyOldComputerFrameTest";
+
+// The main window's class, once per process.
+void registerMainClass(HINSTANCE instance) {
+    WNDCLASSEXW wc{sizeof(WNDCLASSEXW)};
+    wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
+    wc.lpfnWndProc = wndProc;
+    wc.hInstance = instance;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hIcon =
+        (HICON)LoadImageW(instance, MAKEINTRESOURCEW(1), IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR);
+    wc.hIconSm =
+        (HICON)LoadImageW(instance, MAKEINTRESOURCEW(1), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
+    wc.hbrBackground = nullptr;
+    wc.lpszClassName = L"MyOldComputerWindow";
+    RegisterClassExW(&wc);
+}
+
+// One frame of pixels, top-down.
+struct Frame {
+    int w = 0, h = 0;
+    std::vector<COLORREF> px;
+};
+
+// Reads a compatible bitmap back into pixels.
+void readFrame(HDC dc, HBITMAP bmp, Frame& f) {
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = f.w;
+    bi.bmiHeader.biHeight = -f.h;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    f.px.assign((size_t)f.w * f.h, 0);
+    GetDIBits(dc, bmp, 0, f.h, f.px.data(), &bi, DIB_RGB_COLORS);
+}
+
+// A fresh full frame, rendered into the kind of surface the window renders
+// its own into.
+Frame renderedFrame(App& a) {
+    Frame f;
+    f.w = a.width;
+    f.h = a.height;
+    HDC screen = GetDC(nullptr);
+    HDC dc = CreateCompatibleDC(screen);
+    HBITMAP bmp = CreateCompatibleBitmap(screen, f.w, f.h);
+    HGDIOBJ old = SelectObject(dc, bmp);
+    {
+        Canvas canvas(dc, a.scale);
+        renderApp(canvas, a);
+    }
+    GdiFlush();
+    SelectObject(dc, old);
+    if (bmp) readFrame(dc, bmp, f);
+    if (bmp) DeleteObject(bmp);
+    DeleteDC(dc);
+    ReleaseDC(nullptr, screen);
+    return f;
+}
+
+// What the desktop shows of the window, read back from the compositor: the
+// pixels the user sees, whatever lies on top of the window.  (Asked through
+// WM_PRINTCLIENT instead, the window would render a fresh frame, and so could
+// never show a stale one.)
+Frame shownFrame(HWND hwnd) {
+    Frame f;
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    f.w = rc.right;
+    f.h = rc.bottom;
+    HDC screen = GetDC(nullptr);
+    HDC dc = CreateCompatibleDC(screen);
+    HBITMAP bmp = CreateCompatibleBitmap(screen, f.w, f.h);
+    HGDIOBJ old = SelectObject(dc, bmp);
+    PrintWindow(hwnd, dc, PW_RENDERFULLCONTENT);
+    GdiFlush();
+    SelectObject(dc, old);
+    if (bmp) readFrame(dc, bmp, f);
+    if (bmp) DeleteObject(bmp);
+    DeleteDC(dc);
+    ReleaseDC(nullptr, screen);
+    return f;
+}
+
+// How many pixels the two frames disagree on, and the box those lie in.
+int frameMismatch(const Frame& a, const Frame& b, RECT* box) {
+    *box = RECT{0, 0, 0, 0};
+    if (a.w != b.w || a.h != b.h || a.px.size() != b.px.size() || a.px.empty()) return 1;
+    int n = 0;
+    for (int y = 0; y < a.h; ++y) {
+        for (int x = 0; x < a.w; ++x) {
+            const size_t i = (size_t)y * a.w + x;
+            if ((a.px[i] & 0xFFFFFF) == (b.px[i] & 0xFFFFFF)) continue;
+            if (!n) {
+                *box = RECT{x, y, x + 1, y + 1};
+            } else {
+                if (x < box->left) box->left = x;
+                if (x + 1 > box->right) box->right = x + 1;
+                if (y + 1 > box->bottom) box->bottom = y + 1;
+            }
+            ++n;
+        }
+    }
+    return n;
+}
+
+// Under MOC_DEBUG both frames of a comparison go to %TEMP%\moc-shots, to be
+// looked at.
+void keepFrames(const wchar_t* name, const Frame& shown, const Frame& fresh) {
+    wchar_t debug[8]{};
+    if (!GetEnvironmentVariableW(L"MOC_DEBUG", debug, 8)) return;
+    wchar_t temp[MAX_PATH]{};
+    GetTempPathW(MAX_PATH, temp);
+    const std::wstring dir = std::wstring(temp) + L"moc-shots";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    const std::wstring stem = dir + L"\\frame-";
+    writePng(stem + name + L"-shown.png", shown.px.data(), shown.w, shown.h);
+    writePng(stem + name + L"-fresh.png", fresh.px.data(), fresh.w, fresh.h);
+}
+
+constexpr int kFrameTestEnd = 10;  // the step past the last one
+
+struct FrameDrive {
+    HWND main = nullptr;
+    int step = 0;   // what happens next; kFrameTestEnd is past the last
+    int wait = 0;   // ticks to let what was posted get through first
+    int ticks = 0;  // the watchdog's count
+    std::wstring to;  // the folder typed into the address bar
+    bool baseline = false;  // a clean window: what is shown is what the state renders
+    bool editCame = false, editCameAgain = false;
+    bool fieldCame = false, fieldCameAgain = false;
+    bool navigated = false, leftOk = false, kept = false, renamed = false;  // the state after each key
+    int stale[4] = {0, 0, 0, 0};  // pixels on screen that the state does not have
+    RECT where[4] = {};
+};
+FrameDrive g_frame;
+
+// One timer tick = one action; timers fire only when nothing else is queued,
+// so what the step before posted has been dealt with (and painted).
+void frameTestStep(HWND driver) {
+    FrameDrive& d = g_frame;
+    KillTimer(driver, kFrameTestTimer);
+    if (d.step >= kFrameTestEnd) return;
+    if (++d.ticks > 240) {  // six seconds: something did not answer - give up, do not hang
+        d.step = kFrameTestEnd;
+        return;
+    }
+    const auto later = [driver] { SetTimer(driver, kFrameTestTimer, 25, nullptr); };
+    if (d.wait-- > 0) {
+        later();
+        return;
+    }
+    d.wait = 0;
+    const auto post = [](HWND w, UINT msg, WPARAM wp, int x, int y) {
+        PostMessageW(w, msg, wp, MAKELPARAM((short)x, (short)y));
+    };
+    const auto click = [&](int x, int y) {
+        post(d.main, WM_LBUTTONDOWN, MK_LBUTTON, x, y);
+        post(d.main, WM_LBUTTONUP, 0, x, y);
+    };
+    // Whatever is waiting to be painted is painted now.
+    const auto settle = [&] { UpdateWindow(d.main); };
+    // The desktop against the state; both frames kept for looking at.
+    const auto compare = [&](int which, const wchar_t* name) {
+        const Frame shown = shownFrame(d.main);
+        const Frame fresh = renderedFrame(g_app);
+        keepFrames(name, shown, fresh);
+        d.stale[which] = frameMismatch(shown, fresh, &d.where[which]);
+    };
+    // On the name of a row, where a click selects it.
+    const auto clickName = [&](int row) {
+        const RECT r = g_app.listRowRect(row);
+        click(r.left + pxOf(g_app.scale, 30), (r.top + r.bottom) / 2);
+    };
+    const auto clickAddress = [&] {
+        click(g_app.lay.addrField.left + pxOf(g_app.scale, 40),
+              (g_app.lay.addrField.top + g_app.lay.addrField.bottom) / 2);
+    };
+    switch (d.step) {
+    case 0:
+        settle();
+        d.baseline = frameMismatch(shownFrame(d.main), renderedFrame(g_app), &d.where[0]) == 0;
+        d.wait = 3;
+        clickAddress();
+        break;
+    case 1:  // the edit is up: type the other folder and press Enter
+        d.editCame = g_app.addrEditing && IsWindow(g_app.addrEdit);
+        if (d.editCame) {
+            SetWindowTextW(g_app.addrEdit, d.to.c_str());
+            post(g_app.addrEdit, WM_KEYDOWN, VK_RETURN, 0, 0);
+        }
+        d.wait = 5;
+        break;
+    case 2:
+        settle();
+        d.navigated = !g_app.addrEditing && g_app.current == d.to;
+        compare(0, L"address");
+        clickAddress();  // and once more, to leave it the other way: by clicking elsewhere
+        d.wait = 3;
+        break;
+    case 3:
+        d.editCameAgain = g_app.addrEditing && IsWindow(g_app.addrEdit);
+        clickName(1);  // takes the focus out of the edit box
+        d.wait = 4;
+        break;
+    case 4:
+        settle();
+        // The path was not changed, so nothing was gone to again: the click's
+        // own selection is what is selected.
+        d.leftOk = !g_app.addrEditing && g_app.current == d.to &&
+                   g_app.selection.size() == 1 && g_app.selection.count(d.to + L"\\bbb.txt");
+        compare(3, L"leave");
+        clickName(0);
+        d.wait = 3;
+        break;
+    case 5:  // F2 over the selected name
+        post(d.main, WM_KEYDOWN, VK_F2, 0, 0);
+        d.wait = 4;
+        break;
+    case 6:  // the field is up: type a name, then Esc
+        d.fieldCame = g_app.renaming && IsWindow(g_app.renameEdit);
+        if (d.fieldCame) {
+            SetWindowTextW(g_app.renameEdit, L"zzz.txt");
+            post(g_app.renameEdit, WM_KEYDOWN, VK_ESCAPE, 0, 0);
+        }
+        d.wait = 5;
+        break;
+    case 7:
+        settle();
+        d.kept = !g_app.renaming && fsx::exists(d.to + L"\\aaa.txt");
+        compare(1, L"rename-esc");
+        post(d.main, WM_KEYDOWN, VK_F2, 0, 0);
+        d.wait = 4;
+        break;
+    case 8:  // the field again: the same name, then Enter
+        d.fieldCameAgain = g_app.renaming && IsWindow(g_app.renameEdit);
+        if (d.fieldCameAgain) {
+            SetWindowTextW(g_app.renameEdit, L"zzz.txt");
+            post(g_app.renameEdit, WM_KEYDOWN, VK_RETURN, 0, 0);
+        }
+        d.wait = 5;
+        break;
+    default:
+        settle();
+        d.renamed =
+            !g_app.renaming && fsx::exists(d.to + L"\\zzz.txt") && !fsx::exists(d.to + L"\\aaa.txt");
+        compare(2, L"rename-enter");
+        break;
+    }
+    ++d.step;
+    if (d.step < kFrameTestEnd) later();
+}
+
+LRESULT CALLBACK frameTestProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_TIMER && wp == kFrameTestTimer) {
+        frameTestStep(hwnd);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
 // Drives the same input handlers the window procedure uses, with synthesized
 // points, so click/selection behaviour can be checked without touching the
 // mouse or a real window.
@@ -3419,6 +3692,114 @@ int runUiTest(App& app) {
         DestroyWindow(owner);
     }
 
+    // The two that change everything say so themselves, whoever calls them:
+    // the frame on screen is a cache, and it is only rendered again for that.
+    const std::wstring frameDir = base + L"\\frame";
+    CreateDirectoryW(frameDir.c_str(), nullptr);
+    app.paintDirty = false;
+    app.loadDirectory(frameDir, false);  // another folder, not a reload of this one
+    const bool navSays = app.paintDirty;
+    app.paintDirty = false;
+    app.reload();
+    const bool reloadSays = app.paintDirty;
+    check(L"转到别的目录、刷新列表：都说一声画面过期了", navSays && reloadSays);
+    app.loadDirectory(base, false);
+
+    // What is on screen is what the state renders - after Enter in the address
+    // bar, after leaving it by clicking elsewhere, and after Esc and Enter in
+    // the rename box.  These end inside App, where nobody used to say the frame
+    // was out of date: the old folder stayed listed (and still got clicked
+    // on), and a cancelled rename left an empty white box where the name had
+    // been.  The window is the real one, driven by posted input; what it shows
+    // is read back from the compositor, so nothing lying on top of it can hide
+    // or fake it.
+    {
+        for (const wchar_t* name : {L"aaa.txt", L"bbb.txt", L"ccc.txt"}) {
+            const HANDLE h = CreateFileW((frameDir + L"\\" + name).c_str(), GENERIC_WRITE, 0,
+                                         nullptr, CREATE_ALWAYS, 0, nullptr);
+            if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+        }
+        WNDCLASSEXW wc{sizeof(WNDCLASSEXW)};
+        wc.lpfnWndProc = frameTestProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = kFrameTestClass;
+        RegisterClassExW(&wc);
+        HWND driver = CreateWindowExW(0, kFrameTestClass, L"", WS_OVERLAPPED, 0, 0, 100, 100,
+                                      nullptr, nullptr, wc.hInstance, nullptr);  // never shown
+        registerMainClass(wc.hInstance);
+        // Never activated, and behind everything: it is shown for a second or
+        // two, and must not take the keyboard from whoever is using the machine.
+        HWND main = CreateWindowExW(WS_EX_NOACTIVATE, L"MyOldComputerWindow", L"frame test",
+                                    WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, 0, 0, 0, 0, driver,
+                                    nullptr, wc.hInstance, nullptr);
+        g_frame = FrameDrive{};
+        g_frame.main = main;
+        g_frame.to = frameDir;
+        if (main) {
+            g_app.hwnd = main;
+            g_app.scale = dpiScaleOfWindow(main);
+            g_app.init(main);
+            g_app.relayout(pxOf(g_app.scale, 700), pxOf(g_app.scale, 440));
+            g_app.sidebarVisible = true;
+            g_app.loadDirectory(base, false);
+            g_app.setViewMode(ViewMode::Details);
+            SetWindowPos(main, nullptr, 0, 0, g_app.width, g_app.height,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            ShowWindow(main, SW_SHOWNOACTIVATE);
+            SetWindowPos(main, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            UpdateWindow(main);
+            MSG msg;
+            for (SetTimer(driver, kFrameTestTimer, 60, nullptr);
+                 g_frame.step < kFrameTestEnd && GetMessageW(&msg, nullptr, 0, 0) > 0;) {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            KillTimer(driver, kFrameTestTimer);
+            g_app.hwnd = nullptr;  // the edits are the window's children and go with it
+            DestroyWindow(main);
+            // Its WM_DESTROY posted WM_QUIT for a loop that is not running.
+            PeekMessageW(&msg, nullptr, WM_QUIT, WM_QUIT, PM_REMOVE);
+            g_app.addrEdit = nullptr;
+            g_app.addrEditing = false;
+            if (g_app.addrFont) {
+                DeleteObject(g_app.addrFont);
+                g_app.addrFont = nullptr;
+            }
+        }
+        DestroyWindow(driver);
+
+        std::wstring frameNotes;
+        if (!main) frameNotes += L"窗口没建出来";
+        else if (g_frame.ticks > 240) frameNotes += L"超时";
+        if (!g_frame.baseline) frameNotes += L"基准不符";
+        const auto areaOf = [](const RECT& r) {
+            return std::to_wstring(r.left) + L"," + std::to_wstring(r.top) + L" " +
+                   std::to_wstring(r.right - r.left) + L"x" + std::to_wstring(r.bottom - r.top);
+        };
+        // A verdict that says what was seen: whether the test got where it
+        // meant to, and if so, how much of the screen was still the old frame.
+        const auto frameVerdict = [&](const wchar_t* name, const wchar_t* came, bool didCome,
+                                      bool state, int stale, const RECT& where) {
+            std::wstring label = name;
+            if (!frameNotes.empty()) label += std::wstring(L"：") + frameNotes;
+            else if (!didCome) label += std::wstring(L"：") + came + L"没有出现";
+            else if (!state) label += L"：程序没有照做";
+            else if (stale)
+                label += L"：屏幕上有 " + std::to_wstring(stale) + L" 个像素还是旧的，范围 " +
+                         areaOf(where);
+            check(label.c_str(), label == name);
+        };
+        check(L"（测试基准）屏幕上的画面读得回来，且与按状态渲染的一致", g_frame.baseline);
+        frameVerdict(L"地址栏输入目录按回车：屏幕上就是新目录", L"地址栏输入框",
+                     g_frame.editCame, g_frame.navigated, g_frame.stale[0], g_frame.where[0]);
+        frameVerdict(L"点别处离开地址栏：屏幕上就是点中的那一行", L"地址栏输入框",
+                     g_frame.editCameAgain, g_frame.leftOk, g_frame.stale[3], g_frame.where[3]);
+        frameVerdict(L"改名按 Esc：屏幕上的名字回来了", L"改名输入框", g_frame.fieldCame,
+                     g_frame.kept, g_frame.stale[1], g_frame.where[1]);
+        frameVerdict(L"改名按回车：屏幕上是新名字，并排在它新的位置", L"改名输入框",
+                     g_frame.fieldCameAgain, g_frame.renamed, g_frame.stale[2], g_frame.where[2]);
+    }
+
     // Paint benchmark: catches accidental full-window repaint storms.
     app.setViewMode(ViewMode::Details);
     app.relayout(1100, 760);
@@ -3634,18 +4015,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
         return code;
     }
 
-    WNDCLASSEXW wc{};
-    wc.cbSize = sizeof(wc);
-    wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
-    wc.lpfnWndProc = wndProc;
-    wc.hInstance = instance;
-    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hIcon = (HICON)LoadImageW(instance, MAKEINTRESOURCEW(1), IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR);
-    wc.hIconSm =
-        (HICON)LoadImageW(instance, MAKEINTRESOURCEW(1), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
-    wc.hbrBackground = nullptr;
-    wc.lpszClassName = L"MyOldComputerWindow";
-    RegisterClassExW(&wc);
+    registerMainClass(instance);
 
     Settings settings;
     settings.load();

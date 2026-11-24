@@ -10,6 +10,7 @@
 #include <functional>
 #include <map>
 
+#include "debug.h"
 #include "dialog.h"
 #include "ids.h"
 #include "options.h"
@@ -91,6 +92,7 @@ void App::setScale(double s) {
         DeleteObject(renameFont);
         renameFont = nullptr;
     }
+    invalidate();
 }
 
 void App::relayout(int w, int h) {
@@ -180,6 +182,11 @@ void App::relayout(int w, int h) {
     clampScroll();
 }
 
+void App::invalidate() {
+    paintDirty = true;
+    if (hwnd) InvalidateRect(hwnd, nullptr, FALSE);
+}
+
 // ---------------------------------------------------------------- navigation
 
 void App::loadDirectory(const std::wstring& path, bool recordHistory, bool fromTreeClick) {
@@ -208,9 +215,13 @@ void App::loadDirectory(const std::wstring& path, bool recordHistory, bool fromT
     contextFolder.clear();
     selection.clear();
     selAnchor = -1;
+    // The listing is the window's, the tree is the sidebar's: timed apart, so
+    // the log says which of the two is the slow one when a folder is.
+    const double t0 = diagMillis();
     entries = fsx::listDirectory(current, showHidden);
     fsx::sortEntries(entries, sortColumn, sortAsc);
     rebuildNameWidths();
+    const double t1 = diagMillis();
     listScroll = 0;
     gridScroll = 0;
     if (fromTreeClick) {
@@ -223,7 +234,11 @@ void App::loadDirectory(const std::wstring& path, bool recordHistory, bool fromT
         scrollTreeToSelection();
     }
     clampScroll();
+    const double t2 = diagMillis();
+    diagLog(L"nav %ls: %d entries, listed+sorted %.1f ms, tree %.1f ms", current.c_str(),
+            (int)entries.size(), t1 - t0, t2 - t1);
     if (addrEdit && addrEditing) SetWindowTextW(addrEdit, current.c_str());
+    invalidate();
 }
 
 void App::reload() {
@@ -236,6 +251,7 @@ void App::reload() {
     selection = std::move(keep);
     clampScroll();
     noteChildren(current, std::any_of(entries.begin(), entries.end(), [](const Entry& e) { return e.isDir; }));
+    invalidate();
 }
 
 void App::goBack() {
@@ -1687,7 +1703,8 @@ LRESULT CALLBACK addrEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
     }
     if (msg == WM_KILLFOCUS && g_addrOwner && g_addrOwner->addrEditing) {
-        g_addrOwner->endAddressEdit(true);
+        // The user clicked elsewhere: what was typed counts, an untouched path does nothing.
+        g_addrOwner->endAddressEdit(true, true);
     }
     return CallWindowProcW(g_addrOldProc, hwnd, msg, wp, lp);
 }
@@ -1721,16 +1738,23 @@ void App::beginAddressEdit() {
     addrEditing = true;
 }
 
-void App::endAddressEdit(bool commit) {
+void App::endAddressEdit(bool commit, bool onlyIfChanged) {
     if (!addrEditing) return;
-    std::wstring text;
     wchar_t buf[32768]{};
     GetWindowTextW(addrEdit, buf, 32768);
-    text = buf;
+    const std::wstring text = buf;
     addrEditing = false;
+    // The new folder first, then the edit goes.  The other way round a slow
+    // folder showed the old path where the typed one had been, then the new
+    // one - and nothing said the frame was out of date, so Enter left the old
+    // folder on screen, listed and all, until some click repainted.
+    // (Enter on the path as it is reads the folder again, like the Go button;
+    // clicking away from it does not.)
+    if (commit && !(onlyIfChanged && _wcsicmp(text.c_str(), current.c_str()) == 0))
+        goToTypedPath(text);
     ShowWindow(addrEdit, SW_HIDE);
-    SetFocus(hwnd);
-    if (commit) goToTypedPath(text);
+    if (hwnd) SetFocus(hwnd);
+    invalidate();
 }
 
 // ------------------------------------------------------------- in-place rename
@@ -1871,7 +1895,7 @@ void App::beginRename(int row) {
         }
         SendMessageW(renameEdit, EM_SETSEL, 0, selEnd);
     }
-    if (hwnd) InvalidateRect(hwnd, nullptr, FALSE);
+    invalidate();
 }
 
 void App::endRename(bool commit) {
@@ -1898,11 +1922,17 @@ void App::endRename(bool commit) {
             refreshAfterChange();
             selection.clear();
             selection.insert(renamed);
-            return;
+            // A new name is a new place in the sort: keep the item in view.
+            revealRow(rowOfPath(renamed));
+        } else {
+            showError(hwnd, L"重命名", error);
         }
-        showError(hwnd, L"重命名", error);
     }
-    if (hwnd) InvalidateRect(hwnd, nullptr, FALSE);
+    // Whether the name changed or not, the row is not a white field any more.
+    // (Only the edit's own rectangle used to be repainted, from the frame
+    // cached while it was open: an empty white box stayed where the name had
+    // been, and after Enter neither the new name nor the selection showed.)
+    invalidate();
 }
 
 void App::saveSettings() {

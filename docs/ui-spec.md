@@ -96,7 +96,10 @@ the hand-drawn set.  macOS draws the icons in `Icons.swift` per extension.
 - Sizes use the same units on both platforms (`字节`/KB/MB/GB); dates are
   `yyyy/M/d HH:mm`.
 - The address bar always shows the real path (no `~` abbreviation) and accepts a
-  path typed by hand.
+  path typed by hand. Enter goes there at once: the typed path stays in the box
+  until the new folder's frame is ready, so nothing of the old one flashes in
+  between. Enter on the path as it is reads the folder again; clicking
+  elsewhere with the path as it is does nothing.
 - The window has one context menu for an item: the *items* come from the real
   Windows shell menu (`IContextMenu`, so every installed extension shows up),
   but the popup is drawn by this app in the Win98 style.  The file list and the
@@ -162,6 +165,15 @@ Lag is never traded for anything. For menus and hover feedback in particular:
   a window whether to activate it on a click; answering yes for a submenu
   took the foreground from the root menu, which closed the whole menu before
   the click reached the submenu.)
+- The window shows one frame at a time. Hovering and scrolling draw into the
+  frame that is on screen, and it is rendered again only when something says
+  that it changed. So whatever changes what the window shows says so itself -
+  going to a folder, reading it again, the edit boxes opening and closing.
+  (An edit box that ended without saying so left the old folder listed after
+  Enter in the address bar, and an empty white box where a name had been after
+  Escape; what was on screen and what a click hit were then two different
+  things.) The tests hold what the desktop shows against a frame rendered from
+  the state, after each of those.
 
 ## Platform mapping
 
