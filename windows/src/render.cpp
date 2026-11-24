@@ -303,6 +303,15 @@ void drawStatusBar(Canvas& c, App& a) {
 // True for the row whose name is being edited in place.
 bool renamingRow(const App& a, int i) { return a.renaming && a.renameRow == i; }
 
+// The colour of a row's selection box.  While the name is being edited it is
+// the colour the edit box highlights the selected part of the name with, so
+// the row being renamed is one blue and not the app's navy beside the
+// system's.  (Windows 98's own highlight was that navy.  Where the system's
+// is lighter - #0078D7 on Windows 10 and 11 - the two did not match.)
+COLORREF selectionColour(const App& a, int i) {
+    return renamingRow(a, i) ? GetSysColor(COLOR_HIGHLIGHT) : Theme::select;
+}
+
 // The rename field (App::renameField): white, over the name's selection box,
 // framed in black - all round when the row has a pixel to spare above and
 // below the name, down its two sides only when it has not.
@@ -326,7 +335,7 @@ void drawDetailsRow(Canvas& c, App& a, int i) {
     const bool editing = renamingRow(a, i);
     c.fill(r, Theme::white);
     const int extent = std::min(a.lay.nameW, a.nameExtent(i));
-    if (sel) c.fill(RECT{r.left, r.top, r.left + extent, r.bottom}, Theme::select);
+    if (sel) c.fill(RECT{r.left, r.top, r.left + extent, r.bottom}, selectionColour(a, i));
     const int s16 = c.px(16);
     RECT iconRect{r.left + c.px(3), r.top + c.px(2), r.left + c.px(3) + s16,
                   r.top + c.px(2) + s16};
@@ -416,7 +425,7 @@ void drawGridCell(Canvas& c, App& a, int i) {
         if (sel) {
             int tw = c.textWidth(label);
             c.fill(RECT{r.left + c.px(1), r.top, textLeft + tw + c.px(3), r.bottom},
-                   Theme::select);
+                   selectionColour(a, i));
         }
         if (!drawShellIcon(c, a, iconRect, e.path, e.isDir)) {
             if (e.isDir) Icon::folder(c, iconRect);
@@ -451,7 +460,7 @@ void drawGridCell(Canvas& c, App& a, int i) {
     const int lh = c.lineHeight();
     const int lx = (r.left + r.right - tw) / 2;
     const int ly = bandTop + std::max(0, (bandH - lh) / 2);
-    if (sel) c.fill(RECT{lx - c.px(3), ly, lx + tw + c.px(3), ly + lh}, Theme::select);
+    if (sel) c.fill(RECT{lx - c.px(3), ly, lx + tw + c.px(3), ly + lh}, selectionColour(a, i));
     if (renamingRow(a, i)) {
         drawRenameField(c, a, i);
         return;

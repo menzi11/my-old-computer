@@ -2098,6 +2098,11 @@ bool sameBox(const PixelBox& a, const PixelBox& b) {
 }
 
 bool isNavy(COLORREF px) { return (px & 0xFFFFFF) == (Theme::select & 0xFFFFFF); }
+// The system's highlight: what an edit box puts behind the selected part of
+// its text - and so, while a name is being edited, that row's selection box.
+bool isHighlight(COLORREF px) {
+    return (px & 0xFFFFFF) == (GetSysColor(COLOR_HIGHLIGHT) & 0xFFFFFF);
+}
 bool isBlack(COLORREF px) { return (px & 0xFFFFFF) == (Theme::dark & 0xFFFFFF); }
 
 // Ink of a name: a pixel at least 78% covered on every subpixel - the same
@@ -2112,6 +2117,11 @@ bool notWhite(COLORREF px) { return (px & 0xFFFFFF) != 0xFFFFFF; }
 // only colours a selection box that has swallowed its icon can be made of.
 bool iconInk(COLORREF px) {
     return !isNavy(px) && !isBlack(px) && (px & 0xFFFFFF) != 0xFFFFFF;
+}
+
+// The same on a row being renamed, whose selection box is the highlight.
+bool iconInkOnHighlight(COLORREF px) {
+    return !isHighlight(px) && !isBlack(px) && (px & 0xFFFFFF) != 0xFFFFFF;
 }
 
 // Bounding box of the pixels of `area` (bitmap coordinates) that `take` takes.
@@ -2263,6 +2273,24 @@ int frameMismatch(const Frame& a, const Frame& b, RECT* box) {
     return n;
 }
 
+// How many pixels of `area` (window coordinates) the frame has that `take`
+// takes.
+int frameCount(const Frame& f, const RECT& area, bool (*take)(COLORREF)) {
+    const RECT c{std::max<LONG>(0, area.left), std::max<LONG>(0, area.top),
+                 std::min<LONG>(f.w, area.right), std::min<LONG>(f.h, area.bottom)};
+    int n = 0;
+    for (int y = c.top; y < c.bottom; ++y) {
+        for (int x = c.left; x < c.right; ++x) {
+            // GetDIBits gives blue, green, red in memory; a COLORREF, which
+            // is what the palette and GetSysColor are, is red, green, blue.
+            // (Frame against frame needs no such care: both are the same way.)
+            const COLORREF raw = f.px[(size_t)y * f.w + x];
+            if (take(RGB((raw >> 16) & 0xFF, (raw >> 8) & 0xFF, raw & 0xFF))) ++n;
+        }
+    }
+    return n;
+}
+
 // Under MOC_DEBUG both frames of a comparison go to %TEMP%\moc-shots, to be
 // looked at.
 void keepFrames(const wchar_t* name, const Frame& shown, const Frame& fresh) {
@@ -2289,6 +2317,8 @@ struct FrameDrive {
     bool editCame = false, editCameAgain = false;
     bool fieldCame = false, fieldCameAgain = false;
     bool navigated = false, leftOk = false, kept = false, renamed = false;  // the state after each key
+    int blockOff = 0;          // pixels beside the icon, while renaming, that are not the highlight
+    int nameHighlighted = 0;   // ... and highlight pixels inside the edit box (the selected name)
     int stale[4] = {0, 0, 0, 0};  // pixels on screen that the state does not have
     RECT where[4] = {};
 };
@@ -2376,9 +2406,22 @@ void frameTestStep(HWND driver) {
         post(d.main, WM_KEYDOWN, VK_F2, 0, 0);
         d.wait = 4;
         break;
-    case 6:  // the field is up: type a name, then Esc
+    case 6:  // the field is up: one blue for the row; then type a name, then Esc
         d.fieldCame = g_app.renaming && IsWindow(g_app.renameEdit);
         if (d.fieldCame) {
+            // On screen, with the base name still selected in the box: the
+            // icon's background and the selected part of the name are one
+            // colour, the system's highlight.
+            const Frame shown = shownFrame(d.main);
+            keepFrames(L"rename-open", shown, shown);
+            const RECT row = g_app.listRowRect(g_app.renameRow);
+            // The strip between the row's left edge and its icon: selection
+            // box only.
+            const RECT margin{row.left, row.top, row.left + pxOf(g_app.scale, 3), row.bottom};
+            const int area = (int)(margin.right - margin.left) * (margin.bottom - margin.top);
+            d.blockOff = area - frameCount(shown, margin, isHighlight);
+            d.nameHighlighted = frameCount(shown, g_app.renameField(g_app.renameRow).edit,
+                                           isHighlight);
             SetWindowTextW(g_app.renameEdit, L"zzz.txt");
             post(g_app.renameEdit, WM_KEYDOWN, VK_ESCAPE, 0, 0);
         }
@@ -3489,7 +3532,7 @@ int runUiTest(App& app) {
             return std::to_wstring(r.left) + L"," + std::to_wstring(r.top) + L"-" +
                    std::to_wstring(r.right) + L"," + std::to_wstring(r.bottom);
         };
-        std::wstring onBox, band, ink, line, kept, outside, icon;  // first failure of each
+        std::wstring onBox, band, ink, line, kept, outside, icon, one;  // first failure of each
         auto note = [](std::wstring& into, const std::wstring& what) {
             if (into.empty()) into = what;
         };
@@ -3605,23 +3648,36 @@ int runUiTest(App& app) {
                         note(line, where + L"输入框 " + rectOf(e) + L" 高 " +
                                        std::to_wstring((int)(e.bottom - e.top)) + L"，框 " +
                                        boxOf(frame) + L" 一行 " + std::to_wstring(lineHeight));
-                    // 5. The icon keeps its selection blue, and only the
-                    //    icon: none of it is left under or beside the field.
-                    //    An icon-view label is the field now.
-                    const PixelBox blue = find(b, blueArea, isNavy);
+                    // Where the icon sits, by the renderer's own numbers.
+                    const int iconX = r.left + px(view == ViewMode::Details ? 3 : 2);
+                    const RECT iconRect{iconX, r.top + px(2), iconX + px(16),
+                                        r.top + px(2) + px(16)};
+                    // 5. The icon keeps its selection box, and only the icon:
+                    //    none of it is left under or beside the field.  An
+                    //    icon-view label is the field now.  While the row is
+                    //    renamed the box is the system's highlight - the
+                    //    colour of the selected part of the name in the box.
+                    const PixelBox blue = find(b, blueArea, isHighlight);
                     const bool iconKept =
                         icons ? blue.count == 0
                               : blue.count && blue.left == box.left && blue.right == frame.left;
                     if (!iconKept)
-                        note(kept, where + L"选中蓝 " + boxOf(blue) + L"（图标到 " +
+                        note(kept, where + L"选中底色 " + boxOf(blue) + L"（图标到 " +
                                         std::to_wstring(frame.left) + L" 为止）");
+                    // 8. One blue for the row: none of the app's navy is left
+                    //    in it (outside the icon, which may have any colour).
+                    //    Where the system's highlight is that navy - the
+                    //    Windows 98 scheme - there is nothing to tell apart.
+                    int navyLeft = find(b, blueArea, isNavy).count;
+                    if (!icons) navyLeft -= find(b, iconRect, isNavy).count;
+                    if (isNavy(GetSysColor(COLOR_HIGHLIGHT))) navyLeft = 0;
+                    if (navyLeft)
+                        note(one, where + L"还有深蓝 " + std::to_wstring(navyLeft) + L" 像素");
 
                     // 7. The icon is still there: the selection box goes
                     //    under it, so a selected row is not a bare blue box.
                     if (!icons) {
-                        const int x = r.left + px(view == ViewMode::Details ? 3 : 2);
-                        const RECT iconRect{x, r.top + px(2), x + px(16), r.top + px(2) + px(16)};
-                        if (!find(b, iconRect, iconInk).count)
+                        if (!find(b, iconRect, iconInkOnHighlight).count)
                             note(icon, where + L"选中行的图标被选中框盖住了");
                     }
 
@@ -3650,6 +3706,7 @@ int runUiTest(App& app) {
         verdict(L"输入框里的名字和原名逐像素重合", ink);
         verdict(L"输入框填满框内，恰好一行高", line);
         verdict(L"图标的选中高亮保留", kept);
+        verdict(L"改名的那一行里不再有程序自己的深蓝", one);
         verdict(L"重命名框不画到自己那一行以外", outside);
         verdict(L"选中行的图标还在", icon);
 
@@ -3794,6 +3851,18 @@ int runUiTest(App& app) {
                      g_frame.editCame, g_frame.navigated, g_frame.stale[0], g_frame.where[0]);
         frameVerdict(L"点别处离开地址栏：屏幕上就是点中的那一行", L"地址栏输入框",
                      g_frame.editCameAgain, g_frame.leftOk, g_frame.stale[3], g_frame.where[3]);
+        // Read from the screen itself, edit box included: the row being renamed
+        // is one blue - the icon's background is the colour the edit box gives
+        // the selected part of the name.
+        const wchar_t* const oneBlueName =
+            L"改名时整行一个颜色：图标的底色与输入框里选中名字的底色相同";
+        std::wstring oneBlue = oneBlueName;
+        if (!g_frame.fieldCame) oneBlue += L"：改名输入框没有出现";
+        else if (g_frame.blockOff)
+            oneBlue += L"：图标旁边有 " + std::to_wstring(g_frame.blockOff) +
+                       L" 个像素不是这个颜色";
+        else if (!g_frame.nameHighlighted) oneBlue += L"：输入框里没有看到选中名字的高亮";
+        check(oneBlue.c_str(), oneBlue == oneBlueName);
         frameVerdict(L"改名按 Esc：屏幕上的名字回来了", L"改名输入框", g_frame.fieldCame,
                      g_frame.kept, g_frame.stale[1], g_frame.where[1]);
         frameVerdict(L"改名按回车：屏幕上是新名字，并排在它新的位置", L"改名输入框",

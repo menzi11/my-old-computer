@@ -137,7 +137,11 @@ the hand-drawn set.  macOS draws the icons in `Icons.swift` per extension.
   white field with a 1 px black frame, the name stays on exactly its pixels,
   the base name is selected (a folder's whole name), Enter commits, Escape
   cancels, losing focus commits. The field follows its row when the list
-  scrolls and is clipped like the row.
+  scrolls and is clipped like the row. While a row is renamed its selection
+  box is the system's highlight colour - the one the edit box gives the
+  selected part of the name - so the row being renamed is one blue, whatever
+  the machine's highlight is (Windows 98's was the app's own navy; Windows 10
+  and 11 use `#0078D7`). Every other selection stays the app's navy.
 - In every view the selection box is painted under the icon, never over it: a
   selected row keeps its icon.
 
