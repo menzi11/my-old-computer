@@ -175,6 +175,27 @@ std::vector<Entry> listDirectory(const std::wstring& dir, bool showHidden) {
     return out;
 }
 
+std::vector<std::wstring> listSubfolders(const std::wstring& dir, bool showHidden) {
+    std::vector<std::wstring> out;
+    std::wstring pattern = dir;
+    if (!pattern.empty() && pattern.back() != L'\\') pattern += L'\\';
+    pattern += L'*';
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return out;
+    do {
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        if (!showHidden && isHiddenEntry(fd)) continue;
+        out.push_back(fd.cFileName);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    std::sort(out.begin(), out.end(), [](const std::wstring& a, const std::wstring& b) {
+        return StrCmpLogicalW(a.c_str(), b.c_str()) < 0;
+    });
+    return out;
+}
+
 void sortEntries(std::vector<Entry>& entries, int column, bool ascending) {
     auto cmp = [column](const Entry& a, const Entry& b) -> int {
         if (a.isDir != b.isDir) return a.isDir ? -1 : 1;

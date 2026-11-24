@@ -53,6 +53,19 @@ std::wstring volumeTitle(const std::wstring& root) {
     return prefix + letterPart;
 }
 
+int pxAt(double scale, double v) { return (int)(v * scale + 0.5); }
+
+// The drive's name on the address bar, as the tree shows it.  A network share
+// has no letter: it is named by where it is.
+std::wstring driveTitle(const std::wstring& root) {
+    if (root.rfind(L"\\\\", 0) == 0) {
+        std::wstring t = root;
+        while (t.size() > 2 && t.back() == L'\\') t.pop_back();
+        return t;
+    }
+    return volumeTitle(root);
+}
+
 }  // namespace
 
 void App::init(HWND h) {
@@ -157,14 +170,16 @@ void App::relayout(int w, int h) {
     lay.colX[0] = lay.listHeader.left;
     for (int i = 1; i < 4; ++i) lay.colX[i] = lay.colX[i - 1] + lay.colW[i - 1];
 
-    // Address bar internals.
+    // Address bar internals.  The field is as tall as the toolbar's buttons:
+    // its crumbs are buttons too, and need a row above and below their text.
     const int labelW = px(52), goW = px(56);
-    lay.addrField = RECT{lay.addr.left + labelW + px(6), lay.addr.top + px(3),
-                         lay.addr.right - goW - px(18) - px(17), lay.addr.top + px(23)};
+    lay.addrField = RECT{lay.addr.left + labelW + px(6), lay.addr.top + px(2),
+                         lay.addr.right - goW - px(18) - px(17), lay.addr.top + px(24)};
     lay.addrArrow = RECT{lay.addr.right - goW - px(5) - px(17), lay.addr.top + px(5),
                          lay.addr.right - goW - px(5) - px(2), lay.addr.top + px(21)};
-    lay.addrGo = RECT{lay.addr.right - goW - px(5), lay.addr.top + px(3), lay.addr.right - px(5),
-                      lay.addr.top + px(23)};
+    lay.addrGo = RECT{lay.addr.right - goW - px(5), lay.addr.top + px(2), lay.addr.right - px(5),
+                      lay.addr.top + px(24)};
+    layoutCrumbs();
 
     // Status panels.
     lay.statusLeft = RECT{lay.status.left + 1, lay.status.top + 2, lay.status.left + 1 + px(240),
@@ -199,6 +214,7 @@ void App::loadDirectory(const std::wstring& path, bool recordHistory, bool fromT
         return;
     }
     if (_wcsicmp(target.c_str(), current.c_str()) == 0) {
+        if (crumbs.empty()) buildCrumbs();  // started in this folder: nobody has yet
         if (!fromTreeClick) {
             treeClickRow = -1;
             revealInTree();
@@ -212,6 +228,7 @@ void App::loadDirectory(const std::wstring& path, bool recordHistory, bool fromT
         forward.clear();
     }
     current = target;
+    buildCrumbs();
     contextFolder.clear();
     selection.clear();
     selAnchor = -1;
@@ -1771,6 +1788,155 @@ void App::endAddressEdit(bool commit, bool onlyIfChanged) {
     ShowWindow(addrEdit, SW_HIDE);
     if (hwnd) SetFocus(hwnd);
     invalidate();
+}
+
+// ---------------------------------------------------------- address crumbs
+
+RECT App::addressInner() const {
+    return RECT{lay.addrField.left + pxAt(scale, 2), lay.addrField.top + pxAt(scale, 2),
+                lay.addrField.right - pxAt(scale, 1), lay.addrField.bottom - pxAt(scale, 1)};
+}
+
+void App::buildCrumbs() {
+    crumbs.clear();
+    hoverCrumb = hoverCrumbMore = pressCrumb = pressCrumbMore = -1;
+    hoverAddrMore = pressAddrMore = false;
+    Crumb machine;
+    machine.title = L"我的电脑";
+    crumbs.push_back(machine);
+    const std::wstring root = fsx::rootOf(current);
+    const bool fromRoot = root.size() <= current.size() &&
+                          _wcsnicmp(current.c_str(), root.c_str(), root.size()) == 0;
+    {
+        Crumb drive;
+        drive.path = fromRoot ? root : current;
+        drive.title = fromRoot ? driveTitle(root) : current;
+        crumbs.push_back(drive);
+    }
+    // One crumb per folder below the drive, each named as it is on the disk.
+    size_t pos = root.size();
+    while (fromRoot && pos < current.size()) {
+        if (current[pos] == L'\\' || current[pos] == L'/') {
+            ++pos;
+            continue;
+        }
+        const size_t end = current.find_first_of(L"\\/", pos);
+        Crumb c;
+        c.title = current.substr(pos, end == std::wstring::npos ? end : end - pos);
+        c.path = current.substr(0, end == std::wstring::npos ? current.size() : end);
+        crumbs.push_back(c);
+        if (end == std::wstring::npos) break;
+        pos = end + 1;
+    }
+    layoutCrumbs();
+}
+
+void App::layoutCrumbs() {
+    const int pad = pxAt(scale, 5), moreW = pxAt(scale, 12);
+    const int blankMin = pxAt(scale, 20);  // the blank part is never too small to click
+    const RECT field = addressInner();
+    const int left = field.left, top = field.top, right = field.right, bottom = field.bottom;
+    const int avail = std::max(0, right - left);
+    const int n = (int)crumbs.size();
+    for (int i = 0; i < n; ++i) crumbs[i].box = crumbs[i].more = RECT{};
+    lay.addrMore = RECT{};
+    lay.addrBlank = RECT{left, top, right, bottom};
+    crumbFirst = 0;
+    if (n == 0) return;
+    // The width each crumb needs; the first has the machine's icon.
+    std::vector<int> w(n);
+    int total = 0;
+    for (int i = 0; i < n; ++i) {
+        w[i] = 2 * pad + measureUiText(crumbs[i].title, (int)(14.6667 * scale + 0.5)) +
+               (i == 0 ? pxAt(scale, 19) : 0);
+        total += w[i] + (i + 1 < n ? moreW : 0);
+    }
+    int x = left;
+    if (total + blankMin > avail) {
+        // Out of room.  The end of the way is what matters, so it is flush
+        // right: the current folder and as much of the way to it as fits in
+        // what is left of the <, the rest behind the <.
+        const int room = std::max(1, avail - moreW - blankMin);
+        int used = w[n - 1];
+        crumbFirst = n - 1;
+        while (crumbFirst > 0 && used + moreW + w[crumbFirst - 1] <= room) {
+            used += moreW + w[crumbFirst - 1];
+            --crumbFirst;
+        }
+        x = std::max(left + moreW + blankMin, right - used);
+        lay.addrMore = RECT{left, top, left + moreW, bottom};
+    }
+    for (int i = crumbFirst; i < n; ++i) {
+        crumbs[i].box = RECT{x, top, std::min(x + w[i], right), bottom};
+        x += w[i];
+        if (i + 1 < n) {
+            crumbs[i].more = RECT{x, top, std::min(x + moreW, right), bottom};
+            x += moreW;
+        }
+    }
+    // The blank part: what is left after the last button, or between the <
+    // and the first button in view.
+    lay.addrBlank = RECT{left, top, right, bottom};
+    if (n > 0) {
+        const int blankLeft = lay.addrMore.right > lay.addrMore.left ? lay.addrMore.right : x;
+        const int blankRight = lay.addrMore.right > lay.addrMore.left
+                                   ? std::max(blankLeft, (int)crumbs[crumbFirst].box.left)
+                                   : right;
+        lay.addrBlank = RECT{blankLeft, top, blankRight, bottom};
+    }
+}
+
+AddressHit App::addressAt(POINT p, int* crumb) const {
+    if (crumb) *crumb = -1;
+    if (!PtInRect(&lay.addrField, p)) return AddressHit::None;
+    if (PtInRect(&lay.addrMore, p)) return AddressHit::More;
+    for (int i = crumbFirst; i < (int)crumbs.size(); ++i) {
+        if (crumbs[i].more.right > crumbs[i].more.left && PtInRect(&crumbs[i].more, p)) {
+            if (crumb) *crumb = i;
+            return AddressHit::CrumbMore;
+        }
+        if (PtInRect(&crumbs[i].box, p)) {
+            if (crumb) *crumb = i;
+            return AddressHit::Crumb;
+        }
+    }
+    return AddressHit::Blank;
+}
+
+std::vector<FolderRow> App::crumbRows(int crumb, int* currentRow) const {
+    std::vector<FolderRow> rows;
+    if (currentRow) *currentRow = -1;
+    if (crumb < 0 || crumb >= (int)crumbs.size()) return rows;
+    const Crumb& c = crumbs[crumb];
+    if (c.path.empty()) {
+        // The machine's subfolders are its drives, as the tree has them.
+        for (const TreeNode& root : treeRoots)
+            if (root.kind == TreeNode::Machine)
+                for (const TreeNode& v : root.children)
+                    rows.push_back({v.path, v.title, TreeNode::Volume});
+    } else {
+        for (const std::wstring& name : fsx::listSubfolders(c.path, showHidden))
+            rows.push_back({fsx::joinPath(c.path, name), name, TreeNode::Folder});
+    }
+    // The row the way to the current folder goes through from here, if the
+    // list has it (a hidden folder is not in the list while those are hidden).
+    if (crumb + 1 < (int)crumbs.size() && currentRow) {
+        const std::wstring& next = crumbs[crumb + 1].path;
+        for (int i = 0; i < (int)rows.size(); ++i)
+            if (_wcsicmp(rows[i].path.c_str(), next.c_str()) == 0) *currentRow = i;
+    }
+    return rows;
+}
+
+std::vector<FolderRow> App::hiddenCrumbRows() const {
+    std::vector<FolderRow> rows;
+    for (int i = 0; i < crumbFirst && i < (int)crumbs.size(); ++i) {
+        const TreeNode::Kind kind = i == 0       ? TreeNode::Machine
+                                    : i == 1     ? TreeNode::Volume
+                                                 : TreeNode::Folder;
+        rows.push_back({crumbs[i].path, crumbs[i].title, kind});
+    }
+    return rows;
 }
 
 // ------------------------------------------------------------- in-place rename

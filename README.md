@@ -65,8 +65,9 @@ for palette, metrics, bevels and interaction rules. The two windows are not
 ## Features
 
 **Navigation that survives a full day** — Back / Forward / Up with a real history
-stack, an address bar that always shows the real Windows path and accepts one you
-type, and a keyboard shortcut for every action.
+stack, an address bar that shows the way to the folder as buttons you click,
+Explorer's breadcrumbs (Windows build), and takes a path you type, and a
+keyboard shortcut for every action.
 
 **Three working views** — details with Name / Size / Type / Date columns and
 click-to-sort (directories first, natural name order), list and large-icon views.

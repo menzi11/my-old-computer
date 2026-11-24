@@ -165,16 +165,80 @@ void drawToolbar(Canvas& c, App& a) {
     c.hline(bar.left, bar.bottom - 2, bar.right - bar.left, Theme::white);
 }
 
+// The address bar's crumbs: every folder on the way to the current one, from
+// the machine down, each a button; a v after each one but the last, which
+// lists that folder's subfolders.
+void drawAddressCrumbs(Canvas& c, App& a) {
+    const RECT inner = a.addressInner();
+    ClipScope clip(c.dc(), inner);
+    const int pad = c.px(5), s16 = c.px(16);
+    // A flat button until the pointer is on it (the tree's hover colour), a
+    // pressed one while its list is up or the button is held.
+    const auto button = [&](const RECT& r, bool hot, bool down) {
+        if (down) {
+            c.fill(r, Theme::face);
+            c.bevelSunken(r);
+        } else if (hot) {
+            c.fill(r, Theme::faceHi);
+        }
+    };
+    const auto triangle = [&](const RECT& r, bool right) {
+        const int cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+        const int dx = c.px(2), dy = c.px(3);
+        POINT tri[3] = {{cx - dx, cy - dy}, {cx + dx, cy}, {cx - dx, cy + dy}};
+        if (!right) {  // mirrored: pointing left
+            tri[0].x = cx + dx;
+            tri[2].x = cx + dx;
+            tri[1].x = cx - dx;
+        }
+        c.polygonFill(tri, 3, Theme::dark);
+    };
+
+    // The < that lists the crumbs out of view to the left.
+    if (a.lay.addrMore.right > a.lay.addrMore.left) {
+        const RECT r = a.lay.addrMore;
+        button(r, a.hoverAddrMore, a.pressAddrMore);
+        triangle(r, false);
+    }
+    const int textTop = inner.top + 1, textBottom = inner.bottom - 1;
+    for (int i = a.crumbFirst; i < (int)a.crumbs.size(); ++i) {
+        const Crumb& crumb = a.crumbs[i];
+        const RECT box = crumb.box;
+        if (box.right <= box.left) continue;
+        button(box, a.hoverCrumb == i, a.pressCrumb == i);
+        int text = box.left + pad;
+        if (i == 0) {  // the machine: its icon, as the tree's root row shows it
+            RECT iconRect{box.left + pad, (box.top + box.bottom - s16) / 2, box.left + pad + s16,
+                          (box.top + box.bottom - s16) / 2 + s16};
+            Icon::computer(c, iconRect);
+            text = iconRect.right + c.px(3);
+        }
+        c.textClip(crumb.title, RECT{text, textTop, box.right - pad, textBottom}, Theme::text,
+                   Align::Left);
+        const RECT more = crumb.more;
+        if (more.right > more.left) {
+            button(more, a.hoverCrumbMore == i, a.pressCrumbMore == i);
+            triangle(more, true);
+        }
+    }
+}
+
 void drawAddressBar(Canvas& c, App& a) {
     RECT bar = a.lay.addr;
     c.fill(bar, Theme::face);
     c.text(L"地址(D)", bar.left + c.px(4), bar.top + c.px(6), Theme::text);
     c.fill(a.lay.addrField, Theme::white);
     c.bevelField(a.lay.addrField);
+    // While a path is being typed, the edit control is over the field and
+    // draws it; otherwise the way to the current folder is there as buttons.
     if (!a.addrEditing) {
-        RECT textRect{a.lay.addrField.left + c.px(4), a.lay.addrField.top,
-                      a.lay.addrField.right - c.px(4), a.lay.addrField.bottom};
-        c.textClip(a.current, textRect, Theme::text, Align::Left);
+        if (a.crumbs.empty()) {
+            RECT textRect{a.lay.addrField.left + c.px(4), a.lay.addrField.top,
+                          a.lay.addrField.right - c.px(4), a.lay.addrField.bottom};
+            c.textClip(a.current, textRect, Theme::text, Align::Left);
+        } else {
+            drawAddressCrumbs(c, a);
+        }
     }
     // Drop arrow.
     RECT arrow = a.lay.addrArrow;

@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <filesystem>
 #include <string>
 #include <utility>
 #include <vector>
@@ -16,6 +17,7 @@
 #include "debug.h"
 #include "dialog.h"
 #include "dnd.h"
+#include "folderlist.h"
 #include "fs.h"
 #include "hmmenu.h"
 #include "ids.h"
@@ -54,6 +56,39 @@ void dumpLayout(App& a) {
     rect("menu", a.lay.menu);
     rect("tool", a.lay.tool);
     rect("addr", a.lay.addr);
+    rect("addrField", a.lay.addrField);
+    rect("addrMore", a.lay.addrMore);
+    rect("addrBlank", a.lay.addrBlank);
+    // The address bar's buttons, with the folder each one goes to: a picture
+    // of the bar is held against this.
+    fwprintf(f, L"crumbs %d first %d\n", (int)a.crumbs.size(), a.crumbFirst);
+    for (int i = 0; i < (int)a.crumbs.size(); ++i) {
+        const Crumb& c = a.crumbs[i];
+        fwprintf(f, L"crumb %d %d,%d %dx%d more %d,%d %dx%d path %ls title %ls\n", i,
+                 (int)c.box.left, (int)c.box.top, (int)(c.box.right - c.box.left),
+                 (int)(c.box.bottom - c.box.top), (int)c.more.left, (int)c.more.top,
+                 (int)(c.more.right - c.more.left), (int)(c.more.bottom - c.more.top),
+                 c.path.c_str(), c.title.c_str());
+    }
+    // The list that is up under one of them, if any: where it is on the
+    // screen, what is in view, and every row it holds.
+    if (HWND list = folderListWindow(); list && folderListRows(list)) {
+        FolderListInfo info;
+        RECT wr{};
+        GetWindowRect(list, &wr);
+        if (folderListInfo(list, &info)) {
+            fwprintf(f, L"crumbList %d,%d %dx%d first %d visible %d hot %d rowH %d rows %d\n",
+                     (int)wr.left, (int)wr.top, (int)(wr.right - wr.left),
+                     (int)(wr.bottom - wr.top), info.first, info.visible, info.highlighted,
+                     info.rowH, (int)folderListRows(list)->size());
+            fwprintf(f, L"crumbListRows %d,%d %dx%d\n", (int)info.rows.left, (int)info.rows.top,
+                     (int)(info.rows.right - info.rows.left), (int)(info.rows.bottom - info.rows.top));
+            const auto& rows = *folderListRows(list);
+            for (int i = 0; i < (int)rows.size() && i < 4000; ++i)
+                fwprintf(f, L"listRow %d %ls path %ls\n", i, rows[i].title.c_str(),
+                         rows[i].path.c_str());
+        }
+    }
     rect("status", a.lay.status);
     rect("sidebar", a.lay.sidebar);
     rect("splitter", a.lay.splitter);
@@ -558,6 +593,60 @@ void showAppMenu(HWND hwnd, App& a, int index, POINT p) {
     (void)p;
 }
 
+// The list under an address bar arrow: the subfolders of the crumb it follows
+// (crumb), or the crumbs out of view to the left (crumb = -1).  The machine's
+// button opens the first kind of list too - it has no folder to go to, only
+// its drives.  The row that is chosen is gone to.  A press on another of the
+// bar's arrows while the list is up opens that one's list in its place, as it
+// does between menu titles.
+void showCrumbList(HWND hwnd, App& a, int crumb, bool onButton = false) {
+    for (;;) {
+        if (crumb >= (int)a.crumbs.size()) return;
+        const bool hidden = crumb < 0;
+        const RECT anchor = hidden ? a.lay.addrMore
+                                   : onButton ? a.crumbs[crumb].box : a.crumbs[crumb].more;
+        std::vector<FolderRow> rows;
+        int current = -1;
+        if (hidden) rows = a.hiddenCrumbRows();
+        else rows = a.crumbRows(crumb, &current);
+        if (rows.empty()) {
+            MessageBeep(MB_ICONASTERISK);  // nothing to list (a folder with no subfolder in view)
+            return;
+        }
+        // The arrow stays pressed while its list is up, as an open menu title does.
+        if (hidden) a.pressAddrMore = true;
+        else a.pressCrumbMore = crumb;
+        repaintRegion(hwnd, a, a.lay.addrField);
+        if (hwnd) UpdateWindow(hwnd);
+        RECT screen = anchor;
+        MapWindowPoints(hwnd, nullptr, (POINT*)&screen, 2);
+        FolderListEnd end;
+        const int chosen = showFolderList(hwnd, rows, current, screen, a.useSystemIcons, &end);
+        a.pressAddrMore = false;
+        a.pressCrumbMore = -1;
+        if (chosen >= 0 && chosen < (int)rows.size() && !rows[chosen].path.empty()) {
+            a.loadDirectory(rows[chosen].path);
+            break;
+        }
+        onButton = false;  // only the machine's own button opens a list
+        if (end.pressedElsewhere) {
+            ScreenToClient(hwnd, &end.press);
+            int other = -1;
+            const AddressHit hit = a.addressAt(end.press, &other);
+            if (hit == AddressHit::CrumbMore) {
+                crumb = other;
+                continue;
+            }
+            if (hit == AddressHit::More) {
+                crumb = -1;
+                continue;
+            }
+        }
+        break;
+    }
+    repaint(hwnd);
+}
+
 bool g_menuPending = false;
 POINT g_menuPendingPoint{};
 
@@ -934,6 +1023,23 @@ void onMouseMove(HWND hwnd, App& a, POINT p) {
         if (hoverTool >= 0) repaintRegion(hwnd, a, a.toolbarItemRect(hoverTool));
         if (hoverMenu >= 0) repaintRegion(hwnd, a, a.menuItemRect(hoverMenu));
     }
+    // The address bar's buttons light up under the pointer.
+    int hoverCrumb = -1, hoverCrumbMore = -1;
+    bool hoverAddrMore = false;
+    if (!a.addrEditing && PtInRect(&a.lay.addrField, p)) {
+        int crumb = -1;
+        const AddressHit hit = a.addressAt(p, &crumb);
+        hoverCrumb = hit == AddressHit::Crumb ? crumb : -1;
+        hoverCrumbMore = hit == AddressHit::CrumbMore ? crumb : -1;
+        hoverAddrMore = hit == AddressHit::More;
+    }
+    if (hoverCrumb != a.hoverCrumb || hoverCrumbMore != a.hoverCrumbMore ||
+        hoverAddrMore != a.hoverAddrMore) {
+        a.hoverCrumb = hoverCrumb;
+        a.hoverCrumbMore = hoverCrumbMore;
+        a.hoverAddrMore = hoverAddrMore;
+        repaintRegion(hwnd, a, a.lay.addrField);
+    }
 }
 
 void onLButtonDown(HWND hwnd, App& a, POINT p) {
@@ -971,7 +1077,22 @@ void onLButtonDown(HWND hwnd, App& a, POINT p) {
         return;
     }
     if (PtInRect(&a.lay.addrField, p)) {
-        a.beginAddressEdit();
+        // Every folder on the way to the current one is a button, the v after
+        // it opens that folder's subfolders, and the blank part of the field
+        // turns the whole path into an edit box.
+        int crumb = -1;
+        const AddressHit hit = a.addrEditing ? AddressHit::Blank : a.addressAt(p, &crumb);
+        if (hit == AddressHit::CrumbMore || hit == AddressHit::More) {
+            showCrumbList(hwnd, a, hit == AddressHit::More ? -1 : crumb);
+        } else if (hit == AddressHit::Crumb) {
+            // Pressed, not gone to yet: that happens when the button comes
+            // back up on it, like the toolbar's buttons.
+            a.pressCrumb = crumb;
+            SetCapture(hwnd);
+            repaintRegion(hwnd, a, a.lay.addrField);
+        } else {
+            a.beginAddressEdit();
+        }
         return;
     }
     if (PtInRect(&a.lay.addrArrow, p)) {
@@ -1143,6 +1264,24 @@ void onLButtonUp(HWND hwnd, App& a, POINT p) {
         treePressRelease(hwnd, a, p);
         return;
     }
+    if (a.pressCrumb >= 0) {
+        // An address bar button comes up: gone to when it comes up on itself.
+        const int i = a.pressCrumb;
+        const bool onIt = i < (int)a.crumbs.size() && PtInRect(&a.crumbs[i].box, p);
+        if (onIt && a.crumbs[i].path.empty()) {
+            // The machine's button has nowhere to go: its list of drives
+            // opens instead, and the button stays pressed while it is up.
+            showCrumbList(hwnd, a, i, true);  // the list takes the mouse
+            a.pressCrumb = -1;
+            repaint(hwnd);
+            return;
+        }
+        a.pressCrumb = -1;
+        if (GetCapture() == hwnd) ReleaseCapture();
+        if (onIt) a.loadDirectory(a.crumbs[i].path);
+        repaint(hwnd);
+        return;
+    }
     if (GetCapture() == hwnd) ReleaseCapture();
     if (a.pressTitle >= 0) {
         int i = a.pressTitle;
@@ -1246,14 +1385,16 @@ void onDoubleClick(HWND hwnd, App& a, POINT p) {
         repaint(hwnd);
         return;
     }
+    // The address bar's buttons act on the first click of a double one.  After
+    // it the crumbs are laid out anew (the way got shorter), and the second
+    // click would land on whatever is in that place now.
+    if (PtInRect(&a.lay.addrField, p)) return;
     onLButtonDown(hwnd, a, p);
 }
 
-void onKeyDown(HWND hwnd, App& a, WPARAM key) {
-    diagLog(L"KEYDOWN %u sel=%d", (unsigned)key, (int)a.selection.size());
-    const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-    const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-    const bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
+// The key with the modifiers it was pressed with (onKeyDown reads them from
+// the keyboard; the tests pass their own).
+void handleKey(HWND hwnd, App& a, WPARAM key, bool ctrl, bool shift, bool alt) {
     (void)shift;
     switch (key) {
     case VK_RETURN: a.openSelection(); break;
@@ -1261,6 +1402,10 @@ void onKeyDown(HWND hwnd, App& a, WPARAM key) {
     case VK_DELETE: a.deleteSelection(); break;
     case VK_F2: a.renameSelection(); break;
     case VK_F5: a.reload(); break;
+    // Explorer's keys for the address bar: the whole path, selected, to type over.
+    case VK_F4:
+        if (!a.addrEditing) a.beginAddressEdit();
+        break;
     case VK_SPACE:
         if (preview::visible()) preview::hide();
         else if (std::wstring p = a.firstSelectedPath(); !p.empty()) preview::show(hwnd, p);
@@ -1294,6 +1439,7 @@ void onKeyDown(HWND hwnd, App& a, WPARAM key) {
     case 'C': if (ctrl) a.copySelection(false); break;
     case 'X': if (ctrl) a.copySelection(true); break;
     case 'V': if (ctrl) a.paste(); break;
+    case 'L': if (ctrl && !a.addrEditing) a.beginAddressEdit(); break;
     case '1': if (ctrl) a.setViewMode(ViewMode::Details); break;
     case '2': if (ctrl) a.setViewMode(ViewMode::List); break;
     case '3': if (ctrl) a.setViewMode(ViewMode::Icons); break;
@@ -1301,6 +1447,14 @@ void onKeyDown(HWND hwnd, App& a, WPARAM key) {
     }
     a.clampScroll();
     repaint(hwnd);
+}
+
+void onKeyDown(HWND hwnd, App& a, WPARAM key) {
+    diagLog(L"KEYDOWN %u sel=%d", (unsigned)key, (int)a.selection.size());
+    const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    const bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
+    handleKey(hwnd, a, key, ctrl, shift, alt);
 }
 
 void onMouseWheel(HWND hwnd, App& a, POINT p, int delta) {
@@ -1469,6 +1623,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         a.scrollDrag = 0;
         a.splitterDrag = false;
         a.pressSelectedRow = -1;
+        // An address bar button that was held when the mouse was taken is no
+        // longer held - unless it is the machine's, pressed while its own list is up.
+        if (a.pressCrumb >= 0 && !folderListWindow()) {
+            a.pressCrumb = -1;
+            repaintRegion(hwnd, a, a.lay.addrField);
+        }
         return 0;
     case WM_MOUSEMOVE: {
         POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
@@ -1490,6 +1650,11 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (tree.right > tree.left) repaintRegion(hwnd, a, tree);
             if (tool.right > tool.left) repaintRegion(hwnd, a, tool);
             if (menu.right > menu.left) repaintRegion(hwnd, a, menu);
+        }
+        if (a.hoverCrumb >= 0 || a.hoverCrumbMore >= 0 || a.hoverAddrMore) {
+            a.hoverCrumb = a.hoverCrumbMore = -1;
+            a.hoverAddrMore = false;
+            repaintRegion(hwnd, a, a.lay.addrField);
         }
         return 0;
     }
@@ -1557,6 +1722,16 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             onKeyDown(hwnd, a, wp);
             return 0;
         }
+        // Alt+D, as the bar's own label says: the address bar (label "地址(D)").
+        if ((wp == 'D' || wp == 'd') && !a.addrEditing) {
+            a.beginAddressEdit();
+            return 0;
+        }
+        break;
+    case WM_SYSCHAR:
+        // The character of that Alt+D follows into whichever window has the
+        // focus by then: it is no mnemonic of ours.
+        if (wp == 'D' || wp == 'd') return 0;
         break;
     case WM_DROPFILES:
         onDropFiles(hwnd, a, (HDROP)wp);
@@ -2196,6 +2371,15 @@ void registerMainClass(HINSTANCE instance) {
     RegisterClassExW(&wc);
 }
 
+// Puts the main window at its size and place, without activating it.
+void placeWindow(HWND hwnd, int x, int y, int w, int h) {
+    // SWP_FRAMECHANGED: the window is asked where its client area goes even
+    // when its size does not change here.  Without it a window created at the
+    // size it keeps (at 100 % scaling, where the saved size is the physical
+    // one) was never asked, and kept the system's title bar above its own.
+    SetWindowPos(hwnd, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+}
+
 // One frame of pixels, top-down.
 struct Frame {
     int w = 0, h = 0;
@@ -2371,9 +2555,11 @@ void frameTestStep(HWND driver) {
         const RECT r = g_app.listRowRect(row);
         click(r.left + pxOf(g_app.scale, 30), (r.top + r.bottom) / 2);
     };
+    // The blank part of the address bar: a click there turns the whole path
+    // into an edit box (the rest of the bar is buttons, see the crumb test).
     const auto clickAddress = [&] {
-        click(g_app.lay.addrField.left + pxOf(g_app.scale, 40),
-              (g_app.lay.addrField.top + g_app.lay.addrField.bottom) / 2);
+        const RECT b = g_app.lay.addrBlank;
+        click((b.left + b.right) / 2, (b.top + b.bottom) / 2);
     };
     switch (d.step) {
     case 0:
@@ -2466,6 +2652,465 @@ void frameTestStep(HWND driver) {
 LRESULT CALLBACK frameTestProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_TIMER && wp == kFrameTestTimer) {
         frameTestStep(hwnd);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+// -------------------------------------------------------------- crumb test
+// The address bar's buttons in the real window, driven by posted input, with
+// what the desktop shows read back after every step - the list under an arrow
+// included, read back the same way.  The pointer is moved by calling what the
+// window procedure calls: a posted move is followed at once by a "pointer left
+// the window" (the pointer is not there), and that clears the hover before it
+// could be seen.
+
+constexpr UINT_PTR kCrumbTestTimer = 0x4D47;
+constexpr wchar_t kCrumbTestClass[] = L"MyOldComputerCrumbTest";
+constexpr int kCrumbTestEnd = 36;  // the step past the last one
+
+bool isFaceHi(COLORREF px) { return (px & 0xFFFFFF) == (Theme::faceHi & 0xFFFFFF); }
+bool isPlainWhite(COLORREF px) { return (px & 0xFFFFFF) == 0xFFFFFF; }
+bool isFace(COLORREF px) { return (px & 0xFFFFFF) == (Theme::face & 0xFFFFFF); }
+
+struct CrumbDrive {
+    HWND main = nullptr;
+    int step = 0;
+    int wait = 0;   // ticks to let what was posted get through first
+    int ticks = 0;  // the watchdog's count
+    std::wstring way, dd, aa, bb, root, hiddenTarget;
+    bool baseline = false;
+    int k = -1;  // the crumb hovered and pressed
+    int hoverArea = 1, hoverShown = 0, hoverCleared = 0, hoverStale = 0;
+    bool pressed = false, released = false;
+    int pressShown = 0;
+    bool listCame = false, listRight = false, arrowDown = false, hotPainted = false, hotMoved = false;
+    bool chose = false;
+    bool hiddenList = false, wentHidden = false;
+    bool clicked = false, doubleOk = false;
+    bool editByBlank = false, editByF4 = false, editByCtrlL = false, editByAltD = false;
+    bool editsClosed = true;
+    int editHighlight = 0;
+    bool machineList = false, machineClosed = false;
+    bool switchFrom = false, switched = false, switchClosed = false;
+    bool longList = false, listFits = false, longClosed = false;
+    int listWidth = 0;
+    int stale[11] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    RECT where[11] = {};
+};
+CrumbDrive g_crumb;
+
+void crumbTestStep(HWND driver) {
+    CrumbDrive& d = g_crumb;
+    KillTimer(driver, kCrumbTestTimer);
+    if (++d.ticks > 400) {  // ten seconds: something did not answer - give up, do not hang
+        d.step = kCrumbTestEnd;
+        if (HWND l = folderListWindow()) DestroyWindow(l);
+        return;
+    }
+    const auto later = [driver] { SetTimer(driver, kCrumbTestTimer, 25, nullptr); };
+    if (d.step >= kCrumbTestEnd) {
+        // A list the test did not mean to leave open: it is closed, or the
+        // loop it runs in never ends.
+        if (HWND l = folderListWindow()) {
+            PostMessageW(l, WM_KEYDOWN, VK_ESCAPE, 0);
+            later();
+        }
+        return;
+    }
+    if (d.wait-- > 0) {
+        later();
+        return;
+    }
+    d.wait = 0;
+    const auto post = [](HWND w, UINT msg, WPARAM wp, int x, int y) {
+        PostMessageW(w, msg, wp, MAKELPARAM((short)x, (short)y));
+    };
+    const auto click = [&](int x, int y) {
+        post(d.main, WM_LBUTTONDOWN, MK_LBUTTON, x, y);
+        post(d.main, WM_LBUTTONUP, 0, x, y);
+    };
+    const auto settle = [&] { UpdateWindow(d.main); };
+    const auto compare = [&](int which, const wchar_t* name) {
+        const Frame shown = shownFrame(d.main);
+        const Frame fresh = renderedFrame(g_app);
+        keepFrames(name, shown, fresh);
+        d.stale[which] = frameMismatch(shown, fresh, &d.where[which]);
+    };
+    const auto middle = [](const RECT& r) {
+        return POINT{(r.left + r.right) / 2, (r.top + r.bottom) / 2};
+    };
+    const auto crumbOf = [](const wchar_t* title) {
+        for (int i = 0; i < (int)g_app.crumbs.size(); ++i)
+            if (g_app.crumbs[i].title == title) return i;
+        return -1;
+    };
+    // The padding at the left of a crumb's button: no text or icon there, so
+    // a hover or a press shows in it and nothing else does.
+    const auto pad = [&](int crumb) {
+        const RECT& b = g_app.crumbs[crumb].box;
+        return RECT{b.left + 1, b.top + 1, b.left + pxOf(g_app.scale, 5), b.bottom - 1};
+    };
+    const auto area = [](const RECT& r) {
+        return (int)(r.right - r.left) * (int)(r.bottom - r.top);
+    };
+    // The list under an arrow, while it is up: its rows, and what it shows of
+    // the row `hotRow` (and of `otherRow`): the navy of a highlighted row.
+    struct Seen {
+        HWND list = nullptr;
+        FolderListInfo info;
+        const std::vector<FolderRow>* rows = nullptr;
+        int hotNavy = 0, otherNavy = 0, rowArea = 1;
+    };
+    const auto seeList = [&](int hotRow, int otherRow) {
+        Seen s;
+        s.list = folderListWindow();
+        if (!s.list || !folderListInfo(s.list, &s.info)) return s;
+        s.rows = folderListRows(s.list);
+        const Frame f = shownFrame(s.list);
+        const RECT r = s.info.rows;
+        s.rowArea = std::max(1, area(r) / std::max(1, s.info.visible));
+        const auto row = [&](int i) {
+            const int y = r.top + (i - s.info.first) * s.info.rowH;
+            return RECT{r.left, y, r.right, y + s.info.rowH};
+        };
+        if (hotRow >= s.info.first && hotRow < s.info.first + s.info.visible)
+            s.hotNavy = frameCount(f, row(hotRow), isNavy);
+        if (otherRow >= s.info.first && otherRow < s.info.first + s.info.visible)
+            s.otherNavy = frameCount(f, row(otherRow), isNavy);
+        return s;
+    };
+    // The whole path, typed into the address bar, and Enter.
+    const auto typePath = [&](const std::wstring& p) {
+        if (!g_app.addrEdit) return;
+        SetWindowTextW(g_app.addrEdit, p.c_str());
+        post(g_app.addrEdit, WM_KEYDOWN, VK_RETURN, 0, 0);
+    };
+    const auto leaveEdit = [&] {
+        if (g_app.addrEdit) post(g_app.addrEdit, WM_KEYDOWN, VK_ESCAPE, 0, 0);
+    };
+
+    switch (d.step) {
+    case 0: {
+        settle();
+        const Frame shown = shownFrame(d.main);
+        const Frame fresh = renderedFrame(g_app);
+        keepFrames(L"crumb-baseline", shown, fresh);
+        d.baseline = frameMismatch(shown, fresh, &d.where[0]) == 0;
+        d.k = crumbOf(L"cc");
+        d.wait = 2;
+        break;
+    }
+    case 1: {  // the pointer is on a crumb: its button lights up on the spot
+        const bool there = d.k >= g_app.crumbFirst && d.k >= 0;
+        if (there) onMouseMove(d.main, g_app, middle(g_app.crumbs[d.k].box));
+        settle();
+        const RECT p = there ? pad(d.k) : RECT{0, 0, 0, 0};
+        d.hoverArea = std::max(1, area(p));
+        d.hoverShown = frameCount(shownFrame(d.main), p, isFaceHi);
+        const Frame shown = shownFrame(d.main);
+        const Frame fresh = renderedFrame(g_app);
+        keepFrames(L"crumb-hover", shown, fresh);
+        d.hoverStale = frameMismatch(shown, fresh, &d.where[0]);
+        break;
+    }
+    case 2:  // the pointer leaves the window
+        post(d.main, WM_MOUSELEAVE, 0, 0, 0);
+        d.wait = 3;
+        break;
+    case 3: {
+        settle();
+        const bool there = d.k >= g_app.crumbFirst && d.k >= 0;
+        const RECT p = there ? pad(d.k) : RECT{0, 0, 0, 0};
+        d.hoverCleared = frameCount(shownFrame(d.main), p, isFaceHi);
+        if (there) {
+            const POINT c = middle(g_app.crumbs[d.k].box);
+            post(d.main, WM_LBUTTONDOWN, MK_LBUTTON, c.x, c.y);
+        }
+        d.wait = 3;
+        break;
+    }
+    case 4: {  // held down: the button shows pressed; let go of it far away
+        settle();
+        const bool there = d.k >= g_app.crumbFirst && d.k >= 0;
+        const RECT p = there ? pad(d.k) : RECT{0, 0, 0, 0};
+        d.pressed = there && g_app.pressCrumb == d.k && g_app.current == d.way;
+        d.pressShown = frameCount(shownFrame(d.main), p, isFace);
+        const RECT vp = g_app.lay.listViewport;
+        post(d.main, WM_LBUTTONUP, 0, (vp.left + vp.right) / 2, (vp.top + vp.bottom) / 2);
+        d.wait = 4;
+        break;
+    }
+    case 5: {  // nothing happened; now the v after "dd": its list opens inside that press
+        settle();
+        const bool there = d.k >= g_app.crumbFirst && d.k >= 0;
+        const RECT p = there ? pad(d.k) : RECT{0, 0, 0, 0};
+        d.released = d.pressed && g_app.pressCrumb == -1 && g_app.current == d.way &&
+                     frameCount(shownFrame(d.main), p, isPlainWhite) == d.hoverArea;
+        compare(1, L"crumb-release");
+        const int dd = crumbOf(L"dd");
+        if (dd >= g_app.crumbFirst && dd >= 0) {
+            const POINT c = middle(g_app.crumbs[dd].more);
+            post(d.main, WM_LBUTTONDOWN, MK_LBUTTON, c.x, c.y);
+        }
+        d.wait = 3;
+        break;
+    }
+    case 6: {  // ee and yy, ee (the way) highlighted; the v on screen is pressed
+        const Seen s = seeList(0, 1);
+        d.listCame = s.list != nullptr;
+        const int dd = crumbOf(L"dd");
+        const RECT m = dd >= 0 ? g_app.crumbs[dd].more : RECT{0, 0, 0, 0};
+        d.arrowDown = dd >= 0 && g_app.pressCrumbMore == dd &&
+                      frameCount(shownFrame(d.main), m, isFace) > std::max(1, area(m) / 4);
+        d.listRight = s.rows && s.rows->size() == 2 && (*s.rows)[0].title == L"ee" &&
+                      (*s.rows)[1].title == L"yy" && s.info.highlighted == 0;
+        d.hotPainted = s.hotNavy > s.rowArea / 2 && s.otherNavy == 0;
+        compare(0, L"crumb-list");  // the bar under the list, v pressed and all
+        if (s.list) post(s.list, WM_KEYDOWN, VK_DOWN, 0, 0);
+        d.wait = 3;
+        break;
+    }
+    case 7: {  // Down: the highlight is on the next row; Enter: gone to it
+        const Seen s = seeList(1, 0);
+        d.hotMoved = s.list && s.info.highlighted == 1 && s.hotNavy > s.rowArea / 2 &&
+                     s.otherNavy == 0;
+        if (s.list) post(s.list, WM_KEYDOWN, VK_RETURN, 0, 0);
+        d.wait = 5;
+        break;
+    }
+    case 8: {  // the list is gone and so is the press of its v; now the < of the crumbs out of view
+        settle();
+        d.chose = !folderListWindow() && g_app.current == d.dd + L"\\yy" && g_app.pressCrumbMore == -1;
+        compare(2, L"crumb-choose");
+        const POINT c = middle(g_app.lay.addrMore);
+        post(d.main, WM_LBUTTONDOWN, MK_LBUTTON, c.x, c.y);
+        d.wait = 3;
+        break;
+    }
+    case 9: {  // them, the machine first; a click on the last one goes there
+        const Seen s = seeList(-1, -1);
+        d.hiddenList = s.list && s.rows && s.rows->size() == (size_t)g_app.crumbFirst &&
+                       s.info.highlighted == -1 && !s.rows->empty() &&
+                       (*s.rows)[0].kind == TreeNode::Machine;
+        if (s.list && s.rows && !s.rows->empty()) {
+            const int row = std::min((int)s.rows->size() - 1, s.info.first + s.info.visible - 1);
+            const RECT r = s.info.rows;
+            const int x = r.left + (r.right - r.left) / 3;
+            const int y = r.top + (row - s.info.first) * s.info.rowH + s.info.rowH / 2;
+            d.hiddenTarget = (*s.rows)[row].path;
+            post(s.list, WM_LBUTTONDOWN, MK_LBUTTON, x, y);
+            post(s.list, WM_LBUTTONUP, 0, x, y);
+        }
+        d.wait = 5;
+        break;
+    }
+    case 10:  // gone to it, and it is the last crumb now
+        settle();
+        d.wentHidden = !folderListWindow() && !d.hiddenTarget.empty() &&
+                       g_app.current == d.hiddenTarget && !g_app.pressAddrMore;
+        compare(3, L"crumb-hidden");
+        post(d.main, WM_KEYDOWN, VK_F4, 0, 0);
+        d.wait = 3;
+        break;
+    case 11:
+        d.editByF4 = g_app.addrEditing && IsWindow(g_app.addrEdit);
+        typePath(d.bb);
+        d.wait = 5;
+        break;
+    case 12: {  // click the button of "aa", two levels up
+        settle();
+        const int aa = crumbOf(L"aa");
+        if (g_app.current == d.bb && aa >= g_app.crumbFirst && aa >= 0) {
+            const POINT c = middle(g_app.crumbs[aa].box);
+            click(c.x, c.y);
+        }
+        d.wait = 4;
+        break;
+    }
+    case 13:
+        settle();
+        d.clicked = g_app.current == d.aa;
+        compare(4, L"crumb-click");
+        post(d.main, WM_KEYDOWN, VK_F4, 0, 0);
+        d.wait = 3;
+        break;
+    case 14:
+        typePath(d.way);
+        d.wait = 5;
+        break;
+    case 15: {  // a double click on "aa": the first click goes there, and the second lands on whatever is in its place now
+        settle();
+        const int aa = crumbOf(L"aa");
+        if (g_app.current == d.way && aa >= g_app.crumbFirst && aa >= 0) {
+            const POINT c = middle(g_app.crumbs[aa].box);
+            post(d.main, WM_LBUTTONDOWN, MK_LBUTTON, c.x, c.y);
+            post(d.main, WM_LBUTTONUP, 0, c.x, c.y);
+            post(d.main, WM_LBUTTONDBLCLK, MK_LBUTTON, c.x, c.y);
+            post(d.main, WM_LBUTTONUP, 0, c.x, c.y);
+        }
+        d.wait = 5;
+        break;
+    }
+    case 16: {  // only once: it is at "aa", nothing opened; then the blank part
+        settle();
+        d.doubleOk = g_app.current == d.aa && !folderListWindow();
+        compare(5, L"crumb-double");
+        const POINT c = middle(g_app.lay.addrBlank);
+        click(c.x, c.y);
+        d.wait = 3;
+        break;
+    }
+    case 17:  // the whole path is in the edit box on screen, selected
+        settle();
+        d.editByBlank = g_app.addrEditing && IsWindow(g_app.addrEdit);
+        d.editHighlight = frameCount(shownFrame(d.main), g_app.lay.addrField, isHighlight);
+        leaveEdit();
+        d.wait = 4;
+        break;
+    case 18:  // Escape: the buttons are back
+        settle();
+        d.editsClosed = d.editsClosed && !g_app.addrEditing;
+        compare(6, L"crumb-edit-esc");
+        handleKey(d.main, g_app, 'L', true, false, false);  // Ctrl+L
+        d.wait = 3;
+        break;
+    case 19:
+        d.editByCtrlL = g_app.addrEditing && IsWindow(g_app.addrEdit);
+        leaveEdit();
+        d.wait = 4;
+        break;
+    case 20:
+        settle();
+        d.editsClosed = d.editsClosed && !g_app.addrEditing;
+        post(d.main, WM_SYSKEYDOWN, 'D', 0, 0);  // Alt+D
+        d.wait = 3;
+        break;
+    case 21:
+        d.editByAltD = g_app.addrEditing && IsWindow(g_app.addrEdit);
+        leaveEdit();
+        d.wait = 4;
+        break;
+    case 22:
+        settle();
+        d.editsClosed = d.editsClosed && !g_app.addrEditing;
+        compare(7, L"crumb-keys");
+        post(d.main, WM_KEYDOWN, VK_F4, 0, 0);
+        d.wait = 3;
+        break;
+    case 23:
+        typePath(d.root);
+        d.wait = 5;
+        break;
+    case 24: {  // the root of the drive: the machine's button is in view, and opens its drives
+        settle();
+        if (g_app.current == d.root && g_app.crumbs.size() >= 2) {
+            const POINT c = middle(g_app.crumbs[0].box);
+            click(c.x, c.y);
+        }
+        d.wait = 4;
+        break;
+    }
+    case 25: {  // the drives, this one highlighted
+        const Seen s = seeList(-1, -1);
+        d.machineList = s.rows && !s.rows->empty() && s.info.highlighted >= 0 &&
+                        _wcsicmp((*s.rows)[s.info.highlighted].path.c_str(), d.root.c_str()) == 0;
+        if (s.list) post(s.list, WM_KEYDOWN, VK_ESCAPE, 0, 0);
+        d.wait = 4;
+        break;
+    }
+    case 26:
+        settle();
+        d.machineClosed = !folderListWindow() && g_app.current == d.root;
+        compare(8, L"crumb-machine");
+        post(d.main, WM_KEYDOWN, VK_F4, 0, 0);
+        d.wait = 3;
+        break;
+    case 27:
+        typePath(d.bb);
+        d.wait = 5;
+        break;
+    case 28: {  // the v after "crumbs"
+        settle();
+        const int crumbs = crumbOf(L"crumbs");
+        if (g_app.current == d.bb && crumbs >= g_app.crumbFirst && crumbs >= 0) {
+            const POINT c = middle(g_app.crumbs[crumbs].more);
+            post(d.main, WM_LBUTTONDOWN, MK_LBUTTON, c.x, c.y);
+        }
+        d.wait = 3;
+        break;
+    }
+    case 29: {  // its list; a press (it has the mouse) on the v after "aa" opens that one's list instead
+        const Seen s = seeList(-1, -1);
+        d.switchFrom = s.rows && s.rows->size() == 2 && s.info.highlighted == 0 &&
+                       (*s.rows)[0].title == L"aa";
+        const int aa = crumbOf(L"aa");
+        if (s.list && aa >= 0) {
+            POINT c = middle(g_app.crumbs[aa].more);
+            ClientToScreen(d.main, &c);
+            ScreenToClient(s.list, &c);
+            post(s.list, WM_LBUTTONDOWN, MK_LBUTTON, c.x, c.y);
+        }
+        d.wait = 4;
+        break;
+    }
+    case 30: {
+        const Seen s = seeList(-1, -1);
+        d.switched = s.rows && s.rows->size() == 2 && s.info.highlighted == 0 &&
+                     (*s.rows)[0].title == L"bb" && (*s.rows)[1].title == L"zz" &&
+                     g_app.current == d.bb;
+        if (s.list) post(s.list, WM_KEYDOWN, VK_ESCAPE, 0, 0);
+        d.wait = 4;
+        break;
+    }
+    default: {
+        settle();
+        d.switchClosed = !folderListWindow() && g_app.current == d.bb;
+        compare(9, L"crumb-switch");
+        post(d.main, WM_KEYDOWN, VK_F4, 0, 0);  // to "cc\dd", for the list of "cc >"
+        d.wait = 3;
+        break;
+    }
+    case 32:
+        typePath(d.dd);  // in "cc\dd": "cc >" is there, with dd under it
+        d.wait = 5;
+        break;
+    case 33: {  // the v after "cc": dd, and a folder with a 255-character name
+        settle();
+        const int cc = crumbOf(L"cc");
+        if (g_app.current == d.dd && cc >= g_app.crumbFirst && cc >= 0) {
+            const POINT c = middle(g_app.crumbs[cc].more);
+            post(d.main, WM_LBUTTONDOWN, MK_LBUTTON, c.x, c.y);
+        }
+        d.wait = 3;
+        break;
+    }
+    case 34: {
+        const Seen s = seeList(-1, -1);
+        RECT wr{};
+        MONITORINFO mi{sizeof(mi)};
+        GetMonitorInfoW(MonitorFromWindow(s.list ? s.list : d.main, MONITOR_DEFAULTTONEAREST), &mi);
+        d.listWidth = s.list && GetWindowRect(s.list, &wr) ? (int)(wr.right - wr.left) : 0;
+        d.longList = s.rows && s.rows->size() == 2 && s.info.highlighted == 0 &&
+                     (*s.rows)[1].title.size() == 255;
+        d.listFits = d.listWidth > 0 && d.listWidth <= (int)(mi.rcWork.right - mi.rcWork.left);
+        if (s.list) post(s.list, WM_KEYDOWN, VK_ESCAPE, 0, 0);
+        d.wait = 4;
+        break;
+    }
+    case 35:
+        settle();
+        d.longClosed = !folderListWindow();
+        compare(10, L"crumb-long");
+        break;
+    }
+    ++d.step;
+    if (d.step < kCrumbTestEnd) later();
+}
+
+LRESULT CALLBACK crumbTestProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_TIMER && wp == kCrumbTestTimer) {
+        crumbTestStep(hwnd);
         return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
@@ -3904,6 +4549,236 @@ int runUiTest(App& app) {
     check(L"转到别的目录、刷新列表：都说一声画面过期了", navSays && reloadSays);
     app.loadDirectory(base, false);
 
+    // The address bar: every folder on the way to the current one is a button,
+    // with a v after it that lists its subfolders - Explorer's breadcrumbs.
+    const std::wstring crumbsDir = base + L"\\crumbs";
+    const std::wstring crumbAa = crumbsDir + L"\\aa", crumbBb = crumbAa + L"\\bb",
+                        crumbCc = crumbBb + L"\\cc", crumbDd = crumbCc + L"\\dd",
+                        crumbWay = crumbDd + L"\\ee";
+    const std::wstring crumbLong(255, L'W');  // a folder name of the full 255 characters
+    {
+        for (const std::wstring& dir : {crumbsDir, crumbAa, crumbBb, crumbCc, crumbDd, crumbWay,
+                                        crumbsDir + L"\\zz", crumbAa + L"\\zz", crumbDd + L"\\yy"}) {
+            CreateDirectoryW(dir.c_str(), nullptr);
+        }
+        const HANDLE h = CreateFileW((crumbAa + L"\\file.txt").c_str(), GENERIC_WRITE, 0, nullptr,
+                                     CREATE_ALWAYS, 0, nullptr);
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+        // A folder with the longest name there can be, made of the widest
+        // letter (5,000 px and more at 150 %): its row has to fit on the screen.
+        CreateDirectoryW((L"\\\\?\\" + crumbCc + L"\\" + crumbLong).c_str(), nullptr);
+    }
+    app.loadDirectory(crumbWay, false);
+    const int crumbN = (int)app.crumbs.size();
+    const auto crumbPx = [&app](int v) { return pxOf(app.scale, v); };
+    const auto middle = [](const RECT& r) {
+        return POINT{(r.left + r.right) / 2, (r.top + r.bottom) / 2};
+    };
+    {
+        const std::wstring name = L"地址栏：从我的电脑到当前文件夹，一级一个按钮";
+        std::wstring s = name;
+        const std::wstring root = fsx::rootOf(crumbWay);
+        if (crumbN < 6 || !app.crumbs[0].path.empty() || app.crumbs[crumbN - 1].path != crumbWay)
+            s += L"：两头不对";
+        else if (_wcsicmp(app.crumbs[1].path.c_str(), root.c_str()) != 0)
+            s += L"：第二级不是盘";
+        else {
+            for (int i = 2; i < crumbN; ++i) {
+                const Crumb& c = app.crumbs[i];
+                if (_wcsicmp(fsx::parentPath(c.path).c_str(), app.crumbs[i - 1].path.c_str()) != 0) {
+                    s += L"：第 " + std::to_wstring(i + 1) + L" 级不在上一级里面";
+                    break;
+                }
+                if (c.title != fsx::fileName(c.path)) {
+                    s += L"：第 " + std::to_wstring(i + 1) + L" 级的名字不是文件夹名";
+                    break;
+                }
+            }
+        }
+        check(s.c_str(), s == name);
+    }
+    // Every crumb in view, from left to right without a gap, inside the field.
+    const auto placedInARow = [&app, middle](std::wstring& s, int from) {
+        const RECT inner = app.addressInner();
+        // In a row that starts at the left edge, the first crumb is at the
+        // edge; one that is flush right starts wherever it starts.
+        int x = from == 0 ? inner.left : app.crumbs[from].box.left;
+        for (int i = from; i < (int)app.crumbs.size(); ++i) {
+            const Crumb& c = app.crumbs[i];
+            const bool last = i == (int)app.crumbs.size() - 1;
+            if (c.box.left != x || c.box.top != inner.top || c.box.bottom != inner.bottom ||
+                c.box.right > inner.right) {
+                s += L"：第 " + std::to_wstring(i + 1) + L" 级的位置不对";
+                break;
+            }
+            x = last ? c.box.right : c.more.right;
+            if (!last && (c.more.left != c.box.right || c.more.top != inner.top)) {
+                s += L"：第 " + std::to_wstring(i + 1) + L" 级后面缺一个 v";
+                break;
+            }
+        }
+        return x;
+    };
+    {
+        const std::wstring name = L"地址栏放得下：从左排到右，一级不落，空白留在最后";
+        std::wstring s = name;
+        app.relayout(2600, 900);
+        const int blankMin = crumbPx(20);
+        if (app.crumbFirst != 0 || app.lay.addrMore.right > app.lay.addrMore.left) {
+            s += L"：却收起了几级";
+        } else {
+            const int x = placedInARow(s, 0);
+            const RECT blank = app.lay.addrBlank;
+            if (s == name && (blank.left != x || blank.top != app.addressInner().top ||
+                              blank.bottom != app.addressInner().bottom ||
+                              blank.right != app.addressInner().right))
+                s += L"：空白不在最后一级后面";
+            else if (s == name && blank.right - blank.left < blankMin)
+                s += L"：空白窄得点不上";
+        }
+        check(s.c_str(), s == name);
+    }
+    int hiddenAtNarrow = 0;
+    {
+        const std::wstring name = L"地址栏放不下：当前文件夹完整靠右，放不下的收进最左边的 <，空白还点得上";
+        std::wstring s = name;
+        app.relayout(700, 440);
+        const RECT inner = app.addressInner();
+        const int blankMin = crumbPx(20), moreW = crumbPx(12);
+        const Crumb& last = app.crumbs[crumbN - 1];
+        hiddenAtNarrow = app.crumbFirst;
+        if (app.crumbFirst <= 0) {
+            s += L"：一级也没收，却放不下";
+        } else if (app.lay.addrMore.left != inner.left ||
+                   app.lay.addrMore.right - app.lay.addrMore.left != moreW) {
+            s += L"：< 不在最左边";
+        } else if (last.box.right != inner.right) {
+            s += L"：当前文件夹没有完整靠右";
+        } else {
+            int x = placedInARow(s, app.crumbFirst);
+            if (s == name) {
+                for (int i = 0; i < app.crumbFirst; ++i)
+                    if (app.crumbs[i].box.right > app.crumbs[i].box.left) {
+                        s += L"：收起来的一级还画着";
+                        break;
+                    }
+            }
+            const RECT blank = app.lay.addrBlank;
+            if (s == name && (blank.left != app.lay.addrMore.right ||
+                              blank.right != app.crumbs[app.crumbFirst].box.left))
+                s += L"：空白不在 < 和第一级之间";
+            else if (s == name && blank.right - blank.left < blankMin)
+                s += L"：空白窄得点不上";
+            (void)x;
+        }
+        check(s.c_str(), s == name);
+    }
+    {
+        const std::wstring name = L"地址栏放不下：窗口宽一些，收起的就少一些";
+        app.relayout(1100, 760);
+        const bool ok = hiddenAtNarrow > 0 && app.crumbFirst < hiddenAtNarrow &&
+                        (app.crumbFirst > 0 || app.lay.addrMore.right == app.lay.addrMore.left);
+        check(name.c_str(), ok);
+    }
+    {
+        const std::wstring name = L"地址栏上点在哪儿：某一级的按钮、它后面的 v、收起几级的 <、空白";
+        std::wstring s = name;
+        app.relayout(700, 440);
+        const RECT inner = app.addressInner();
+        const int first = app.crumbFirst;
+        int k = -2;
+        if (app.addressAt(middle(app.lay.addrMore), &k) != AddressHit::More)
+            s += L"：< 不认";
+        else if (app.addressAt(middle(app.crumbs[first].box), &k) != AddressHit::Crumb || k != first)
+            s += L"：第一级可见的按钮不认";
+        else if (app.addressAt(middle(app.crumbs[crumbN - 2].more), &k) != AddressHit::CrumbMore ||
+                 k != crumbN - 2)
+            s += L"：最后一级后面的 v 不认";
+        else if (app.addressAt(middle(app.lay.addrBlank), &k) != AddressHit::Blank)
+            s += L"：空白不认";
+        else if (app.addressAt(POINT{inner.right - 1, inner.top + 1}, &k) != AddressHit::Crumb ||
+                 k != crumbN - 1)
+            s += L"：字段最右边一列该是当前文件夹的按钮";
+        else if (app.addressAt(POINT{app.lay.addrField.left + crumbPx(1), app.lay.addrField.top},
+                               &k) != AddressHit::Blank)
+            s += L"：字段自己的边框该算空白";
+        else if (app.addressAt(middle(app.lay.addrGo), &k) != AddressHit::None)
+            s += L"：转到按钮不是地址栏";
+        check(s.c_str(), s == name);
+    }
+    {
+        const std::wstring name = L"每级的 v 列出那一级的子文件夹（文件不算），当前所在的那个是选中行";
+        std::wstring s = name;
+        const auto crumbOf = [&app](const wchar_t* title) {
+            for (int i = 0; i < (int)app.crumbs.size(); ++i)
+                if (app.crumbs[i].title == title) return i;
+            return -1;
+        };
+        int current = -9;
+        const int aa = crumbOf(L"aa");
+        const std::vector<FolderRow> rows = app.crumbRows(aa, &current);
+        if (rows.size() != 2) {
+            s += L"：aa 的列表里有 " + std::to_wstring(rows.size()) + L" 行，该是 2 行";
+        } else if (rows[0].title != L"bb" || rows[1].title != L"zz" ||
+                   rows[0].path != crumbBb || rows[1].kind != TreeNode::Folder) {
+            s += L"：aa 的列表里不是 bb、zz";
+        } else if (current != 0) {
+            s += L"：选中的不是 bb";
+        }
+        int driveRow = -9;
+        const std::vector<FolderRow> drives = app.crumbRows(0, &driveRow);
+        if (drives.empty()) {
+            s += L"：我的电脑下一台盘也没有";
+        } else if (driveRow < 0 || _wcsicmp(drives[driveRow].path.c_str(), app.crumbs[1].path.c_str()) != 0) {
+            s += L"：我的电脑里没选中当前这个盘";
+        }
+        check(s.c_str(), s == name);
+    }
+    {
+        const std::wstring name = L"收起来的几级按顺序列在 < 里，我的电脑在最前";
+        std::wstring s = name;
+        app.relayout(700, 440);
+        const std::vector<FolderRow> rows = app.hiddenCrumbRows();
+        if (rows.size() != (size_t)app.crumbFirst) {
+            s += L"：行数不对";
+        } else {
+            for (size_t i = 0; i < rows.size(); ++i) {
+                const TreeNode::Kind kind = i == 0       ? TreeNode::Machine
+                                            : i == 1     ? TreeNode::Volume
+                                                         : TreeNode::Folder;
+                if (rows[i].title != app.crumbs[i].title || rows[i].path != app.crumbs[i].path ||
+                    rows[i].kind != kind) {
+                    s += L"：第 " + std::to_wstring(i + 1) + L" 行不对";
+                    break;
+                }
+            }
+        }
+        check(s.c_str(), s == name);
+    }
+    {
+        // A crumb's button, pressed and released: the handlers the window
+        // procedure uses, without a window (the real window is the crumb test).
+        const std::wstring name = L"点某一级按钮就去那一级；按住后松开在别处，哪儿也不去";
+        std::wstring s = name;
+        const int bb = crumbN - 4;  // "bb"
+        const POINT on = middle(app.crumbs[bb].box);
+        if (app.crumbs[bb].title != L"bb" || bb < app.crumbFirst) {
+            s += L"：测试要按的那一级不在";
+        } else {
+            POINT elsewhere{app.lay.content.right - 20, app.lay.content.bottom - 20};
+            onLButtonDown(nullptr, app, on);
+            if (app.pressCrumb != bb) s += L"：按下去没有记住是这一级";
+            onLButtonUp(nullptr, app, elsewhere);
+            if (app.current != crumbWay) s += L"：松开在别处却换了目录";
+            onLButtonDown(nullptr, app, on);
+            onLButtonUp(nullptr, app, on);
+            if (app.current != crumbBb || app.crumbs.back().path != crumbBb)
+                s += L"：松开在按钮上却没去";
+            else if (app.pressCrumb != -1) s += L"：去了之后按钮还按着";
+        }
+        check(s.c_str(), s == name);
+    }
+
     // What is on screen is what the state renders - after Enter in the address
     // bar, after leaving it by clicking elsewhere, and after Esc and Enter in
     // the rename box.  These end inside App, where nobody used to say the frame
@@ -3942,8 +4817,7 @@ int runUiTest(App& app) {
             g_app.sidebarVisible = true;
             g_app.loadDirectory(base, false);
             g_app.setViewMode(ViewMode::Details);
-            SetWindowPos(main, nullptr, 0, 0, g_app.width, g_app.height,
-                         SWP_NOZORDER | SWP_NOACTIVATE);
+            placeWindow(main, 0, 0, g_app.width, g_app.height);
             ShowWindow(main, SW_SHOWNOACTIVATE);
             SetWindowPos(main, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
             UpdateWindow(main);
@@ -4011,6 +4885,126 @@ int runUiTest(App& app) {
                      g_frame.fieldCameAgain, g_frame.renamed, g_frame.stale[2], g_frame.where[2]);
     }
 
+    // The address bar's buttons in the real window: the narrowest there is, so
+    // that the way to the folder does not fit and some crumbs are behind the <.
+    {
+        WNDCLASSEXW wc{sizeof(WNDCLASSEXW)};
+        wc.lpfnWndProc = crumbTestProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = kCrumbTestClass;
+        RegisterClassExW(&wc);
+        HWND driver = CreateWindowExW(0, kCrumbTestClass, L"", WS_OVERLAPPED, 0, 0, 100, 100,
+                                      nullptr, nullptr, wc.hInstance, nullptr);  // never shown
+        registerMainClass(wc.hInstance);
+        HWND main = CreateWindowExW(WS_EX_NOACTIVATE, L"MyOldComputerWindow", L"crumb test",
+                                    WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, 0, 0, 0, 0, driver,
+                                    nullptr, wc.hInstance, nullptr);
+        g_crumb = CrumbDrive{};
+        g_crumb.main = main;
+        g_crumb.way = crumbWay;
+        g_crumb.dd = crumbDd;
+        g_crumb.aa = crumbAa;
+        g_crumb.bb = crumbBb;
+        g_crumb.root = fsx::rootOf(crumbWay);
+        if (main) {
+            g_app.hwnd = main;
+            g_app.scale = dpiScaleOfWindow(main);
+            g_app.init(main);
+            g_app.relayout(pxOf(g_app.scale, 700), pxOf(g_app.scale, 440));
+            g_app.sidebarVisible = true;
+            g_app.loadDirectory(crumbWay, false);
+            g_app.setViewMode(ViewMode::Details);
+            placeWindow(main, 0, 0, g_app.width, g_app.height);
+            ShowWindow(main, SW_SHOWNOACTIVATE);
+            SetWindowPos(main, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            UpdateWindow(main);
+            MSG msg;
+            for (SetTimer(driver, kCrumbTestTimer, 60, nullptr);
+                 g_crumb.step < kCrumbTestEnd && GetMessageW(&msg, nullptr, 0, 0) > 0;) {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            KillTimer(driver, kCrumbTestTimer);
+            g_app.hwnd = nullptr;  // the edit is the window's child and goes with it
+            DestroyWindow(main);
+            PeekMessageW(&msg, nullptr, WM_QUIT, WM_QUIT, PM_REMOVE);
+            g_app.addrEdit = nullptr;
+            g_app.addrEditing = false;
+            if (g_app.addrFont) {
+                DeleteObject(g_app.addrFont);
+                g_app.addrFont = nullptr;
+            }
+        }
+        DestroyWindow(driver);
+        // The long-named folder goes now: a path past MAX_PATH is awkward to delete by hand.
+        RemoveDirectoryW((L"\\\\?\\" + crumbCc + L"\\" + crumbLong).c_str());
+
+        std::wstring notes;
+        if (!main) notes += L"窗口没建出来";
+        else if (g_crumb.ticks > 400) notes += L"超时";
+        if (!g_crumb.baseline)
+            notes += L"基准不符，范围 " + std::to_wstring(g_crumb.where[0].left) + L"," +
+                     std::to_wstring(g_crumb.where[0].top) + L" " +
+                     std::to_wstring(g_crumb.where[0].right - g_crumb.where[0].left) + L"x" +
+                     std::to_wstring(g_crumb.where[0].bottom - g_crumb.where[0].top);
+        const auto areaOf = [](const RECT& r) {
+            return std::to_wstring(r.left) + L"," + std::to_wstring(r.top) + L" " +
+                   std::to_wstring(r.right - r.left) + L"x" + std::to_wstring(r.bottom - r.top);
+        };
+        // A verdict that says what was seen: whether the test got where it
+        // meant to, and if so, whether what the state says is on screen.
+        const auto verdict = [&](const wchar_t* name, bool state, int stale, const RECT& where) {
+            std::wstring label = name;
+            if (!notes.empty()) label += L"：" + notes;
+            else if (!state) label += L"：屏幕上不是这样";
+            else if (stale)
+                label += L"：屏幕上有 " + std::to_wstring(stale) + L" 个像素与状态不符，范围 " +
+                         areaOf(where);
+            check(label.c_str(), label == name);
+        };
+        check(L"（测试基准）地址栏：屏幕上的画面读得回来，且与按状态渲染的一致", g_crumb.baseline);
+        verdict(L"指针到某一级按钮上：屏幕上它马上亮起，离开就灭",
+                g_crumb.k >= 0 && g_crumb.hoverShown >= g_crumb.hoverArea * 3 / 4 &&
+                    g_crumb.hoverCleared == 0,
+                g_crumb.hoverStale, g_crumb.where[0]);
+        verdict(L"按住某一级按钮：屏幕上是按下的样子；松开在别处：哪儿也不去",
+                g_crumb.pressed && g_crumb.released && g_crumb.pressShown >= g_crumb.hoverArea * 3 / 4,
+                g_crumb.stale[1], g_crumb.where[1]);
+        verdict(L"点某一级后面的 v：屏幕上列出那一级的子文件夹，v 按下，当前所在的行高亮",
+                g_crumb.listCame && g_crumb.listRight && g_crumb.arrowDown && g_crumb.hotPainted,
+                g_crumb.stale[0], g_crumb.where[0]);
+        verdict(L"列表里按 Down、回车：高亮跟着走，然后去了那一行", g_crumb.hotMoved && g_crumb.chose,
+                g_crumb.stale[2], g_crumb.where[2]);
+        verdict(L"点收起几级的 <：屏幕上列出它们，点一行就去", g_crumb.hiddenList && g_crumb.wentHidden,
+                g_crumb.stale[3], g_crumb.where[3]);
+        verdict(L"点某一级按钮：就去那一级，屏幕上就是它", g_crumb.clicked, g_crumb.stale[4],
+                g_crumb.where[4]);
+        verdict(L"双击某一级按钮：只算一下，停在那一级", g_crumb.doubleOk, g_crumb.stale[5],
+                g_crumb.where[5]);
+        verdict(L"点地址栏的空白处：整条路径在输入框里；Esc 回到按钮",
+                g_crumb.editByBlank && g_crumb.editHighlight > 0 && g_crumb.editsClosed,
+                g_crumb.stale[6], g_crumb.where[6]);
+        verdict(L"F4、Ctrl+L、Alt+D：同样是整条路径的输入框，Esc 都回得来",
+                g_crumb.editByF4 && g_crumb.editByCtrlL && g_crumb.editByAltD, g_crumb.stale[7],
+                g_crumb.where[7]);
+        verdict(L"点我的电脑：屏幕上列出各个盘，当前盘高亮；Esc 关上",
+                g_crumb.machineList && g_crumb.machineClosed, g_crumb.stale[8], g_crumb.where[8]);
+        verdict(L"列表开着时点另一个 v：直接换成那一个的列表",
+                g_crumb.switchFrom && g_crumb.switched && g_crumb.switchClosed, g_crumb.stale[9],
+                g_crumb.where[9]);
+        {
+            const std::wstring name = L"列表里有一个 255 个字符的名字：列表不比屏幕宽，Esc 关得上";
+            std::wstring s = name;
+            if (!notes.empty()) s += L"：" + notes;
+            else if (!g_crumb.longList) s += L"：列表里不是那两行";
+            else if (!g_crumb.listFits) s += L"：列表宽 " + std::to_wstring(g_crumb.listWidth) + L"，比屏幕宽";
+            else if (!g_crumb.longClosed) s += L"：Esc 之后列表还在";
+            else if (g_crumb.stale[10])
+                s += L"：Esc 之后屏幕上有 " + std::to_wstring(g_crumb.stale[10]) + L" 个像素与状态不符";
+            check(s.c_str(), s == name);
+        }
+    }
+
     // Paint benchmark: catches accidental full-window repaint storms.
     app.setViewMode(ViewMode::Details);
     app.relayout(1100, 760);
@@ -4030,6 +5024,10 @@ int runUiTest(App& app) {
     ReleaseDC(nullptr, screen);
     std::wstring frameLabel = L"渲染20帧 " + std::to_wstring(frameMs) + L"ms";
     check(frameLabel.c_str(), frameMs < 2000);
+    // The test's folder goes with the test.  (Runs used to leave it behind in
+    // %TEMP%, one per run; and this one's path may be past MAX_PATH.)
+    std::error_code ignored;
+    std::filesystem::remove_all(L"\\\\?\\" + base, ignored);
     return 0;
 }
 
@@ -4220,6 +5218,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
         const std::wstring scratch = std::wstring(temp) + L"moc-uitest-settings.ini";
         DeleteFileW(scratch.c_str());
         SetEnvironmentVariableW(L"MOC_SETTINGS_FILE", scratch.c_str());
+        // The test's lists stay in the background: the machine is somebody's.
+        SetEnvironmentVariableW(L"MOC_NO_FOREGROUND", L"1");
         App app;
         int code = runUiTest(app);
         OleUninitialize();
@@ -4240,7 +5240,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
         y = (GetSystemMetrics(SM_CYSCREEN) - h) / 2;
     }
 
-    HWND hwnd = CreateWindowExW(WS_EX_APPWINDOW, L"MyOldComputerWindow", L"My Old Computer",
+    // An instance that stays in the background (a test's, see staysInBackground)
+    // is never activated, not even by a click of its own.
+    const DWORD exStyle = WS_EX_APPWINDOW | (staysInBackground() ? WS_EX_NOACTIVATE : 0);
+    HWND hwnd = CreateWindowExW(exStyle, L"MyOldComputerWindow", L"My Old Computer",
                                 WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, x, y, w, h, nullptr, nullptr,
                                 instance, nullptr);
     if (!hwnd) return 1;
@@ -4257,7 +5260,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
         x = (GetSystemMetrics(SM_CXSCREEN) - physicalW) / 2;
         y = (GetSystemMetrics(SM_CYSCREEN) - physicalH) / 2;
     }
-    SetWindowPos(hwnd, nullptr, x, y, physicalW, physicalH, SWP_NOZORDER | SWP_NOACTIVATE);
+    placeWindow(hwnd, x, y, physicalW, physicalH);
     g_app.relayout(physicalW, physicalH);
     g_app.demo = hasArg(args, L"--demo");
     std::wstring startPath = argValue(args, L"--path");

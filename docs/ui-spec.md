@@ -95,11 +95,38 @@ the hand-drawn set.  macOS draws the icons in `Icons.swift` per extension.
   Delete moves to the Trash / Recycle Bin.
 - Sizes use the same units on both platforms (`字节`/KB/MB/GB); dates are
   `yyyy/M/d HH:mm`.
-- The address bar always shows the real path (no `~` abbreviation) and accepts a
-  path typed by hand. Enter goes there at once: the typed path stays in the box
-  until the new folder's frame is ready, so nothing of the old one flashes in
-  between. Enter on the path as it is reads the folder again; clicking
-  elsewhere with the path as it is does nothing.
+- The address bar (Windows build; the macOS build still shows the path as
+  text) is Explorer's breadcrumb bar: the way to the current folder as
+  buttons - the machine with its icon, the drive as the tree names it, then
+  one button per folder, each named as it is on the disk. Nothing is left out
+  and nothing is abbreviated.
+- A click on a button goes to that folder when the button comes back up on it;
+  let go somewhere else and nothing happens. The machine's button has nowhere
+  to go: it opens the list of its drives. Only the first click of a double
+  click counts - the buttons are laid out anew after it, and the second one
+  lands wherever that is.
+- A `>` follows every button but the current folder's. It lists that folder's
+  subfolders, with the row the way goes through highlighted as the tree
+  highlights a row. A click on a row, or Enter, goes there; the arrow keys and
+  the wheel move through the list, which scrolls when it is long (a drive's
+  root, Program Files). The `>` stays pressed while its list is up, a press on
+  another `>` opens that one's list in its place (as between menu titles),
+  Escape or a press anywhere else closes it, and that press goes no further.
+- When the way is too long for the bar, the current folder stays whole at the
+  right end with as much of the way as fits before it; the rest is behind a `<`
+  at the left, which lists them. The blank part of the bar is never too small
+  to click.
+- A click on the blank part of the bar, F4, Ctrl+L or Alt+D (the label's
+  `地址(D)`) puts the whole path in an edit box, selected, to be typed over.
+  Enter goes there at once: the typed path stays in the box until the new
+  folder's frame is ready, so nothing of the old one flashes in between. Enter
+  on the path as it is reads the folder again; clicking elsewhere with the
+  path as it is does nothing; Escape goes back to the buttons without going
+  anywhere.
+- The window is asked where its client area goes every time it is placed,
+  whether or not its size changes. (At 100 % scaling the saved size is the
+  physical one, so a window created at the size it keeps was never asked, and
+  kept the system's title bar above its own.)
 - The window has one context menu for an item: the *items* come from the real
   Windows shell menu (`IContextMenu`, so every installed extension shows up),
   but the popup is drawn by this app in the Win98 style.  The file list and the
@@ -151,7 +178,9 @@ Lag is never traded for anything. For menus and hover feedback in particular:
 
 - The highlight follows the pointer with nothing in between. A hover change
   repaints the affected rows on the spot, before any other work runs, and no
-  timer, grace period or delay stands between the pointer and the screen.
+  timer, grace period or delay stands between the pointer and the screen. An
+  address bar button is lit the same way: the bar alone is repainted, into the
+  frame that is on screen.
 - A submenu opens the moment its row is hovered and closes the moment the
   pointer leaves that row.
 - The row under the pointer is the selected row, with one exception, and it

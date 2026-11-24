@@ -25,6 +25,13 @@ void diagLog(const wchar_t* fmt, ...) {
     }
 }
 
+bool staysInBackground() {
+    static const bool yes = [] {
+        return GetEnvironmentVariableW(L"MOC_NO_FOREGROUND", nullptr, 0) > 0;
+    }();
+    return yes;
+}
+
 double diagMillis() {
     static const LONGLONG freq = [] {
         LARGE_INTEGER f{};

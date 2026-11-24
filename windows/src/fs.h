@@ -24,6 +24,9 @@ namespace fsx {
 std::wstring homeDir();
 std::wstring knownFolder(REFKNOWNFOLDERID id);
 std::vector<Entry> listDirectory(const std::wstring& dir, bool showHidden);
+// Names of the folders directly inside dir, in the order the tree lists them -
+// and nothing else: no sizes, no types.  For a list read on a click.
+std::vector<std::wstring> listSubfolders(const std::wstring& dir, bool showHidden);
 std::wstring typeName(const std::wstring& path, bool isDir);
 std::wstring extensionLower(const std::wstring& name);
 std::wstring formatSize(unsigned long long bytes);
