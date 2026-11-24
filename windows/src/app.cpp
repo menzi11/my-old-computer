@@ -893,6 +893,7 @@ void App::favoriteDropPosition(POINT p, int* insert, RECT* line) const {
 bool App::treeHasSubdir(const std::wstring& path) {
     auto it = subdirCache.find(path);
     if (it != subdirCache.end()) return it->second;
+    ++treeProbes;  // a real question, one the disk has to answer
     bool v = fsx::hasAnySubdirectory(path, showHidden);
     subdirCache[path] = v;
     return v;
@@ -906,7 +907,10 @@ void App::noteChildren(const std::wstring& dir, bool hasSubdir) {
         while (!stack.empty()) {
             TreeNode* n = stack.back();
             stack.pop_back();
-            if (n->path == dir) n->hasChildren = hasSubdir;
+            if (n->path == dir) {
+                n->hasChildren = hasSubdir;
+                n->hasChildrenKnown = true;
+            }
             for (auto& c : n->children) stack.push_back(&c);
         }
     }
@@ -1019,15 +1023,27 @@ void App::loadTreeChildren(TreeNode& node) {
         kid.path = e.path;
         kid.title = e.name;
         kid.depth = node.depth + 1;
-        kid.hasChildren = true;
+        kid.hasChildrenKnown = false;  // asked for when its row is drawn or clicked, not now
         node.children.push_back(std::move(kid));
     }
     std::sort(node.children.begin(), node.children.end(),
               [](const TreeNode& a, const TreeNode& b) {
                   return StrCmpLogicalW(a.title.c_str(), b.title.c_str()) < 0;
               });
-    for (auto& c : node.children) c.hasChildren = treeHasSubdir(c.path);
+    // Not every folder in here is asked whether it has a subfolder at this
+    // point: for System32 that is some 300 of them, half a millisecond each,
+    // all of it before the new folder could show - and again after every file
+    // operation in it.  A row's answer is looked up when the row is drawn or
+    // clicked (treeRowHasChildren); some thirty rows are ever in view.
     node.hasChildren = !node.children.empty();
+}
+
+bool App::treeRowHasChildren(TreeNode& n) {
+    if (!n.hasChildrenKnown) {
+        n.hasChildren = treeHasSubdir(n.path);
+        n.hasChildrenKnown = true;
+    }
+    return n.hasChildren;
 }
 
 void App::flattenTree() {
@@ -1106,7 +1122,7 @@ void App::revealInTree() {
         if (_wcsicmp(target.c_str(), base.c_str()) == 0) {
             if (n.kind != TreeNode::Machine) {
                 if (!n.loaded) loadTreeChildren(n);
-                n.expanded = n.hasChildren;
+                n.expanded = treeRowHasChildren(n);
             }
             return true;
         }

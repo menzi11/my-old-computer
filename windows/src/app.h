@@ -21,7 +21,13 @@ struct TreeNode {
     int depth = 0;
     bool expanded = false;
     bool loaded = false;
+    // Whether the row gets a +/-.  Known from the start for a drive, a special
+    // folder, a favorite and a folder that was listed; for the folders inside
+    // one that was just listed it is looked up the first time the row is drawn
+    // or clicked (App::treeRowHasChildren) - hasChildren is not to be read
+    // where that may be the case.
     bool hasChildren = true;
+    bool hasChildrenKnown = true;
     bool missing = false;  // a favorite whose folder is gone: shown, but it leads nowhere
     std::vector<TreeNode> children;
 };
@@ -105,6 +111,9 @@ public:
     // +/- answers per folder, invalidated when the disk or the hidden filter
     // changes (a process-wide cache used to go stale after every file op).
     std::map<std::wstring, bool> subdirCache;
+    // Folders the tree has had to ask the disk about since this was last
+    // zeroed: the tests and the log read it.
+    int treeProbes = 0;
     // Row that was clicked in the tree.  Tree clicks only select and navigate;
     // they must not expand the tree or scroll it out from under the pointer.
     int treeClickRow = -1;
@@ -277,6 +286,8 @@ public:
     int rowOfPath(const std::wstring& path) const;
     void revealRow(int row);  // scrolls the file view just enough to show the row
     bool treeHasSubdir(const std::wstring& path);
+    // Whether a tree row gets a +/-, looked up now if nobody has asked yet.
+    bool treeRowHasChildren(TreeNode& n);
     void noteChildren(const std::wstring& dir, bool hasSubdir);
 
     // Geometry helpers (all return screen-client coordinates)

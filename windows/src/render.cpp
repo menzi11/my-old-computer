@@ -233,7 +233,10 @@ void drawTree(Canvas& c, App& a) {
                 c.fill(r, Theme::faceHi);
 
             const int indent = c.px(n->depth * 14 + 3);
-            if (n->hasChildren) {
+            // Asked for here, the first time the row is drawn (see
+            // App::treeRowHasChildren): a folder just listed is not asked
+            // about until its row is in view.
+            if (a.treeRowHasChildren(*n)) {
                 RECT box{r.left + indent, r.top + c.px(5), r.left + indent + c.px(9),
                          r.top + c.px(5) + c.px(9)};
                 c.fill(box, Theme::white);

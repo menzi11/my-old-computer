@@ -82,6 +82,14 @@ void dumpLayout(App& a) {
         fwprintf(f, L"treeRow %d %d,%d depth %d title %ls\n", i, (int)r.left, (int)r.top,
                  a.treeFlat[i]->depth, a.treeFlat[i]->title.c_str());
     }
+    // Every row with its +/- and whether that was ever asked for, to hold a
+    // picture of the tree against the disk.  Read, not asked: what is written
+    // here is what a picture taken at this moment was painted from.
+    for (int i = 0; i < (int)a.treeFlat.size(); ++i) {
+        const TreeNode* n = a.treeFlat[i];
+        fwprintf(f, L"treePlus %d %d %d depth %d path %ls\n", i, n->hasChildren ? 1 : 0,
+                 n->hasChildrenKnown ? 1 : 0, n->depth, n->path.c_str());
+    }
     fwprintf(f, L"listRows %d mode %d rowH %d\n", (int)a.entries.size(), (int)a.mode, a.m.rowH);
     for (int i = 0; i < 40 && i < (int)a.entries.size(); ++i) {
         RECT r = a.mode == ViewMode::Details ? a.listRowRect(i) : a.gridCellRect(i);
@@ -600,7 +608,8 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
             selectionChanged = true;
             if (n->kind == TreeNode::Favorites) {
                 // The Favorites' header: what can be done with the group.
-                ownPopup({{n->expanded ? L"折叠" : L"展开", ID_TREE_TOGGLE, n->hasChildren},
+                ownPopup({{n->expanded ? L"折叠" : L"展开", ID_TREE_TOGGLE,
+                           a.treeRowHasChildren(*n)},
                           {L"添加当前文件夹到收藏夹", ID_ADD_FAV_CURRENT,
                            fsx::isDirectory(a.current) && a.favoriteIndex(a.current) < 0}});
                 return;
@@ -616,7 +625,8 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
             if (n->path.empty()) {
                 // A header without a folder (我的电脑) gets a small menu of
                 // its own instead of one borrowed from the current directory.
-                ownPopup({{n->expanded ? L"折叠" : L"展开", ID_TREE_TOGGLE, n->hasChildren},
+                ownPopup({{n->expanded ? L"折叠" : L"展开", ID_TREE_TOGGLE,
+                           a.treeRowHasChildren(*n)},
                           {L"", 0, false, false, true},
                           {L"刷新", ID_REFRESH, true}});
                 return;
@@ -1012,7 +1022,7 @@ void onLButtonDown(HWND hwnd, App& a, POINT p) {
                         box.right + pxOf(a.scale, 2), box.bottom + pxOf(a.scale, 2)};
             if (n->kind == TreeNode::Favorites) {
                 a.toggleTreeNode(*n);
-            } else if (n->hasChildren && PtInRect(&boxHit, p)) {
+            } else if (a.treeRowHasChildren(*n) && PtInRect(&boxHit, p)) {
                 a.toggleTreeNode(*n);
             } else if (!n->path.empty()) {
                 // Pressed, not clicked yet: the row is navigated to when the
@@ -1221,7 +1231,7 @@ void onDoubleClick(HWND hwnd, App& a, POINT p) {
         diagLog(L"DBLCLK tree %d,%d row=%d", p.x, p.y, row);
         if (row >= 0) {
             TreeNode* n = a.treeFlat[row];
-            if (n->hasChildren) a.toggleTreeNode(*n);
+            if (a.treeRowHasChildren(*n)) a.toggleTreeNode(*n);
             repaint(hwnd);
             return;
         }
@@ -3747,6 +3757,138 @@ int runUiTest(App& app) {
 
         app.hwnd = nullptr;
         DestroyWindow(owner);
+    }
+
+    // Listing a folder in the tree does not ask every folder in it whether it
+    // has a subfolder: for System32 that was some 300 of them, all before the
+    // new folder could show.  A row is asked when it is drawn or clicked - and
+    // the answer has to be the disk's either way.
+    {
+        const std::wstring parent = base + L"\\treeparent";
+        CreateDirectoryW(parent.c_str(), nullptr);
+        CreateDirectoryW((parent + L"\\plain").c_str(), nullptr);
+        CreateDirectoryW((parent + L"\\withsub").c_str(), nullptr);
+        CreateDirectoryW((parent + L"\\withsub\\inner").c_str(), nullptr);
+        app.subdirCache.clear();
+        app.treeProbes = 0;
+        app.setScale(1.0);
+        const bool sidebarWas = app.sidebarVisible;
+        const std::vector<TreeNode> treeWas = app.treeRoots;
+        const std::vector<std::wstring> backWas = app.back, forwardWas = app.forward;
+        TreeNode node;
+        node.path = parent;
+        node.title = L"treeparent";
+        app.loadTreeChildren(node);
+        const int askedAtListing = app.treeProbes;  // the disk's answers, not the flags
+        bool unasked = node.children.size() == 2;
+        for (const auto& c : node.children) unasked = unasked && !c.hasChildrenKnown;
+        node.expanded = true;
+        app.sidebarVisible = true;
+        app.treeRoots.clear();
+        app.treeRoots.push_back(node);
+        app.treeClickRow = -1;
+        app.contextTreeRow = -1;
+        app.flattenTree();  // the folder, then plain, then withsub
+        app.treeScroll = 0;
+        app.relayout(1100, 760);
+        // The window as it would be painted now, read at one point.
+        const auto pixelAt = [&app](POINT p) {
+            HDC screen = GetDC(nullptr);
+            HDC mem = CreateCompatibleDC(screen);
+            HBITMAP bmp = CreateCompatibleBitmap(screen, app.width, app.height);
+            HGDIOBJ old = SelectObject(mem, bmp);
+            {
+                Canvas c(mem, app.scale);
+                renderApp(c, app);
+            }
+            const COLORREF px = GetPixel(mem, p.x, p.y);
+            SelectObject(mem, old);
+            DeleteObject(bmp);
+            DeleteDC(mem);
+            ReleaseDC(nullptr, screen);
+            return px;
+        };
+        // A row's +/- box, by the renderer's own numbers (depth 1).
+        const auto boxOf = [&app](int row) {
+            const RECT r = app.treeRowRect(row);
+            const int indent = pxOf(app.scale, 1 * 14 + 3);
+            return RECT{r.left + indent, r.top + pxOf(app.scale, 5),
+                        r.left + indent + pxOf(app.scale, 9),
+                        r.top + pxOf(app.scale, 5) + pxOf(app.scale, 9)};
+        };
+        const RECT plainBox = boxOf(1), withsubBox = boxOf(2);
+        const int plainY = (plainBox.top + plainBox.bottom) / 2;
+        const int withsubY = (withsubBox.top + withsubBox.bottom) / 2;
+        // The box's left edge: its frame where there is a box, the pane's
+        // white where there is none.
+        const COLORREF plainEdge = pixelAt(POINT{plainBox.left, plainY});
+        const COLORREF withsubEdge = pixelAt(POINT{withsubBox.left, withsubY});
+        const int askedByDrawing = app.treeProbes - askedAtListing;  // the two rows in view, no more
+        const bool rows = app.treeFlat.size() == 3;
+        TreeNode& plain = app.treeRoots[0].children[0];
+        TreeNode& withsub = app.treeRoots[0].children[1];
+        const bool drawn = rows && plain.path == parent + L"\\plain" &&
+                           withsub.path == parent + L"\\withsub" &&
+                           plainEdge == RGB(255, 255, 255) && withsubEdge == Theme::shadow &&
+                           plain.hasChildrenKnown && !plain.hasChildren && withsub.hasChildrenKnown &&
+                           withsub.hasChildren;
+        // Never drawn, never asked: a click on the box asks first.
+        const auto forget = [&] {
+            for (TreeNode* c : {&plain, &withsub}) {
+                c->hasChildrenKnown = false;
+                c->hasChildren = true;
+                c->expanded = false;
+            }
+        };
+        forget();
+        const POINT withsubPoint{(withsubBox.left + withsubBox.right) / 2, withsubY};
+        onLButtonDown(nullptr, app, withsubPoint);
+        onLButtonUp(nullptr, app, withsubPoint);
+        const bool opened = withsub.expanded && withsub.hasChildren && withsub.children.size() == 1;
+        forget();
+        const POINT plainPoint{(plainBox.left + plainBox.right) / 2, plainY};
+        onDoubleClick(nullptr, app, plainPoint);  // the same question, from a double-click
+        const bool notOpenedByDoubleClick = !plain.expanded && !plain.hasChildren;
+        forget();
+        onLButtonDown(nullptr, app, plainPoint);
+        onLButtonUp(nullptr, app, plainPoint);
+        const bool stayed = !plain.expanded && !plain.hasChildren;
+        app.treeRoots = treeWas;
+        app.back = backWas;
+        app.forward = forwardWas;
+        app.flattenTree();
+        app.sidebarVisible = sidebarWas;
+        app.treeClickRow = -1;
+        app.loadDirectory(base, false);
+        app.relayout(1100, 760);
+
+        const wchar_t* const askedName = L"树列出一个文件夹时，不逐个问它的子文件夹有没有下级";
+        std::wstring asked = askedName;
+        if (askedAtListing)
+            asked += L"：列出的时候就问了磁盘 " + std::to_wstring(askedAtListing) + L" 个文件夹";
+        else if (!unasked) asked += L"：列出的时候就问过了";
+        else if (askedByDrawing != 2)
+            asked += L"：画出来的时候问了 " + std::to_wstring(askedByDrawing) + L" 个，应为 2";
+        check(asked.c_str(), asked == askedName);
+
+        const wchar_t* const shownName = L"树的 +/− 画出来和磁盘一致：有下级的有，没有的没有";
+        std::wstring shown = shownName;
+        wchar_t detail[160]{};
+        if (!rows)
+            swprintf_s(detail, L"：行数 %d，应为 3", (int)app.treeFlat.size());
+        else if (!drawn)
+            swprintf_s(detail, L"：plain 行框左缘 0x%06lX（应为白），withsub 行框左缘 0x%06lX（应为 0x%06lX）",
+                       (unsigned long)plainEdge, (unsigned long)withsubEdge,
+                       (unsigned long)Theme::shadow);
+        shown += detail;
+        check(shown.c_str(), shown == shownName);
+
+        const wchar_t* const clickedName = L"点到还没画过的树行：+/− 也是对的";
+        std::wstring clicked = clickedName;
+        if (!opened) clicked += L"：有下级的那行点 + 没有展开";
+        else if (!notOpenedByDoubleClick) clicked += L"：双击没有下级的那行却展开了";
+        else if (!stayed) clicked += L"：单击没有下级的那行却展开了";
+        check(clicked.c_str(), clicked == clickedName);
     }
 
     // The two that change everything say so themselves, whoever calls them:

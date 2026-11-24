@@ -178,6 +178,11 @@ Lag is never traded for anything. For menus and hover feedback in particular:
   Escape; what was on screen and what a click hit were then two different
   things.) The tests hold what the desktop shows against a frame rendered from
   the state, after each of those.
+- The tree asks a folder whether it has a subfolder when its row is drawn or
+  clicked, never when the folder above it is listed: listing System32 used to
+  ask its 300 folders first, half a millisecond each, before the new folder
+  could show - and again after every file operation in it. Some thirty rows
+  are ever in view.
 
 ## Platform mapping
 
