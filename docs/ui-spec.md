@@ -79,6 +79,22 @@ Windows uses the shell's own image lists (`SHGetFileInfo` + `SHGetImageList`), s
 file types look exactly as they do in Explorer; the View menu can switch back to
 the hand-drawn set.  macOS draws the icons in `Icons.swift` per extension.
 
+### Thumbnails (Windows build)
+
+A folder in which more than half of the files are pictures opens in the
+big-icon view with each picture in place of its icon, whatever view is the
+usual one: cells 112 by 132, the picture in a 96 box, the name under it, and
+a frame in the selection's colour around a selected picture. A view chosen in
+such a folder is that folder's own: the usual view is neither changed nor
+written to the settings, and is back on leaving the folder. A thumbnail is the
+shell's (the cache Explorer shares, so the picture is the right way up), made
+on threads of the program's own and never on the window's: the icon is shown
+until the thumbnail is in, then that cell and no other is drawn again.
+Thumbnails asked for by cells that scrolled away are not made; what could not
+be made is not asked for again until the folder is listed again. Thumbnails
+made are kept for the run, 160 MB of them at most, the longest unused going
+first.
+
 ## Behaviour contract
 
 - Directories sort before files in every column; names use a natural

@@ -123,6 +123,17 @@ public:
     int sortColumn = 0;
     bool sortAsc = true;
     ViewMode mode = ViewMode::Details;
+    // This folder is mostly pictures: its big-icon view shows the pictures
+    // themselves, and the folder opens in that view (updateThumbnails).
+    bool thumbnails = false;
+    // The view is this folder's own: a folder of pictures opened as
+    // thumbnails, whatever view is the usual one.  A view chosen here is for
+    // here; the usual one is back on leaving.
+    bool viewAutomatic = false;
+    // Per entry: its thumbnail, if it has one, is drawn in the frame.
+    std::vector<bool> thumbDrawn;
+    // The entries the render in progress drew with their thumbnail.
+    std::vector<int> thumbRendered;
     bool sidebarVisible = true;
     bool showHidden = false;
     bool useSystemIcons = true;
@@ -261,6 +272,9 @@ public:
     bool goToTypedPath(const std::wstring& text);
     void setViewMode(ViewMode v);
     void cycleViewMode();
+    // Once a folder is listed: whether it is mostly pictures (thumbnails),
+    // and the view it opens in.
+    void updateThumbnails();
 
     // Selection
     void selectAll();
@@ -369,6 +383,10 @@ public:
     int gridCols() const;
     int gridCellW() const;
     int gridCellH() const;
+    // The big-icon view: the side of the box an icon (or a thumbnail) is
+    // drawn in, and where the name under it begins.
+    int iconBox() const;
+    int labelTop() const;
     RECT gridCellRect(int i) const;
     int gridIndexAt(POINT p) const;
     int gridContentHeight() const;

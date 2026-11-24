@@ -32,6 +32,7 @@
 #include "shellicons.h"
 #include "snapshot.h"
 #include "theme.h"
+#include "thumbs.h"
 
 int measureUiText(const std::wstring& s, int fontPx);  // the UI font, as the rows are measured with
 
@@ -239,6 +240,25 @@ void drawBand(HWND hwnd, App& a) {
     g_bandVisible = true;
 }
 
+// The cells in view (the big-icon view) whose thumbnail is in - each with
+// whether it is drawn with it in the window's frame.
+std::vector<int> thumbsInView(App& a, bool drawn) {
+    std::vector<int> out;
+    if (!a.thumbnails || a.mode != ViewMode::Icons) return out;
+    const int cellH = std::max(1, a.gridCellH()), cols = a.gridCols();
+    const RECT vp = a.lay.gridViewport;
+    const int first = std::min((int)a.entries.size(), (a.gridScroll / cellH) * cols);
+    const int past = std::min((int)a.entries.size(),
+                              ((a.gridScroll + (int)(vp.bottom - vp.top)) / cellH + 1) * cols);
+    const int box = a.iconBox();
+    for (int i = first; i < past; ++i) {
+        if (a.entries[i].isDir || i >= (int)a.thumbDrawn.size()) continue;
+        if (a.thumbDrawn[i] != drawn) continue;
+        if (thumbs::peek(a.entries[i].path, box)) out.push_back(i);
+    }
+    return out;
+}
+
 void paintWindow(HWND hwnd) {
     PAINTSTRUCT ps;
     HDC dc = BeginPaint(hwnd, &ps);
@@ -261,8 +281,13 @@ void paintWindow(HWND hwnd) {
         if (g_app.paintDirty) {
             const double t0 = diagMillis();
             Canvas canvas(g_paint.mem, g_app.scale);
+            // Which thumbnails this frame draws it says itself (a thumbnail
+            // can come in while the frame is being drawn).
+            g_app.thumbRendered.clear();
             renderApp(canvas, g_app);
             g_app.paintDirty = false;
+            for (int i : g_app.thumbRendered)
+                if (i < (int)g_app.thumbDrawn.size()) g_app.thumbDrawn[i] = true;
             diagLog(L"frame rendered in %.1f ms (%d rows)", diagMillis() - t0,
                     (int)g_app.entries.size());
         }
@@ -1631,6 +1656,15 @@ void raiseNewWindows(HWND hwnd, App& a) {
     }
 }
 
+// A thumbnail came in (thumbs.h).  The cells in view that show a picture and
+// are still showing its icon are drawn again - those and nothing else.
+void repaintThumbs(HWND hwnd, App& a) {
+    const std::vector<int> rows = thumbsInView(a, false);
+    if (rows.empty()) return;
+    repaintRows(hwnd, a, rows);
+    for (int i : rows) a.thumbDrawn[i] = true;
+}
+
 LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     App& a = g_app;
     switch (msg) {
@@ -1862,6 +1896,9 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             applyMarqueeSelection(hwnd, a);
         }
+        return 0;
+    case thumbs::kReadyMessage:
+        repaintThumbs(hwnd, a);
         return 0;
     case WM_KEYDOWN:
         onKeyDown(hwnd, a, wp);
@@ -4445,6 +4482,262 @@ void folderColourTest(const std::wstring& listDir, const std::wstring& folder,
     verdict(L"按 Ctrl+W：窗口关上了", L"窗口还在", g_colour.closed);
 }
 
+// ---------------------------------------------------------- thumbnail test
+// A folder that is mostly pictures opens as thumbnails in the real window,
+// and what is on screen is read back: the icon at first, then - each when its
+// thumbnail is in - the picture itself (pictures of one colour each, so the
+// pixels say which is which).  A folder with a picture or two among other
+// files keeps the usual view.  Back in the first one the thumbnails are there
+// at once: they were made before.
+
+constexpr UINT_PTR kThumbTestTimer = 0x4D4C;
+constexpr wchar_t kThumbTestClass[] = L"MyOldComputerThumbTest";
+constexpr int kThumbTestEnd = 5;  // the step past the last one
+constexpr int kThumbPictures = 6;
+
+// One colour a picture, none of them white (the cells are).
+const COLORREF kThumbColours[kThumbPictures] = {RGB(255, 0, 0),  RGB(0, 0, 255), RGB(0, 192, 0),
+                                                RGB(0, 255, 255), RGB(255, 0, 255), RGB(255, 192, 0)};
+
+// A picture of one colour, as a 24-bit BMP file.
+void writeBmp(const std::wstring& path, int w, int h, COLORREF colour) {
+    const int row = ((w * 3 + 3) / 4) * 4;
+    BITMAPFILEHEADER file{};
+    file.bfType = 0x4D42;
+    file.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+    file.bfSize = file.bfOffBits + (DWORD)(row * h);
+    BITMAPINFOHEADER info{};
+    info.biSize = sizeof(info);
+    info.biWidth = w;
+    info.biHeight = h;
+    info.biPlanes = 1;
+    info.biBitCount = 24;
+    std::vector<BYTE> pixels((size_t)row * h);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            BYTE* p = &pixels[(size_t)y * row + (size_t)x * 3];
+            p[0] = GetBValue(colour);
+            p[1] = GetGValue(colour);
+            p[2] = GetRValue(colour);
+        }
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path.c_str(), L"wb") != 0 || !f) return;
+    fwrite(&file, sizeof(file), 1, f);
+    fwrite(&info, sizeof(info), 1, f);
+    fwrite(pixels.data(), 1, pixels.size(), f);
+    fclose(f);
+}
+
+// The pixels of a thumbnail, BGRA.
+std::vector<unsigned char> bitmapPixels(HBITMAP bitmap, int* w, int* h) {
+    std::vector<unsigned char> out;
+    BITMAP info{};
+    if (!bitmap || !GetObjectW(bitmap, sizeof(info), &info) || info.bmWidth <= 0 || info.bmHeight <= 0)
+        return out;
+    BITMAPINFOHEADER header{};
+    header.biSize = sizeof(header);
+    header.biWidth = info.bmWidth;
+    header.biHeight = -info.bmHeight;
+    header.biPlanes = 1;
+    header.biBitCount = 32;
+    out.resize((size_t)info.bmWidth * info.bmHeight * 4);
+    HDC dc = CreateCompatibleDC(nullptr);
+    GetDIBits(dc, bitmap, 0, info.bmHeight, out.data(), (BITMAPINFO*)&header, DIB_RGB_COLORS);
+    DeleteDC(dc);
+    *w = info.bmWidth;
+    *h = info.bmHeight;
+    return out;
+}
+
+COLORREF g_thumbColour = 0;
+bool isThumbColour(COLORREF px) { return px == g_thumbColour; }
+
+struct ThumbDrive {
+    HWND main = nullptr;
+    int step = 0;
+    int wait = 0;
+    int ticks = 0;
+    std::wstring pictures, mixed;  // the two folders
+    int cell[kThumbPictures] = {};  // the cell of each picture in the thumbnail view
+    COLORREF colour[kThumbPictures] = {};
+    int onScreen = 0;      // pictures on screen in their own colour, when they all are
+    int atOnce = 0;        // ... back in the folder, before anything else happened
+    int waited = 0;        // ticks it took
+    bool usualView = false;
+    bool baseline = false;
+    int stale[2] = {0, 0};
+    RECT where[2] = {};
+};
+ThumbDrive g_thumb;
+
+// How many of the pictures are on screen in their own colour: `least` pixels
+// of it in the thumbnail box of its cell.
+int picturesOnScreen(const ThumbDrive& d, int least) {
+    const Frame f = shownFrame(d.main);
+    int n = 0;
+    const int side = g_app.iconBox(), top = pxOf(g_app.scale, 4);
+    for (int k = 0; k < kThumbPictures; ++k) {
+        const RECT r = g_app.gridCellRect(d.cell[k]);
+        RECT box{(r.left + r.right) / 2 - side / 2, r.top + top, (r.left + r.right) / 2 + side / 2,
+                 r.top + top + side};
+        g_thumbColour = d.colour[k];
+        n += frameCount(f, box, isThumbColour) >= least ? 1 : 0;
+    }
+    return n;
+}
+
+void thumbTestStep(HWND driver) {
+    ThumbDrive& d = g_thumb;
+    KillTimer(driver, kThumbTestTimer);
+    if (++d.ticks > 400) {  // ten seconds: give up, do not hang
+        d.step = kThumbTestEnd;
+        return;
+    }
+    const auto later = [driver] { SetTimer(driver, kThumbTestTimer, 50, nullptr); };
+    if (d.step >= kThumbTestEnd) return;
+    if (d.wait-- > 0) {
+        later();
+        return;
+    }
+    d.wait = 0;
+    switch (d.step) {
+    case 0: {  // the folder of pictures as it opened
+        UpdateWindow(d.main);
+        d.onScreen = picturesOnScreen(d, 200);
+        d.wait = 3;
+        break;
+    }
+    case 1: {  // ... and as the thumbnails come in: no repaint is asked for here
+        d.onScreen = picturesOnScreen(d, 200);
+        ++d.waited;
+        if (d.onScreen < kThumbPictures && d.ticks < 380) {
+            later();
+            return;
+        }
+        keepFrames(L"thumb-pictures", shownFrame(d.main), renderedFrame(g_app));
+        // A folder with one picture among other files: the usual view.
+        g_app.loadDirectory(d.mixed, false);
+        repaint(d.main);
+        UpdateWindow(d.main);
+        d.wait = 3;
+        break;
+    }
+    case 2: {
+        d.usualView = g_app.mode == ViewMode::Details && !g_app.thumbnails && !g_app.viewAutomatic;
+        const Frame shown = shownFrame(d.main);
+        const Frame fresh = renderedFrame(g_app);
+        keepFrames(L"thumb-mixed", shown, fresh);
+        d.stale[1] = frameMismatch(shown, fresh, &d.where[1]);
+        // Back among the pictures: drawn at once, and read at once.
+        g_app.loadDirectory(d.pictures, false);
+        repaint(d.main);
+        UpdateWindow(d.main);
+        d.atOnce = picturesOnScreen(d, 200);
+        d.wait = 3;
+        break;
+    }
+    default: {  // still, with every thumbnail in: what is shown is what the state renders
+        const Frame shown = shownFrame(d.main);
+        const Frame fresh = renderedFrame(g_app);
+        keepFrames(L"thumb-baseline", shown, fresh);
+        d.baseline = frameMismatch(shown, fresh, &d.where[0]) == 0;
+        d.step = kThumbTestEnd;
+        return;
+    }
+    }
+    ++d.step;
+    if (d.step < kThumbTestEnd) later();
+}
+
+LRESULT CALLBACK thumbTestProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_TIMER && wp == kThumbTestTimer) {
+        thumbTestStep(hwnd);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+// The test in the real window, with the window's usual view being the list
+// one.  `pictures` holds `kThumbPictures` pictures of one colour each and a
+// text file; `mixed` one picture among text files.
+void thumbnailTest(const std::wstring& pictures, const std::wstring& mixed,
+                   const std::function<void(const wchar_t*, bool)>& check) {
+    WNDCLASSEXW wc{sizeof(WNDCLASSEXW)};
+    wc.lpfnWndProc = thumbTestProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = kThumbTestClass;
+    RegisterClassExW(&wc);
+    HWND driver = CreateWindowExW(0, kThumbTestClass, L"", WS_OVERLAPPED, 0, 0, 100, 100, nullptr,
+                                  nullptr, wc.hInstance, nullptr);  // never shown
+    registerMainClass(wc.hInstance);
+    HWND main = CreateWindowExW(WS_EX_NOACTIVATE, L"MyOldComputerWindow", L"thumbnail test",
+                                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, 0, 0, 0, 0, driver, nullptr,
+                                wc.hInstance, nullptr);
+    g_thumb = ThumbDrive{};
+    g_thumb.main = main;
+    g_thumb.pictures = pictures;
+    g_thumb.mixed = mixed;
+    if (main) {
+        g_app.hwnd = main;
+        g_app.scale = dpiScaleOfWindow(main);
+        g_app.init(main);
+        g_app.relayout(pxOf(g_app.scale, 700), pxOf(g_app.scale, 440));
+        // No sidebar: all six pictures fit in the first row of the view.
+        g_app.sidebarVisible = false;
+        g_app.setViewMode(ViewMode::Details);
+        g_app.loadDirectory(pictures, false);
+        for (int k = 0; k < kThumbPictures; ++k) {
+            const std::wstring name = L"p" + std::to_wstring(k) + L".bmp";
+            g_thumb.colour[k] = kThumbColours[k];
+            for (int i = 0; i < (int)g_app.entries.size(); ++i)
+                if (g_app.entries[i].name == name) g_thumb.cell[k] = i;
+        }
+        placeWindow(main, 0, 0, g_app.width, g_app.height);
+        ShowWindow(main, SW_SHOWNOACTIVATE);
+        SetWindowPos(main, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        UpdateWindow(main);
+        MSG msg;
+        for (SetTimer(driver, kThumbTestTimer, 60, nullptr);
+             g_thumb.step < kThumbTestEnd && GetMessageW(&msg, nullptr, 0, 0) > 0;) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        KillTimer(driver, kThumbTestTimer);
+        g_app.hwnd = nullptr;  // the edit is the window's child and goes with it
+        DestroyWindow(main);
+        PeekMessageW(&msg, nullptr, WM_QUIT, WM_QUIT, PM_REMOVE);
+        g_app.addrEdit = nullptr;
+        g_app.addrEditing = false;
+        if (g_app.addrFont) {
+            DeleteObject(g_app.addrFont);
+            g_app.addrFont = nullptr;
+        }
+    }
+    DestroyWindow(driver);
+
+    std::wstring notes;
+    if (!main) notes += L"窗口没建出来";
+    else if (g_thumb.ticks > 400) notes += L"超时";
+    const auto of = [](int v) { return std::to_wstring(v); };
+    const auto verdict = [&](const std::wstring& name, const std::wstring& why, bool ok) {
+        std::wstring label = name;
+        if (!notes.empty()) label += L"：" + notes;
+        else if (!ok) label += L"：" + why;
+        check(label.c_str(), label == name);
+    };
+    verdict(L"图片多的文件夹在真窗口里以缩略图视图打开：屏幕上六张图各自显示自己的颜色",
+            L"屏幕上只有 " + of(g_thumb.onScreen) + L" 张（等了 " + of(g_thumb.waited * 50) + L" 毫秒）",
+            g_thumb.onScreen == kThumbPictures);
+    verdict(L"只有一两张图的文件夹还是平时的视图（列表）",
+            L"视图是 " + of((int)g_app.mode) + L"，缩略图 " + of((int)g_app.thumbnails) + L"，屏幕上有 " +
+                of(g_thumb.stale[1]) + L" 个像素与状态不符",
+            g_thumb.usualView && g_thumb.stale[1] == 0);
+    verdict(L"回到图片多的文件夹：缩略图一上来就在屏幕上（之前已经做过）",
+            L"屏幕上只有 " + of(g_thumb.atOnce) + L" 张", g_thumb.atOnce == kThumbPictures);
+    verdict(L"（测试基准）缩略图：屏幕上的画面读得回来，且与按状态渲染的一致", L"基准不符",
+            g_thumb.baseline);
+}
+
 // Drives the same input handlers the window procedure uses, with synthesized
 // points, so click/selection behaviour can be checked without touching the
 // mouse or a real window.
@@ -6599,6 +6892,130 @@ int runUiTest(App& app) {
     }
 
     folderColourTest(crumbsDir, crumbAa, check);
+
+    // Thumbnails: a folder that is mostly pictures opens as thumbnails.
+    const std::wstring thumbsDir = base + L"\\thumbs", picDir = thumbsDir + L"\\pics",
+                        mixedDir = thumbsDir + L"\\mixed";
+    {
+        CreateDirectoryW(thumbsDir.c_str(), nullptr);
+        CreateDirectoryW(picDir.c_str(), nullptr);
+        CreateDirectoryW(mixedDir.c_str(), nullptr);
+        // 300 by 200 pixels: the thumbnails keep that shape.
+        for (int k = 0; k < kThumbPictures; ++k)
+            writeBmp(picDir + L"\\p" + std::to_wstring(k) + L".bmp", 300, 200, kThumbColours[k]);
+        writeBmp(mixedDir + L"\\p0.bmp", 300, 200, kThumbColours[0]);
+        for (const std::wstring& dir : {picDir, mixedDir})
+            for (int i = 0; i < 5; ++i) {
+                const HANDLE h = CreateFileW((dir + L"\\note" + std::to_wstring(i) + L".txt").c_str(),
+                                             GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+                if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+            }
+    }
+    {
+        const std::wstring name = L"图片多的文件夹（过半的文件是图片）：自动用缩略图视图，格子是 112×132，图在 96 的框里，名字在下面";
+        std::wstring s = name;
+        app.settings.viewMode = (int)ViewMode::Details;
+        app.mode = ViewMode::Details;
+        app.loadDirectory(picDir, false);
+        const auto px = [&app](int v) { return pxOf(app.scale, v); };
+        if (!app.thumbnails || app.mode != ViewMode::Icons || !app.viewAutomatic)
+            s += L"：没有自动用缩略图视图";
+        else if (app.settings.viewMode != (int)ViewMode::Details) s += L"：把平时的视图改掉了";
+        else if (app.gridCellW() != px(112) || app.gridCellH() != px(132) || app.iconBox() != px(96) ||
+                 app.labelTop() != px(104))
+            s += L"：格子是 " + std::to_wstring(app.gridCellW()) + L"x" + std::to_wstring(app.gridCellH()) +
+                 L"，图标框 " + std::to_wstring(app.iconBox());
+        else {
+            int index = -2;
+            const RECT r = app.gridCellRect(0);
+            const int side = app.iconBox();
+            POINT on{(r.left + r.right) / 2, r.top + px(4) + side / 2};  // in the thumbnail box
+            POINT off{r.left + 2, r.top + px(4) + 2};                     // beside it, above the name
+            if (!app.hitTestItem(on, &index) || index != 0) s += L"：点缩略图不算点中那一项";
+            else if (app.hitTestItem(off, &index)) s += L"：点格子里的空白也算点中";
+        }
+        check(s.c_str(), s == name);
+    }
+    {
+        const std::wstring name = L"只有一两张图的文件夹：还是平时的视图（列表）";
+        std::wstring s = name;
+        app.loadDirectory(mixedDir, false);
+        if (app.thumbnails || app.viewAutomatic || app.mode != ViewMode::Details) s += L"：视图不对";
+        else if (app.iconBox() != pxOf(app.scale, 48) || app.labelTop() != pxOf(app.scale, 54))
+            s += L"：图标框是 " + std::to_wstring(app.iconBox());
+        check(s.c_str(), s == name);
+    }
+    {
+        const std::wstring name =
+            L"在图片多的文件夹里自己选了别的视图：只对这个文件夹管用，不改平时的视图；离开后平时的视图回来";
+        std::wstring s = name;
+        app.loadDirectory(picDir, false);
+        app.setViewMode(ViewMode::List);
+        if (app.mode != ViewMode::List || !app.viewAutomatic) s += L"：选不成列表视图";
+        else if (app.settings.viewMode != (int)ViewMode::Details) s += L"：把平时的视图改成了列表";
+        app.saveSettings();
+        Settings saved;
+        saved.load();
+        if (saved.viewMode != (int)ViewMode::Details) s += L"：存下来的视图成了 " + std::to_wstring(saved.viewMode);
+        app.loadDirectory(base, false);
+        if (app.mode != ViewMode::Details || app.viewAutomatic) s += L"：离开后没有回到列表";
+        check(s.c_str(), s == name);
+    }
+    {
+        // A frame of the folder (five text files, six pictures) is rendered
+        // once, at a size nothing asked for before: just the six pictures are
+        // asked for a thumbnail.
+        const std::wstring name = L"缩略图只向图片要：画一遍有五个文本文件和六张图的文件夹，要的正好是六次";
+        std::wstring s = name;
+        app.loadDirectory(picDir, false);
+        const size_t before = thumbs::requested();
+        renderedFrame(app);
+        const size_t asked = thumbs::requested() - before;
+        if (asked != kThumbPictures) s += L"：要了 " + std::to_wstring(asked) + L" 次";
+        check(s.c_str(), s == name);
+    }
+    {
+        const std::wstring name =
+            L"缩略图不在这条线程上做：第一次要它时它还没好（先去要，到了再通知窗口），做好后再要就是现成的；大小不超过要的框，样子和颜色都对";
+        std::wstring s = name;
+        const std::wstring picture = picDir + L"\\p0.bmp";
+        const int px = 64;  // a size nothing asked for before
+        if (thumbs::peek(picture, px)) s += L"：还没要过就已经有了";
+        const HWND notify = (HWND)1;  // nobody: only the making is asked for here
+        if (thumbs::get(picture, px, notify)) s += L"：第一次要就当场做好了（挡住了要的人）";
+        std::shared_ptr<const thumbs::Bitmap> made;
+        for (int i = 0; i < 750 && !made; ++i) {  // up to fifteen seconds
+            made = thumbs::peek(picture, px);
+            if (!made) Sleep(20);
+        }
+        if (!made) s += L"：等了十五秒也没做好";
+        else if (thumbs::get(picture, px, nullptr) != made) s += L"：做好后再要，给的不是一个";
+        // 300 by 200 in a box of 64: 64 by 43.
+        else if (made->w > px || made->h > px || std::abs(made->w * 200 - made->h * 300) > 600)
+            s += L"：大小是 " + std::to_wstring(made->w) + L"x" + std::to_wstring(made->h);
+        else {
+            int w = 0, h = 0;
+            const std::vector<unsigned char> pixels = bitmapPixels(made->handle, &w, &h);
+            const size_t centre = ((size_t)(h / 2) * w + w / 2) * 4;
+            if (pixels.size() < centre + 3) s += L"：取不出像素";
+            else if (pixels[centre] != 0 || pixels[centre + 1] != 0 || pixels[centre + 2] != 255)
+                s += L"：中间的像素是 " + std::to_wstring(pixels[centre + 2]) + L"," +
+                     std::to_wstring(pixels[centre + 1]) + L"," + std::to_wstring(pixels[centre]) + L"（该是红的）";
+            else if (pixels[centre + 3] != 255) s += L"：不透明的图成了半透明";
+        }
+        check(s.c_str(), s == name);
+    }
+    {
+        const std::wstring name = L"滚动或换文件夹后，还没动手做的缩略图不再做（已经做了的照做）";
+        std::wstring s = name;
+        for (int k = 1; k < kThumbPictures; ++k)
+            thumbs::get(picDir + L"\\p" + std::to_wstring(k) + L".bmp", 48, nullptr);
+        thumbs::dropPending();
+        // Four are being made at most (there are four threads); nothing waits in line.
+        if (thumbs::pending() > 4) s += L"：还有 " + std::to_wstring(thumbs::pending()) + L" 个排着队";
+        check(s.c_str(), s == name);
+    }
+    thumbnailTest(picDir, mixedDir, check);
 
     // Paint benchmark: catches accidental full-window repaint storms.
     app.setViewMode(ViewMode::Details);

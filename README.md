@@ -71,7 +71,8 @@ keyboard shortcut for every action.
 
 **Three working views** — details with Name / Size / Type / Date columns and
 click-to-sort (directories first, natural name order), list and large-icon views.
-Switching views keeps the selection. Details rows have no full-row select: only
+Switching views keeps the selection. On the Windows build a folder that is mostly
+pictures opens as thumbnails, each picture in place of its icon. Details rows have no full-row select: only
 clicking the icon or the file name picks the row, so the Size / Type / Date
 columns stay free for scrolling and rubber-band selection.
 
@@ -79,7 +80,8 @@ columns stay free for scrolling and rubber-band selection.
 asks the shell for its menu, then draws it with this app's own Win98 popup, so
 7-Zip, Git, your editors, Send To, Previous Versions and every other installed
 extension is there without the modern Windows look.  This app adds Quick View,
-Open in new window, Reveal in Explorer, Copy path, a terminal here and a
+Open in new window (Ctrl and a click on a folder does it too), a colour for a
+folder, Reveal in Explorer, Copy path, a terminal here and a
 reliable Rename.  The tree opens the same menu for the folder under the pointer;
 the empty area keeps working View / Sort / Refresh / New commands.  Tools →
 Context menu settings lists every shell entry grouped by where the right-click

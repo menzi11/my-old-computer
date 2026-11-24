@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cwchar>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -14,6 +15,7 @@
 #include "shellicons.h"
 #include "scrollbar.h"
 #include "theme.h"
+#include "thumbs.h"
 
 extern const wchar_t* const kMenuTitles[6];
 extern const wchar_t* const kToolTitles[7];
@@ -497,6 +499,24 @@ void drawDetails(Canvas& c, App& a) {
 }
 
 // One list/icon cell; also used for single-cell repaints during a drag.
+// A picture in its cell: the thumbnail centred in the box and, when the item
+// is selected, a frame in the selection's colour around it.
+void drawThumbnail(Canvas& c, const thumbs::Bitmap& thumbnail, const RECT& box, COLORREF selected) {
+    const int w = std::min(thumbnail.w, (int)(box.right - box.left));
+    const int h = std::min(thumbnail.h, (int)(box.bottom - box.top));
+    if (w <= 0 || h <= 0) return;
+    const int x = box.left + ((int)(box.right - box.left) - w) / 2;
+    const int y = box.top + ((int)(box.bottom - box.top) - h) / 2;
+    HDC memory = CreateCompatibleDC(c.dc());
+    if (!memory) return;
+    HGDIOBJ old = SelectObject(memory, thumbnail.handle);
+    BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    AlphaBlend(c.dc(), x, y, w, h, memory, 0, 0, w, h, blend);
+    SelectObject(memory, old);
+    DeleteDC(memory);
+    if (selected) c.frame(RECT{x - 1, y - 1, x + w + 1, y + h + 1}, selected);
+}
+
 void drawGridCell(Canvas& c, App& a, int i) {
     RECT r = a.gridCellRect(i);
     const Entry& e = a.entries[i];
@@ -526,10 +546,18 @@ void drawGridCell(Canvas& c, App& a, int i) {
                    sel ? Theme::white : Theme::text, Align::Left);
         return;
     }
-    const int iconSize = c.px(48);
+    const int iconSize = a.iconBox();
     RECT iconBox{(r.left + r.right) / 2 - iconSize / 2, r.top + c.px(4),
                  (r.left + r.right) / 2 + iconSize / 2, r.top + c.px(4) + iconSize};
-    if (!drawShellIcon(c, a, iconBox, e.path, e.isDir)) {
+    // A folder of pictures: the picture itself, once its thumbnail is in.  It
+    // is asked for here if it is not (thumbs.h); the icon is shown until then.
+    const std::shared_ptr<const thumbs::Bitmap> thumbnail =
+        a.thumbnails && thumbs::isPicture(e.name) ? thumbs::get(e.path, iconSize, a.hwnd) : nullptr;
+    if (thumbnail) {
+        drawThumbnail(c, *thumbnail, iconBox, sel ? selectionColour(a, i) : 0);
+        // For whoever shows this frame: this one is drawn with its thumbnail.
+        a.thumbRendered.push_back(i);
+    } else if (!drawShellIcon(c, a, iconBox, e.path, e.isDir)) {
         if (e.isDir) {
             drawFolder(c, iconBox, folderColourOf(e.path, true));
         } else {
@@ -540,7 +568,7 @@ void drawGridCell(Canvas& c, App& a, int i) {
                        fsx::extensionLower(e.name));
         }
     }
-    const int bandTop = r.top + c.px(54);
+    const int bandTop = r.top + a.labelTop();
     const int bandH = std::max(0, (int)(r.bottom - c.px(2)) - bandTop);
     std::wstring label = ellipsize(c, e.name, (int)(r.right - r.left) - c.px(10));
     const int tw = c.textWidth(label);

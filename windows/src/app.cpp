@@ -16,6 +16,7 @@
 #include "options.h"
 #include "preview.h"
 #include "shellmenu.h"
+#include "thumbs.h"
 
 // Defined further down in this file; relayout() needs them for the cached
 // menu/toolbar item widths.
@@ -235,10 +236,11 @@ void App::loadDirectory(const std::wstring& path, bool recordHistory, bool fromT
     // The listing is the window's, the tree is the sidebar's: timed apart, so
     // the log says which of the two is the slow one when a folder is.
     const double t0 = diagMillis();
-    entries = fsx::listDirectory(current, showHidden);
-    fsx::sortEntries(entries, sortColumn, sortAsc);
-    rebuildNameWidths();
-    const double t1 = diagMillis();
+        entries = fsx::listDirectory(current, showHidden);
+        fsx::sortEntries(entries, sortColumn, sortAsc);
+        rebuildNameWidths();
+        updateThumbnails();
+        const double t1 = diagMillis();
     listScroll = 0;
     gridScroll = 0;
     if (fromTreeClick) {
@@ -262,6 +264,7 @@ void App::reload() {
     entries = fsx::listDirectory(current, showHidden);
     fsx::sortEntries(entries, sortColumn, sortAsc);
     rebuildNameWidths();
+    updateThumbnails();
     std::set<std::wstring> keep;
     for (auto& e : entries)
         if (selection.count(e.path)) keep.insert(e.path);
@@ -311,7 +314,9 @@ void App::setViewMode(ViewMode v) {
     if (renaming) endRename(false);  // the edit belongs to the old view's geometry
     mode = v;
     clampScroll();
-    settings.viewMode = (int)v;
+    // The view chosen in a folder whose view is its own is that folder's: the
+    // usual one stays what it is for the others.
+    if (!viewAutomatic) settings.viewMode = (int)v;
     flattenTree();
 }
 
@@ -321,6 +326,37 @@ void App::cycleViewMode() {
     case ViewMode::Icons: setViewMode(ViewMode::List); break;
     case ViewMode::List: setViewMode(ViewMode::Details); break;
     }
+}
+
+void App::updateThumbnails() {
+    // Nothing asked for so far matters now: the cells that asked are gone,
+    // and those that are here ask for their own.  What could not be made is
+    // worth one more try.
+    thumbs::dropPending();
+    thumbs::forgetFailed();
+    thumbDrawn.assign(entries.size(), false);
+    int files = 0, pictures = 0;
+    for (const Entry& e : entries) {
+        if (e.isDir) continue;
+        ++files;
+        if (thumbs::isPicture(e.name)) ++pictures;
+    }
+    const bool mostly = files > 0 && pictures * 2 > files;  // more than half of the files
+    if (mostly == thumbnails) return;
+    if (renaming) endRename(false);  // the edit belongs to the old view's geometry
+    thumbnails = mostly;
+    if (thumbnails) {
+        // A folder that is mostly pictures opens as thumbnails - the big-icon
+        // view with each picture in place of its icon - whatever view is the
+        // usual one.
+        viewAutomatic = true;
+        mode = ViewMode::Icons;
+    } else if (viewAutomatic) {
+        viewAutomatic = false;
+        mode = (ViewMode)clampInt(settings.viewMode, 0, 2);
+    }
+    clampScroll();
+    flattenTree();
 }
 
 // ---------------------------------------------------------------- selection
@@ -1456,18 +1492,28 @@ bool App::hitTestItem(POINT p, int* index) const {
         if (index) *index = idx;
         return true;
     }
-    const int iconSize = (int)(48 * scale + 0.5);
+    const int iconSize = iconBox();
     RECT icon{(r.left + r.right) / 2 - iconSize / 2, r.top + (int)(4 * scale + 0.5),
               (r.left + r.right) / 2 + iconSize / 2, r.top + (int)(4 * scale + 0.5) + iconSize};
-    RECT label{r.left + (int)(2 * scale + 0.5), r.top + (int)(54 * scale + 0.5),
+    RECT label{r.left + (int)(2 * scale + 0.5), r.top + labelTop(),
                r.right - (int)(2 * scale + 0.5), r.bottom};
     if (!PtInRect(&icon, p) && !PtInRect(&label, p)) return false;
     if (index) *index = idx;
     return true;
 }
 
-int App::gridCellW() const { return (int)((mode == ViewMode::Icons ? 94 : 220) * scale + 0.5); }
-int App::gridCellH() const { return (int)((mode == ViewMode::Icons ? 94 : 19) * scale + 0.5); }
+// The big-icon view: 94 to a cell; with thumbnails (96 of picture and the
+// name under it) 112 by 132.
+int App::gridCellW() const {
+    const double w = mode != ViewMode::Icons ? 220 : thumbnails ? 112 : 94;
+    return (int)(w * scale + 0.5);
+}
+int App::gridCellH() const {
+    const double h = mode != ViewMode::Icons ? 19 : thumbnails ? 132 : 94;
+    return (int)(h * scale + 0.5);
+}
+int App::iconBox() const { return (int)((thumbnails ? 96 : 48) * scale + 0.5); }
+int App::labelTop() const { return (int)((thumbnails ? 104 : 54) * scale + 0.5); }
 
 int App::gridCols() const {
     int w = (int)(lay.gridViewport.right - lay.gridViewport.left);
@@ -1537,6 +1583,9 @@ void App::scrollListBy(int delta) {
 void App::scrollGridBy(int delta) {
     gridScroll += delta;
     clampScroll();
+    // The cells that scrolled away are not waiting for their thumbnails any
+    // more (the thumbnail view); they ask again if they come back.
+    thumbs::dropPending();
 }
 void App::scrollTreeBy(int delta) {
     treeScroll += delta;
@@ -2070,7 +2119,7 @@ RenameField App::renameField(int row) const {
     } else {
         // Icons: the label under the icon, centred in the cell.
         const RECT r = gridCellRect(row);
-        const int bandTop = r.top + (int)(54 * scale + 0.5);
+        const int bandTop = r.top + labelTop();
         const int bandH = std::max(0, (int)(r.bottom - (int)(2 * scale + 0.5)) - bandTop);
         const int labelW = std::min(tw, (int)(r.right - r.left) - (int)(10 * scale + 0.5));
         nameX = (r.left + r.right - labelW) / 2;
@@ -2197,7 +2246,8 @@ void App::endRename(bool commit) {
 
 void App::saveSettings() {
     settings.sidebarWidth = sidebarWidth;
-    settings.viewMode = (int)mode;
+    // The view of a folder whose view is its own is not the usual one (see updateThumbnails).
+    if (!viewAutomatic) settings.viewMode = (int)mode;
     settings.showHidden = showHidden;
     settings.useSystemIcons = useSystemIcons;
     if (hwnd) {
