@@ -373,17 +373,32 @@ void App::openWithSelection() {
 
 void App::openInNewWindow() {
     auto paths = selectedPaths();
-    if (paths.empty() || !fsx::isDirectory(paths.front())) return;
-    wchar_t exe[MAX_PATH]{};
-    GetModuleFileNameW(nullptr, exe, MAX_PATH);
-    std::wstring args = L"--path \"" + paths.front() + L"\"";
+    if (paths.empty()) return;
+    openPathInNewWindow(paths.front());
+}
+
+DWORD App::openPathInNewWindow(const std::wstring& path) {
+    if (path.empty() || !fsx::isDirectory(path)) return 0;
+    wchar_t exe[MAX_PATH * 2]{};
+    GetModuleFileNameW(nullptr, exe, (DWORD)(sizeof(exe) / sizeof(exe[0])));
+    // The new window is to be like this one, where it is and as big: it
+    // starts from the settings as they are now, not as they were when they
+    // were last written.
+    saveSettings();
+    std::wstring args = L"--path \"" + path + L"\"";
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi{};
-    if (CreateProcessW(exe, args.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
+    if (!CreateProcessW(exe, args.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+        diagLog(L"new window: could not start %ls for %ls (error %lu)", exe, path.c_str(),
+                GetLastError());
+        MessageBeep(MB_ICONASTERISK);
+        return 0;
     }
+    diagLog(L"new window: %ls started in %ls", exe, path.c_str());
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return pi.dwProcessId;
 }
 
 void App::createShortcutForSelection() {

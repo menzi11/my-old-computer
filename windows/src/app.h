@@ -274,7 +274,12 @@ public:
     void revealSelection();
     void openTerminalForSelection();
     void openWithSelection();
+    // The selected folder in a new window.
     void openInNewWindow();
+    // A folder in a new window: another instance of this program, started in
+    // it and placed like this window (see cascadePosition).  Returns that
+    // instance's id, 0 when there is nothing to open or it could not start.
+    DWORD openPathInNewWindow(const std::wstring& path);
     void createShortcutForSelection();
     void showSelectionProperties();
     void sortBy(int column);

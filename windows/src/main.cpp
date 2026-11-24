@@ -1368,7 +1368,7 @@ void onLButtonUp(HWND hwnd, App& a, POINT p) {
 // column header, blank canvas - it is just another click, and the first
 // click's action has already run.  Dropping it there made a quick second
 // click on the toolbar's View button do nothing.
-void onDoubleClick(HWND hwnd, App& a, POINT p) {
+void onDoubleClick(HWND hwnd, App& a, POINT p, bool ctrl) {
     if (a.sidebarVisible && PtInRect(&a.lay.sidebar, p)) {
         int row = a.treeRowAt(p);
         diagLog(L"DBLCLK tree %d,%d row=%d", p.x, p.y, row);
@@ -1385,7 +1385,10 @@ void onDoubleClick(HWND hwnd, App& a, POINT p) {
     int idx = -1;
     if (a.hitTestItem(p, &idx)) {
         diagLog(L"DBLCLK %d,%d idx=%d", p.x, p.y, idx);
-        a.openEntry(a.entries[idx]);
+        // Ctrl and a double click on a folder: it opens in a new window, as in
+        // Explorer.  On a file Ctrl changes nothing.
+        if (ctrl && a.entries[idx].isDir) a.openPathInNewWindow(a.entries[idx].path);
+        else a.openEntry(a.entries[idx]);
         repaint(hwnd);
         return;
     }
@@ -1396,12 +1399,24 @@ void onDoubleClick(HWND hwnd, App& a, POINT p) {
     onLButtonDown(hwnd, a, p);
 }
 
+void onDoubleClick(HWND hwnd, App& a, POINT p) {
+    onDoubleClick(hwnd, a, p, (GetKeyState(VK_CONTROL) & 0x8000) != 0);
+}
+
 // The key with the modifiers it was pressed with (onKeyDown reads them from
 // the keyboard; the tests pass their own).
 void handleKey(HWND hwnd, App& a, WPARAM key, bool ctrl, bool shift, bool alt) {
     (void)shift;
     switch (key) {
-    case VK_RETURN: a.openSelection(); break;
+    case VK_RETURN: {
+        // Ctrl and Enter on one folder: it opens in a new window, as in
+        // Explorer.  On anything else Ctrl changes nothing.
+        const bool oneFolder =
+            a.selection.size() == 1 && fsx::isDirectory(*a.selection.begin());
+        if (ctrl && oneFolder) a.openInNewWindow();
+        else a.openSelection();
+        break;
+    }
     case VK_BACK: a.goUp(); break;
     case VK_DELETE: a.deleteSelection(); break;
     case VK_F2: a.renameSelection(); break;
@@ -2384,6 +2399,72 @@ void placeWindow(HWND hwnd, int x, int y, int w, int h) {
     SetWindowPos(hwnd, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
 }
 
+// Where a window of this program is about to open: a step down and to the
+// right of any other instance's window that is at that place already, as
+// often as it takes - so that a folder opened in a new window, or the program
+// started a second time, does not open exactly over the first.  The step is
+// a title bar high: the title bars of the windows behind stay theirs to
+// click.  The title bar stays on the monitor: when the next step would take
+// it off, the window opens where the first window did.
+struct SiblingScan {
+    std::wstring exe;
+    std::vector<POINT> at;  // where the windows of the other instances open
+};
+
+BOOL CALLBACK collectSiblings(HWND h, LPARAM lp) {
+    SiblingScan& s = *(SiblingScan*)lp;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(h, &pid);
+    wchar_t cls[64]{};
+    if (!pid || pid == GetCurrentProcessId()) return TRUE;
+    if (!GetClassNameW(h, cls, 64) || lstrcmpW(cls, L"MyOldComputerWindow") != 0) return TRUE;
+    // Another instance of this program, not a test build somewhere else.
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return TRUE;
+    wchar_t path[MAX_PATH * 2]{};
+    DWORD n = (DWORD)(sizeof(path) / sizeof(path[0]));
+    const bool same = QueryFullProcessImageNameW(process, 0, path, &n) &&
+                      _wcsicmp(path, s.exe.c_str()) == 0;
+    CloseHandle(process);
+    if (!same) return TRUE;
+    WINDOWPLACEMENT wp{};
+    wp.length = sizeof(wp);
+    if (GetWindowPlacement(h, &wp))
+        s.at.push_back(POINT{wp.rcNormalPosition.left, wp.rcNormalPosition.top});
+    return TRUE;
+}
+
+POINT cascadePosition(POINT at, int w, int titleH) {
+    wchar_t exe[MAX_PATH * 2]{};
+    GetModuleFileNameW(nullptr, exe, (DWORD)(sizeof(exe) / sizeof(exe[0])));
+    SiblingScan scan;
+    scan.exe = exe;
+    EnumWindows(collectSiblings, (LPARAM)&scan);
+    const int step = GetSystemMetrics(SM_CYCAPTION);
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    const RECT bounds{at.x, at.y, at.x + w, at.y + titleH};
+    GetMonitorInfoW(MonitorFromRect(&bounds, MONITOR_DEFAULTTONEAREST), &mi);
+    POINT firstFree = at;
+    bool found = false;
+    // One place more than there are windows: one of them is free.
+    for (int i = 0; i <= (int)scan.at.size(); ++i) {
+        const POINT p{at.x + i * step, at.y + i * step};
+        bool taken = false;
+        for (const POINT q : scan.at) taken = taken || (q.x == p.x && q.y == p.y);
+        if (taken) continue;
+        if (!found) {
+            firstFree = p;  // if none of them keeps the title bar on the monitor
+            found = true;
+        }
+        const bool onMonitor = p.x >= mi.rcWork.left && p.y >= mi.rcWork.top &&
+                               p.x + std::min(w, 4 * step) <= mi.rcWork.right &&
+                               p.y + titleH <= mi.rcWork.bottom;
+        if (onMonitor) return p;
+    }
+    return firstFree;
+}
+
 // One frame of pixels, top-down.
 struct Frame {
     int w = 0, h = 0;
@@ -3213,6 +3294,271 @@ void crumbTestStep(HWND driver) {
 LRESULT CALLBACK crumbTestProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_TIMER && wp == kCrumbTestTimer) {
         crumbTestStep(hwnd);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+// ---------------------------------------------------------- new window test
+// A folder opened in a new window, from the real window: Ctrl and a double
+// click on the folder, then Ctrl and Enter on it.  The new window is another
+// instance of this program, really started - with this test's environment
+// (MOC_SETTINGS_FILE, MOC_NO_FOREGROUND), so that it is never activated and
+// stays behind everything.  It is found by its process, read back from the
+// compositor like the test's own window, asked what it shows (the layout dump
+// the driver scripts use) and closed.
+
+constexpr UINT_PTR kNewWinTestTimer = 0x4D48;
+constexpr wchar_t kNewWinTestClass[] = L"MyOldComputerNewWinTest";
+constexpr int kNewWinTestEnd = 11;  // the step past the last one
+
+// Every window of this program's class there is, with the process it is of.
+BOOL CALLBACK collectProgramWindows(HWND h, LPARAM lp) {
+    auto* out = (std::vector<std::pair<HWND, DWORD>>*)lp;
+    wchar_t cls[64]{};
+    DWORD pid = 0;
+    GetWindowThreadProcessId(h, &pid);
+    if (pid && GetClassNameW(h, cls, 64) && lstrcmpW(cls, L"MyOldComputerWindow") == 0)
+        out->emplace_back(h, pid);
+    return TRUE;
+}
+
+std::vector<std::pair<HWND, DWORD>> programWindows() {
+    std::vector<std::pair<HWND, DWORD>> out;
+    EnumWindows(collectProgramWindows, (LPARAM)&out);
+    return out;
+}
+
+// Whether a process runs this program (not a build of it lying somewhere
+// else).
+bool sameProgram(DWORD pid) {
+    wchar_t mine[MAX_PATH * 2]{}, its[MAX_PATH * 2]{};
+    GetModuleFileNameW(nullptr, mine, (DWORD)(sizeof(mine) / sizeof(mine[0])));
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return false;
+    DWORD n = (DWORD)(sizeof(its) / sizeof(its[0]));
+    const bool same = QueryFullProcessImageNameW(process, 0, its, &n) && _wcsicmp(mine, its) == 0;
+    CloseHandle(process);
+    return same;
+}
+
+// Below the foreground window in the order of the windows, as one that is
+// behind everything is.  (No foreground window: nothing to be below.)
+bool belowForeground(HWND h) {
+    const HWND foreground = GetForegroundWindow();
+    if (!foreground) return true;
+    for (HWND w = foreground; w; w = GetWindow(w, GW_HWNDNEXT))
+        if (w == h) return true;
+    return false;
+}
+
+// The lines of the layout dump (dumpLayout) that start with `starts`.
+std::vector<std::wstring> dumpLines(const wchar_t* starts) {
+    std::vector<std::wstring> out;
+    wchar_t temp[MAX_PATH]{}, path[MAX_PATH]{};
+    GetTempPathW(MAX_PATH, temp);
+    swprintf_s(path, L"%smoc-layout.txt", temp);
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path, L"r, ccs=UTF-8") != 0 || !f) return out;
+    wchar_t line[4096]{};
+    while (fgetws(line, 4096, f))
+        if (wcsncmp(line, starts, wcslen(starts)) == 0) out.emplace_back(line);
+    fclose(f);
+    return out;
+}
+
+struct NewWinDrive {
+    HWND main = nullptr;
+    int step = 0;
+    int wait = 0;      // ticks to let what was started get through first
+    int ticks = 0;     // the watchdog's count
+    int waiting = 0;   // ticks spent waiting for a new instance
+    std::wstring base;    // the test's window's folder
+    std::wstring folder;  // the one to open in a new window
+    POINT at{};        // where that folder's name is, in the test's window
+    RECT parent{};     // the test's window on the screen
+    int titleBar = 0;  // a title bar, in pixels
+    int expected = 0;  // how far down and to the right a new window is to be
+    std::vector<DWORD> before;  // the instances of the program there were
+    DWORD child = 0;         // the instance started
+    HANDLE process = nullptr;  // it, to wait for its end
+    HWND window = nullptr;    // its window
+    // [0]: the window opened by the double click, [1]: the one by Enter.
+    bool there[2] = {false, false};
+    bool inFolder[2] = {false, false};
+    bool named[2] = {false, false};
+    bool placed[2] = {false, false};
+    bool gone[2] = {false, false};
+    std::wstring says[2];  // what each new window says it is in
+    int dx[2] = {0, 0}, dy[2] = {0, 0};
+    SIZE size[2] = {};
+    bool quiet = true;  // never the foreground, always below it
+    bool stays = false;  // the test's window is still in its folder, the folder still selected
+    bool baseline = false;
+    int stale[3] = {0, 0, 0};
+    RECT where[3] = {};
+};
+NewWinDrive g_newWin;
+
+void newWinTestStep(HWND driver) {
+    NewWinDrive& d = g_newWin;
+    KillTimer(driver, kNewWinTestTimer);
+    if (++d.ticks > 800) {  // twenty seconds: an instance that never came - give up, do not hang
+        d.step = kNewWinTestEnd;
+        return;
+    }
+    const auto later = [driver] { SetTimer(driver, kNewWinTestTimer, 25, nullptr); };
+    if (d.step >= kNewWinTestEnd) {
+        // A new window the test did not mean to leave open.
+        if (d.window && IsWindow(d.window)) {
+            PostMessageW(d.window, WM_CLOSE, 0, 0);
+            later();
+        }
+        return;
+    }
+    if (d.wait-- > 0) {
+        later();
+        return;
+    }
+    d.wait = 0;
+    if (d.window && IsWindow(d.window))
+        d.quiet = d.quiet && GetForegroundWindow() != d.window && belowForeground(d.window);
+    const int k = d.step >= 6 ? 1 : 0;  // the second new window: the one Enter opened
+    const auto stillWaiting = [&] {
+        if (++d.waiting < 300) {  // seven and a half seconds
+            later();
+            return true;
+        }
+        return false;
+    };
+    switch (d.step) {
+    case 0: {
+        UpdateWindow(d.main);
+        const Frame shown = shownFrame(d.main);
+        const Frame fresh = renderedFrame(g_app);
+        keepFrames(L"newwin-baseline", shown, fresh);
+        d.baseline = frameMismatch(shown, fresh, &d.where[0]) == 0;
+        GetWindowRect(d.main, &d.parent);
+        // Counted here, not by the code under test: for every other instance
+        // of this program that opens where this window does, the new window
+        // is one title bar further down and to the right.
+        int others = 0;
+        for (const auto& w : programWindows()) {
+            WINDOWPLACEMENT wp{};
+            wp.length = sizeof(wp);
+            if (w.first == d.main || !sameProgram(w.second) || !GetWindowPlacement(w.first, &wp))
+                continue;
+            if (wp.rcNormalPosition.left == d.parent.left && wp.rcNormalPosition.top == d.parent.top)
+                ++others;
+        }
+        d.expected = (others + 1) * d.titleBar;
+        for (const auto& w : programWindows()) d.before.push_back(w.second);
+        // The second click of a double click with Ctrl held, as the window
+        // procedure hands it on.
+        onDoubleClick(d.main, g_app, d.at, true);
+        d.wait = 3;
+        break;
+    }
+    case 1:
+    case 6: {  // the new instance comes up
+        for (const auto& w : programWindows()) {
+            if (w.second != GetCurrentProcessId() &&
+                std::find(d.before.begin(), d.before.end(), w.second) == d.before.end())
+                d.child = w.second;
+        }
+        if (!d.child) {
+            if (stillWaiting()) return;
+        } else {
+            d.process = OpenProcess(SYNCHRONIZE, FALSE, d.child);
+        }
+        d.there[k] = d.child != 0;
+        d.wait = 2;
+        break;
+    }
+    case 2:
+    case 7: {  // ... and its window is on the screen
+        for (const auto& w : programWindows())
+            if (w.second == d.child && IsWindowVisible(w.first)) d.window = w.first;
+        if (!d.window && d.child && stillWaiting()) return;
+        d.wait = 4;  // let it paint
+        break;
+    }
+    case 3:
+    case 8: {  // where it is and what it shows, read back like the test's own window
+        if (d.window) {
+            RECT r{};
+            GetWindowRect(d.window, &r);
+            d.dx[k] = r.left - d.parent.left;
+            d.dy[k] = r.top - d.parent.top;
+            d.size[k] = SIZE{r.right - r.left, r.bottom - r.top};
+            d.placed[k] = d.dx[k] == d.expected && d.dy[k] == d.expected &&
+                          d.size[k].cx == d.parent.right - d.parent.left &&
+                          d.size[k].cy == d.parent.bottom - d.parent.top;
+            // What it says it is in, and whether its address bar shows the way
+            // there: the last crumb is the folder, and has its name.
+            DWORD_PTR answered = 0;
+            SendMessageTimeoutW(d.window, g_dumpMsg, 0, 0, SMTO_ABORTIFHUNG, 5000, &answered);
+            const auto crumbs = dumpLines(L"crumb ");
+            RECT box{};
+            if (!crumbs.empty()) {
+                int i = 0, x = 0, y = 0, w = 0, h = 0;
+                if (swscanf_s(crumbs.back().c_str(), L"crumb %d %d,%d %dx%d", &i, &x, &y, &w, &h) ==
+                    5)
+                    box = RECT{x, y, x + w, y + h};
+            }
+            const auto current = dumpLines(L"current ");
+            if (!current.empty()) d.says[k] = current.front().substr(8);
+            while (!d.says[k].empty() &&
+                   (d.says[k].back() == L'\n' || d.says[k].back() == L'\r'))
+                d.says[k].pop_back();
+            d.inFolder[k] = _wcsicmp(d.says[k].c_str(), d.folder.c_str()) == 0;
+            const Frame f = shownFrame(d.window);
+            d.named[k] = box.right > box.left && frameCount(f, box, blackInk) >= 10;
+            keepFrames(k == 0 ? L"newwin-by-click" : L"newwin-by-enter", f, f);
+            PostMessageW(d.window, WM_CLOSE, 0, 0);
+        }
+        d.wait = 2;
+        break;
+    }
+    case 4:
+    case 9: {  // closed: it is gone
+        const bool ended = d.process ? WaitForSingleObject(d.process, 0) == WAIT_OBJECT_0
+                                     : !d.window || !IsWindow(d.window);
+        if (!ended && stillWaiting()) return;
+        d.gone[k] = ended;
+        if (d.process) {
+            CloseHandle(d.process);
+            d.process = nullptr;
+        }
+        d.child = 0;
+        d.window = nullptr;
+        d.waiting = 0;
+        d.wait = 3;
+        break;
+    }
+    case 5:  // the folder selected, Ctrl and Enter: as onKeyDown hands the key on
+        g_app.selection.clear();
+        g_app.selection.insert(d.folder);
+        handleKey(d.main, g_app, VK_RETURN, true, false, false);
+        d.wait = 3;
+        break;
+    default: {
+        UpdateWindow(d.main);
+        d.stays = g_app.current == d.base && g_app.selection.count(d.folder) != 0;
+        const Frame shown = shownFrame(d.main);
+        const Frame fresh = renderedFrame(g_app);
+        keepFrames(L"newwin-end", shown, fresh);
+        d.stale[2] = frameMismatch(shown, fresh, &d.where[2]);
+        break;
+    }
+    }
+    ++d.step;
+    if (d.step < kNewWinTestEnd) later();
+}
+
+LRESULT CALLBACK newWinTestProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_TIMER && wp == kNewWinTestTimer) {
+        newWinTestStep(hwnd);
         return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
@@ -5195,6 +5541,119 @@ int runUiTest(App& app) {
                 g_crumb.where[13]);
     }
 
+    // A folder in a new window (see newWinTestStep).  Nothing but a folder
+    // opens one - and nothing is started for what does not.
+    {
+        check(L"多开只对文件夹：文件、不存在的路径不开新窗口",
+              app.openPathInNewWindow(base + L"\\item0.txt") == 0 &&
+              app.openPathInNewWindow(base + L"\\no-such-folder") == 0);
+        WNDCLASSEXW wc{sizeof(WNDCLASSEXW)};
+        wc.lpfnWndProc = newWinTestProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = kNewWinTestClass;
+        RegisterClassExW(&wc);
+        HWND driver = CreateWindowExW(0, kNewWinTestClass, L"", WS_OVERLAPPED, 0, 0, 100, 100,
+                                      nullptr, nullptr, wc.hInstance, nullptr);  // never shown
+        registerMainClass(wc.hInstance);
+        HWND main = CreateWindowExW(WS_EX_NOACTIVATE, L"MyOldComputerWindow", L"new window test",
+                                    WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, 0, 0, 0, 0, driver,
+                                    nullptr, wc.hInstance, nullptr);
+        g_newWin = NewWinDrive{};
+        g_newWin.main = main;
+        g_newWin.base = crumbsDir;
+        g_newWin.folder = crumbAa;
+        g_newWin.titleBar = GetSystemMetrics(SM_CYCAPTION);
+        if (main) {
+            g_app.hwnd = main;
+            g_app.scale = dpiScaleOfWindow(main);
+            g_app.init(main);
+            g_app.relayout(pxOf(g_app.scale, 700), pxOf(g_app.scale, 440));
+            g_app.sidebarVisible = true;
+            g_app.loadDirectory(crumbsDir, false);
+            g_app.setViewMode(ViewMode::Details);
+            placeWindow(main, 0, 0, g_app.width, g_app.height);
+            // The settings as last written name one place; the window is then
+            // moved.  A new window is to take the place the window is in now,
+            // which only writing them again can tell it.
+            g_app.saveSettings();
+            placeWindow(main, 40, 40, g_app.width, g_app.height);
+            ShowWindow(main, SW_SHOWNOACTIVATE);
+            SetWindowPos(main, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            UpdateWindow(main);
+            // The folder's name in the list: the first row, "aa".
+            const RECT r = g_app.listRowRect(0);
+            g_newWin.at = POINT{r.left + 10, (r.top + r.bottom) / 2};
+            MSG msg;
+            for (SetTimer(driver, kNewWinTestTimer, 60, nullptr);
+                 g_newWin.step < kNewWinTestEnd && GetMessageW(&msg, nullptr, 0, 0) > 0;) {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            KillTimer(driver, kNewWinTestTimer);
+            g_app.hwnd = nullptr;  // the edit is the window's child and goes with it
+            DestroyWindow(main);
+            PeekMessageW(&msg, nullptr, WM_QUIT, WM_QUIT, PM_REMOVE);
+            g_app.addrEdit = nullptr;
+            g_app.addrEditing = false;
+            if (g_app.addrFont) {
+                DeleteObject(g_app.addrFont);
+                g_app.addrFont = nullptr;
+            }
+        }
+        DestroyWindow(driver);
+
+        std::wstring notes;
+        if (!main) notes += L"窗口没建出来";
+        else if (g_newWin.ticks > 800) notes += L"超时";
+        if (!g_newWin.baseline)
+            notes += L"基准不符，范围 " + std::to_wstring(g_newWin.where[0].left) + L"," +
+                     std::to_wstring(g_newWin.where[0].top) + L" " +
+                     std::to_wstring(g_newWin.where[0].right - g_newWin.where[0].left) + L"x" +
+                     std::to_wstring(g_newWin.where[0].bottom - g_newWin.where[0].top);
+        const auto of = [](int v) { return std::to_wstring(v); };
+        // A verdict that says what was seen of the k-th new window.
+        const auto verdict = [&](const std::wstring& name, int k, const std::wstring& why, bool ok) {
+            std::wstring label = name;
+            if (!notes.empty()) label += L"：" + notes;
+            else if (!g_newWin.there[k]) label += L"：新实例没有启动";
+            else if (!ok) label += L"：" + why;
+            check(label.c_str(), label == name);
+        };
+        const wchar_t* const how[2] = {L"按住 Ctrl 双击一个文件夹", L"选中的文件夹按 Ctrl 和回车"};
+        check(L"（测试基准）多开：屏幕上的画面读得回来，且与按状态渲染的一致", g_newWin.baseline);
+        for (int k = 0; k < 2; ++k) {
+            const std::wstring name =
+                std::wstring(how[k]) +
+                (k == 0 ? L"：这个程序的另一个实例打开了它，原窗口不动" : L"：同样开一个新窗口");
+            std::wstring why;
+            if (!g_newWin.inFolder[k])
+                why = L"新窗口在“" + g_newWin.says[k] + L"”，该在“" + g_newWin.folder + L"”";
+            else if (!g_newWin.named[k]) why = L"新窗口的地址栏上没有它的名字";
+            else if (k == 0 && !g_newWin.stays) why = L"原窗口离开了它自己的文件夹，或丢了选中";
+            else if (k == 0 && g_newWin.stale[2])
+                why = L"原窗口屏幕上有 " + of(g_newWin.stale[2]) + L" 个像素与状态不符";
+            verdict(name, k, why,
+                    g_newWin.inFolder[k] && g_newWin.named[k] && (k != 0 || (g_newWin.stays && !g_newWin.stale[2])));
+        }
+        for (int k = 0; k < 2; ++k) {
+            const std::wstring name = std::wstring(how[k]) +
+                                      L"：新窗口和原窗口一样大，开在它右下一个标题栏处，不叠在它上面";
+            const std::wstring why =
+                L"偏了 " + of(g_newWin.dx[k]) + L"," + of(g_newWin.dy[k]) + L"（该是 " +
+                of(g_newWin.expected) + L"," + of(g_newWin.expected) + L"），大小 " +
+                of(g_newWin.size[k].cx) + L"x" + of(g_newWin.size[k].cy) + L"（原窗口 " +
+                of(g_newWin.parent.right - g_newWin.parent.left) + L"x" +
+                of(g_newWin.parent.bottom - g_newWin.parent.top) + L"）";
+            verdict(name, k, why, g_newWin.placed[k]);
+        }
+        for (int k = 0; k < 2; ++k) {
+            const std::wstring name =
+                std::wstring(how[k]) + L"：新窗口关得上；开着的时候没占过前台，一直在别的窗口后面";
+            verdict(name, k, !g_newWin.gone[k] ? L"关不上" : L"它占过前台，或跑到了别的窗口前面",
+                    g_newWin.gone[k] && g_newWin.quiet);
+        }
+    }
+
     // Paint benchmark: catches accidental full-window repaint storms.
     app.setViewMode(ViewMode::Details);
     app.relayout(1100, 760);
@@ -5450,7 +5909,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
         x = (GetSystemMetrics(SM_CXSCREEN) - physicalW) / 2;
         y = (GetSystemMetrics(SM_CYSCREEN) - physicalH) / 2;
     }
-    placeWindow(hwnd, x, y, physicalW, physicalH);
+    // Not exactly over the window of another instance: a title bar down and
+    // to the right of it.
+    const int titleH = pxOf(g_app.scale, 5) + pxOf(g_app.scale, 22);
+    const POINT place = cascadePosition(POINT{x, y}, physicalW, titleH);
+    placeWindow(hwnd, place.x, place.y, physicalW, physicalH);
     g_app.relayout(physicalW, physicalH);
     g_app.demo = hasArg(args, L"--demo");
     std::wstring startPath = argValue(args, L"--path");
@@ -5462,7 +5925,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
     g_app.loadDirectory(startPath, false);
     dnd::registerTarget(hwnd, &g_app);
     DragAcceptFiles(hwnd, TRUE);
-    ShowWindow(hwnd, showCmd == SW_SHOWMAXIMIZED ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL);
+    ShowWindow(hwnd, staysInBackground()
+                         ? SW_SHOWNOACTIVATE
+                         : showCmd == SW_SHOWMAXIMIZED ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL);
+    // Behind everything as well: the machine is somebody's.
+    if (staysInBackground())
+        SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     UpdateWindow(hwnd);
 
     MSG msg;
