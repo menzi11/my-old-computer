@@ -30,6 +30,8 @@
 #include "snapshot.h"
 #include "theme.h"
 
+int measureUiText(const std::wstring& s, int fontPx);  // the UI font, as the rows are measured with
+
 namespace {
 
 App g_app;
@@ -69,6 +71,8 @@ void dumpLayout(App& a) {
                  (int)(c.box.bottom - c.box.top), (int)c.more.left, (int)c.more.top,
                  (int)(c.more.right - c.more.left), (int)(c.more.bottom - c.more.top),
                  c.path.c_str(), c.title.c_str());
+        if (c.text != c.title)  // cut with an ellipsis, or the machine as an icon alone
+            fwprintf(f, L"crumbText %d [%ls]\n", i, c.text.c_str());
     }
     // The list that is up under one of them, if any: where it is on the
     // screen, what is in view, and every row it holds.
@@ -593,8 +597,8 @@ void showAppMenu(HWND hwnd, App& a, int index, POINT p) {
     (void)p;
 }
 
-// The list under an address bar arrow: the subfolders of the crumb it follows
-// (crumb), or the crumbs out of view to the left (crumb = -1).  The machine's
+// The list under an address bar button: the subfolders of the crumb it follows
+// (crumb), or the crumbs the ... stands for (crumb = -1).  The machine's
 // button opens the first kind of list too - it has no folder to go to, only
 // its drives.  The row that is chosen is gone to.  A press on another of the
 // bar's arrows while the list is up opens that one's list in its place, as it
@@ -2667,7 +2671,7 @@ LRESULT CALLBACK frameTestProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 constexpr UINT_PTR kCrumbTestTimer = 0x4D47;
 constexpr wchar_t kCrumbTestClass[] = L"MyOldComputerCrumbTest";
-constexpr int kCrumbTestEnd = 36;  // the step past the last one
+constexpr int kCrumbTestEnd = 41;  // the step past the last one
 
 bool isFaceHi(COLORREF px) { return (px & 0xFFFFFF) == (Theme::faceHi & 0xFFFFFF); }
 bool isPlainWhite(COLORREF px) { return (px & 0xFFFFFF) == 0xFFFFFF; }
@@ -2678,7 +2682,7 @@ struct CrumbDrive {
     int step = 0;
     int wait = 0;   // ticks to let what was posted get through first
     int ticks = 0;  // the watchdog's count
-    std::wstring way, dd, aa, bb, root, hiddenTarget;
+    std::wstring way, dd, aa, bb, root, hiddenTarget, wide, wideName;
     bool baseline = false;
     int k = -1;  // the crumb hovered and pressed
     int hoverArea = 1, hoverShown = 0, hoverCleared = 0, hoverStale = 0;
@@ -2686,7 +2690,7 @@ struct CrumbDrive {
     int pressShown = 0;
     bool listCame = false, listRight = false, arrowDown = false, hotPainted = false, hotMoved = false;
     bool chose = false;
-    bool hiddenList = false, wentHidden = false;
+    bool hiddenList = false, hiddenArrowDown = false, wentHidden = false;
     bool clicked = false, doubleOk = false;
     bool editByBlank = false, editByF4 = false, editByCtrlL = false, editByAltD = false;
     bool editsClosed = true;
@@ -2695,8 +2699,14 @@ struct CrumbDrive {
     bool switchFrom = false, switched = false, switchClosed = false;
     bool longList = false, listFits = false, longClosed = false;
     int listWidth = 0;
-    int stale[11] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-    RECT where[11] = {};
+    // Out of room: the row starts at the left with the machine as an icon
+    // alone, a ... right after it, no gap anywhere; the ... lights up under
+    // the pointer; a name too long for the field ends in an ellipsis.
+    bool rowJoined = false, machineIconOnly = false, dotsShown = false;
+    bool dotsHover = false, dotsHoverCleared = false;
+    bool cutState = false, cutInk = false, cutWhite = false;
+    int stale[14] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    RECT where[14] = {};
 };
 CrumbDrive g_crumb;
 
@@ -2797,6 +2807,29 @@ void crumbTestStep(HWND driver) {
         const Frame fresh = renderedFrame(g_app);
         keepFrames(L"crumb-baseline", shown, fresh);
         d.baseline = frameMismatch(shown, fresh, &d.where[0]) == 0;
+        d.stale[11] = frameMismatch(shown, fresh, &d.where[11]);
+        // Out of room, as it is on screen: the machine an icon alone at the
+        // left edge, its v, three dots, then the last crumbs - no gap anywhere.
+        const RECT inner = g_app.addressInner();
+        const RECT machine = g_app.crumbs[0].box, dots = g_app.lay.addrMore;
+        const int first = g_app.crumbFirst;
+        const int dot = pxOf(g_app.scale, 2);
+        d.rowJoined = first >= 2 && first < (int)g_app.crumbs.size() && g_app.crumbs[0].text.empty() &&
+                      machine.left == inner.left && g_app.crumbs[0].more.left == machine.right &&
+                      dots.left == g_app.crumbs[0].more.right &&
+                      g_app.crumbs[first].box.left == dots.right &&
+                      g_app.crumbs.back().box.right + pxOf(g_app.scale, 20) <= inner.right;
+        // Between the icon and the dots there is nothing on screen but the
+        // v's triangle: no name.
+        const RECT between{machine.left + pxOf(g_app.scale, 24), inner.top, dots.left, inner.bottom};
+        const RECT dotsArea{dots.left, inner.top, dots.right, inner.bottom};
+        d.machineIconOnly = d.rowJoined &&
+                            machine.right - machine.left ==
+                                2 * pxOf(g_app.scale, 5) + pxOf(g_app.scale, 16) &&
+                            frameCount(shown, between, blackInk) <=
+                                8 * pxOf(g_app.scale, 3) * pxOf(g_app.scale, 3);
+        d.dotsShown = d.rowJoined && frameCount(shown, dotsArea, isBlack) == 3 * dot * dot &&
+                      frameCount(shown, dotsArea, notWhite) == 3 * dot * dot;
         d.k = crumbOf(L"cc");
         d.wait = 2;
         break;
@@ -2879,7 +2912,7 @@ void crumbTestStep(HWND driver) {
         d.wait = 5;
         break;
     }
-    case 8: {  // the list is gone and so is the press of its v; now the < of the crumbs out of view
+    case 8: {  // the list is gone and so is the press of its v; now the ... of the crumbs out of view
         settle();
         d.chose = !folderListWindow() && g_app.current == d.dd + L"\\yy" && g_app.pressCrumbMore == -1;
         compare(2, L"crumb-choose");
@@ -2888,11 +2921,16 @@ void crumbTestStep(HWND driver) {
         d.wait = 3;
         break;
     }
-    case 9: {  // them, the machine first; a click on the last one goes there
+    case 9: {  // them, the drive first (the machine is in view, so not in the list) and the ... pressed; a click on the last one goes there
         const Seen s = seeList(-1, -1);
-        d.hiddenList = s.list && s.rows && s.rows->size() == (size_t)g_app.crumbFirst &&
+        const RECT dots = g_app.lay.addrMore;
+        d.hiddenList = s.list && s.rows && s.rows->size() + 1 == (size_t)g_app.crumbFirst &&
                        s.info.highlighted == -1 && !s.rows->empty() &&
-                       (*s.rows)[0].kind == TreeNode::Machine;
+                       (*s.rows)[0].kind == TreeNode::Volume &&
+                       _wcsicmp((*s.rows)[0].path.c_str(), d.root.c_str()) == 0;
+        d.hiddenArrowDown = g_app.pressAddrMore &&
+                            frameCount(shownFrame(d.main), dots, isFace) >= area(dots) * 3 / 4;
+        keepFrames(L"crumb-dots-list", shownFrame(d.main), renderedFrame(g_app));
         if (s.list && s.rows && !s.rows->empty()) {
             const int row = std::min((int)s.rows->size() - 1, s.info.first + s.info.visible - 1);
             const RECT r = s.info.rows;
@@ -3103,6 +3141,70 @@ void crumbTestStep(HWND driver) {
         d.longClosed = !folderListWindow();
         compare(10, L"crumb-long");
         break;
+    case 36:  // the pointer is on the ...
+        if (g_app.lay.addrMore.right > g_app.lay.addrMore.left)
+            onMouseMove(d.main, g_app, middle(g_app.lay.addrMore));
+        d.wait = 3;
+        break;
+    case 37: {  // lit up, dots and all; then the pointer leaves the window
+        settle();
+        const RECT r = g_app.lay.addrMore;
+        const int dot = pxOf(g_app.scale, 2);
+        d.dotsHover = frameCount(shownFrame(d.main), r, isFaceHi) == area(r) - 3 * dot * dot;
+        keepFrames(L"crumb-dots-hover", shownFrame(d.main), renderedFrame(g_app));
+        post(d.main, WM_MOUSELEAVE, 0, 0, 0);
+        d.wait = 3;
+        break;
+    }
+    case 38: {
+        settle();
+        const RECT r = g_app.lay.addrMore;
+        const int dot = pxOf(g_app.scale, 2);
+        d.dotsHoverCleared = frameCount(shownFrame(d.main), r, isPlainWhite) == area(r) - 3 * dot * dot;
+        compare(12, L"crumb-dots");
+        post(d.main, WM_KEYDOWN, VK_F4, 0, 0);
+        d.wait = 3;
+        break;
+    }
+    case 39:
+        typePath(d.wide);  // a folder whose name alone is too long for the bar
+        d.wait = 5;
+        break;
+    case 40: {
+        settle();
+        const RECT inner = g_app.addressInner();
+        const Crumb& last = g_app.crumbs.back();
+        const int inset = pxOf(g_app.scale, 5);
+        const int dotsW = measureUiText(L"\u2026", (int)(14.6667 * g_app.scale + 0.5));
+        d.cutState = g_app.current == d.wide && !g_app.addrEditing && last.title == d.wideName &&
+                     last.text.size() >= 2 && last.text != last.title &&
+                     last.text.back() == L'\u2026' &&
+                     g_app.crumbFirst == (int)g_app.crumbs.size() - 1 &&
+                     last.box.left == g_app.lay.addrMore.right &&
+                     last.box.right <= inner.right - pxOf(g_app.scale, 20);
+        // On screen: the ellipsis is the last thing in the button - its dots
+        // sit on the line's floor with white above them, where a W has ink -
+        // and after the button there is nothing but blank.
+        const RECT dots{last.box.right - inset - dotsW + 1, inner.top, last.box.right - inset,
+                        inner.bottom};
+        const int floor = inner.bottom - pxOf(g_app.scale, 8);
+        const RECT above{dots.left, dots.top, dots.right, floor};
+        const RECT onFloor{dots.left, floor, dots.right, inner.bottom};
+        const RECT after{last.box.right, inner.top, inner.right, inner.bottom};
+        const Frame f = shownFrame(d.main);
+        // The dots are a pixel or two of ClearType: ink is anything not white.
+        d.cutInk = d.cutState && frameCount(f, above, notWhite) == 0 &&
+                   frameCount(f, onFloor, notWhite) >= 3;
+        d.cutWhite = d.cutState && after.right - after.left >= pxOf(g_app.scale, 20) &&
+                     frameCount(f, after, isPlainWhite) == area(after);
+        diagLog(L"cut: box %ld,%ld %ldx%ld dots %ld,%ld %ldx%ld above notWhite %d, floor ink %d, after white %d of %d",
+                last.box.left, last.box.top, last.box.right - last.box.left,
+                last.box.bottom - last.box.top, dots.left, dots.top, dots.right - dots.left,
+                dots.bottom - dots.top, frameCount(f, above, notWhite),
+                frameCount(f, onFloor, notWhite), frameCount(f, after, isPlainWhite), area(after));
+        compare(13, L"crumb-cut");
+        break;
+    }
     }
     ++d.step;
     if (d.step < kCrumbTestEnd) later();
@@ -4556,9 +4658,12 @@ int runUiTest(App& app) {
                         crumbCc = crumbBb + L"\\cc", crumbDd = crumbCc + L"\\dd",
                         crumbWay = crumbDd + L"\\ee";
     const std::wstring crumbLong(255, L'W');  // a folder name of the full 255 characters
+    // A name far too long for the address bar, in a path that is still short enough to go to
+    const std::wstring crumbWide(150, L'W');
     {
         for (const std::wstring& dir : {crumbsDir, crumbAa, crumbBb, crumbCc, crumbDd, crumbWay,
-                                        crumbsDir + L"\\zz", crumbAa + L"\\zz", crumbDd + L"\\yy"}) {
+                                        crumbsDir + L"\\zz", crumbAa + L"\\zz", crumbDd + L"\\yy",
+                                        crumbBb + L"\\" + crumbWide}) {
             CreateDirectoryW(dir.c_str(), nullptr);
         }
         const HANDLE h = CreateFileW((crumbAa + L"\\file.txt").c_str(), GENERIC_WRITE, 0, nullptr,
@@ -4597,12 +4702,10 @@ int runUiTest(App& app) {
         }
         check(s.c_str(), s == name);
     }
-    // Every crumb in view, from left to right without a gap, inside the field.
-    const auto placedInARow = [&app, middle](std::wstring& s, int from) {
+    // The crumbs from `from` on, from left to right without a gap, the first
+    // at x, inside the field.
+    const auto placedInARow = [&app, middle](std::wstring& s, int from, int x) {
         const RECT inner = app.addressInner();
-        // In a row that starts at the left edge, the first crumb is at the
-        // edge; one that is flush right starts wherever it starts.
-        int x = from == 0 ? inner.left : app.crumbs[from].box.left;
         for (int i = from; i < (int)app.crumbs.size(); ++i) {
             const Crumb& c = app.crumbs[i];
             const bool last = i == (int)app.crumbs.size() - 1;
@@ -4627,7 +4730,7 @@ int runUiTest(App& app) {
         if (app.crumbFirst != 0 || app.lay.addrMore.right > app.lay.addrMore.left) {
             s += L"：却收起了几级";
         } else {
-            const int x = placedInARow(s, 0);
+            const int x = placedInARow(s, 0, app.addressInner().left);
             const RECT blank = app.lay.addrBlank;
             if (s == name && (blank.left != x || blank.top != app.addressInner().top ||
                               blank.bottom != app.addressInner().bottom ||
@@ -4640,70 +4743,104 @@ int runUiTest(App& app) {
     }
     int hiddenAtNarrow = 0;
     {
-        const std::wstring name = L"地址栏放不下：当前文件夹完整靠右，放不下的收进最左边的 <，空白还点得上";
+        const std::wstring name = L"地址栏放不下：电脑只留图标排在最左，放不下的几级折成它后面的 ···，最后几级首尾相接跟在后面，空白留在末尾";
         std::wstring s = name;
         app.relayout(700, 440);
         const RECT inner = app.addressInner();
-        const int blankMin = crumbPx(20), moreW = crumbPx(12);
-        const Crumb& last = app.crumbs[crumbN - 1];
+        const int pad = crumbPx(5), blankMin = crumbPx(20), moreW = crumbPx(12), dotsW = crumbPx(20);
+        const int fontPx = (int)(14.6667 * app.scale + 0.5);
+        const Crumb& machine = app.crumbs[0];
+        const RECT dots = app.lay.addrMore;
         hiddenAtNarrow = app.crumbFirst;
-        if (app.crumbFirst <= 0) {
-            s += L"：一级也没收，却放不下";
-        } else if (app.lay.addrMore.left != inner.left ||
-                   app.lay.addrMore.right - app.lay.addrMore.left != moreW) {
-            s += L"：< 不在最左边";
-        } else if (last.box.right != inner.right) {
-            s += L"：当前文件夹没有完整靠右";
+        if (app.crumbFirst < 2) {
+            s += L"：没有收起来的几级";
+        } else if (machine.box.left != inner.left || machine.box.top != inner.top ||
+                   machine.box.bottom != inner.bottom ||
+                   machine.box.right - machine.box.left != 2 * pad + crumbPx(16) ||
+                   !machine.text.empty()) {
+            s += L"：电脑不在最左边，或还带着名字";
+        } else if (machine.more.left != machine.box.right ||
+                   machine.more.right - machine.more.left != moreW) {
+            s += L"：电脑后面缺一个 v";
+        } else if (dots.left != machine.more.right || dots.right - dots.left != dotsW ||
+                   dots.top != inner.top || dots.bottom != inner.bottom) {
+            s += L"：··· 不紧挨在电脑后面";
         } else {
-            int x = placedInARow(s, app.crumbFirst);
-            if (s == name) {
-                for (int i = 0; i < app.crumbFirst; ++i)
-                    if (app.crumbs[i].box.right > app.crumbs[i].box.left) {
-                        s += L"：收起来的一级还画着";
-                        break;
-                    }
-            }
+            const int x = placedInARow(s, app.crumbFirst, dots.right);
+            for (int i = 1; s == name && i < app.crumbFirst; ++i)
+                if (app.crumbs[i].box.right > app.crumbs[i].box.left ||
+                    app.crumbs[i].more.right > app.crumbs[i].more.left)
+                    s += L"：收起来的一级还画着";
             const RECT blank = app.lay.addrBlank;
-            if (s == name && (blank.left != app.lay.addrMore.right ||
-                              blank.right != app.crumbs[app.crumbFirst].box.left))
-                s += L"：空白不在 < 和第一级之间";
+            if (s == name && (blank.left != x || blank.right != inner.right ||
+                              blank.top != inner.top || blank.bottom != inner.bottom))
+                s += L"：空白不在最后一级后面";
             else if (s == name && blank.right - blank.left < blankMin)
                 s += L"：空白窄得点不上";
+            // As many of the last crumbs as fit, and no fewer: the first one
+            // out of view would not, not beside the blank a click needs.
+            else if (s == name && blank.right - blank.left - blankMin >=
+                                                     moreW + 2 * pad +
+                                                         measureUiText(app.crumbs[app.crumbFirst - 1].title,
+                                                                       fontPx))
+                s += L"：还放得下一级，却收起来了";
             (void)x;
         }
         check(s.c_str(), s == name);
     }
     {
-        const std::wstring name = L"地址栏放不下：窗口宽一些，收起的就少一些";
+        const std::wstring name = L"地址栏放不下：窗口宽一些，收起的就少一些；都放下了就没有 ···，电脑的名字也回来";
+        std::wstring s = name;
         app.relayout(1100, 760);
-        const bool ok = hiddenAtNarrow > 0 && app.crumbFirst < hiddenAtNarrow &&
-                        (app.crumbFirst > 0 || app.lay.addrMore.right == app.lay.addrMore.left);
-        check(name.c_str(), ok);
+        const bool dots = app.lay.addrMore.right > app.lay.addrMore.left;
+        if (hiddenAtNarrow < 3) {
+            s += L"：窄窗口里没有收起来的几级";
+        } else if (app.crumbFirst >= hiddenAtNarrow) {
+            s += L"：收起的没有变少";
+        } else if (dots != (app.crumbFirst >= 2)) {
+            s += L"：··· 有没有不对";
+        } else if (app.crumbFirst >= 2 && !app.crumbs[0].text.empty()) {
+            s += L"：还收着几级，电脑却带着名字";
+        } else if (app.crumbFirst == 0 &&
+                   app.lay.addrBlank.right - app.lay.addrBlank.left < crumbPx(20)) {
+            s += L"：都放下了，空白却窄得点不上";
+        }
+        check(s.c_str(), s == name);
     }
     {
-        const std::wstring name = L"地址栏上点在哪儿：某一级的按钮、它后面的 v、收起几级的 <、空白";
+        const std::wstring name = L"地址栏上点在哪儿：电脑的图标、它后面的 v、收起几级的 ···、某一级的按钮、它后面的 v、空白";
         std::wstring s = name;
         app.relayout(700, 440);
         const RECT inner = app.addressInner();
         const int first = app.crumbFirst;
         int k = -2;
-        if (app.addressAt(middle(app.lay.addrMore), &k) != AddressHit::More)
-            s += L"：< 不认";
-        else if (app.addressAt(middle(app.crumbs[first].box), &k) != AddressHit::Crumb || k != first)
+        if (first < 2) {
+            s += L"：没有收起来的几级";
+        } else if (app.addressAt(middle(app.crumbs[0].box), &k) != AddressHit::Crumb || k != 0) {
+            s += L"：电脑的图标不认";
+        } else if (app.addressAt(middle(app.crumbs[0].more), &k) != AddressHit::CrumbMore || k != 0) {
+            s += L"：电脑后面的 v 不认";
+        } else if (app.addressAt(middle(app.lay.addrMore), &k) != AddressHit::More) {
+            s += L"：··· 不认";
+        } else if (app.addressAt(POINT{app.crumbs[first].box.left, inner.top + 1}, &k) !=
+                       AddressHit::Crumb ||
+                   k != first) {
+            s += L"：··· 后面紧跟着的该是第一级可见的按钮";
+        } else if (app.addressAt(middle(app.crumbs[first].box), &k) != AddressHit::Crumb || k != first) {
             s += L"：第一级可见的按钮不认";
-        else if (app.addressAt(middle(app.crumbs[crumbN - 2].more), &k) != AddressHit::CrumbMore ||
-                 k != crumbN - 2)
+        } else if (app.addressAt(middle(app.crumbs[crumbN - 2].more), &k) != AddressHit::CrumbMore ||
+                   k != crumbN - 2) {
             s += L"：最后一级后面的 v 不认";
-        else if (app.addressAt(middle(app.lay.addrBlank), &k) != AddressHit::Blank)
+        } else if (app.addressAt(middle(app.lay.addrBlank), &k) != AddressHit::Blank) {
             s += L"：空白不认";
-        else if (app.addressAt(POINT{inner.right - 1, inner.top + 1}, &k) != AddressHit::Crumb ||
-                 k != crumbN - 1)
-            s += L"：字段最右边一列该是当前文件夹的按钮";
-        else if (app.addressAt(POINT{app.lay.addrField.left + crumbPx(1), app.lay.addrField.top},
-                               &k) != AddressHit::Blank)
+        } else if (app.addressAt(POINT{inner.right - 1, inner.top + 1}, &k) != AddressHit::Blank) {
+            s += L"：字段最右边一列该是空白";
+        } else if (app.addressAt(POINT{app.lay.addrField.left + crumbPx(1), app.lay.addrField.top},
+                                 &k) != AddressHit::Blank) {
             s += L"：字段自己的边框该算空白";
-        else if (app.addressAt(middle(app.lay.addrGo), &k) != AddressHit::None)
+        } else if (app.addressAt(middle(app.lay.addrGo), &k) != AddressHit::None) {
             s += L"：转到按钮不是地址栏";
+        }
         check(s.c_str(), s == name);
     }
     {
@@ -4735,19 +4872,17 @@ int runUiTest(App& app) {
         check(s.c_str(), s == name);
     }
     {
-        const std::wstring name = L"收起来的几级按顺序列在 < 里，我的电脑在最前";
+        const std::wstring name = L"收起来的几级按顺序列在 ··· 里，盘在最前（电脑自己露在外面，不列）";
         std::wstring s = name;
         app.relayout(700, 440);
         const std::vector<FolderRow> rows = app.hiddenCrumbRows();
-        if (rows.size() != (size_t)app.crumbFirst) {
+        if (rows.size() + 1 != (size_t)app.crumbFirst) {
             s += L"：行数不对";
         } else {
             for (size_t i = 0; i < rows.size(); ++i) {
-                const TreeNode::Kind kind = i == 0       ? TreeNode::Machine
-                                            : i == 1     ? TreeNode::Volume
-                                                         : TreeNode::Folder;
-                if (rows[i].title != app.crumbs[i].title || rows[i].path != app.crumbs[i].path ||
-                    rows[i].kind != kind) {
+                const TreeNode::Kind kind = i == 0 ? TreeNode::Volume : TreeNode::Folder;
+                if (rows[i].title != app.crumbs[i + 1].title ||
+                    rows[i].path != app.crumbs[i + 1].path || rows[i].kind != kind) {
                     s += L"：第 " + std::to_wstring(i + 1) + L" 行不对";
                     break;
                 }
@@ -4760,6 +4895,7 @@ int runUiTest(App& app) {
         // procedure uses, without a window (the real window is the crumb test).
         const std::wstring name = L"点某一级按钮就去那一级；按住后松开在别处，哪儿也不去";
         std::wstring s = name;
+        app.relayout(1400, 760);  // wide enough for the whole way
         const int bb = crumbN - 4;  // "bb"
         const POINT on = middle(app.crumbs[bb].box);
         if (app.crumbs[bb].title != L"bb" || bb < app.crumbFirst) {
@@ -4776,6 +4912,49 @@ int runUiTest(App& app) {
                 s += L"：松开在按钮上却没去";
             else if (app.pressCrumb != -1) s += L"：去了之后按钮还按着";
         }
+        check(s.c_str(), s == name);
+    }
+    {
+        // A folder whose name alone is too long for the bar.  Only the crumbs
+        // are asked for here; the real window shows it at the end of the
+        // crumb test.
+        const std::wstring name = L"当前文件夹的名字独自也放不下：名字用省略号截到刚好留出空白，不再伸出字段";
+        std::wstring s = name;
+        const std::wstring was = app.current;
+        app.current = crumbBb + L"\\" + crumbWide;
+        app.buildCrumbs();
+        app.relayout(700, 440);
+        const RECT inner = app.addressInner();
+        const int pad = crumbPx(5), blankMin = crumbPx(20);
+        const int fontPx = (int)(14.6667 * app.scale + 0.5);
+        const std::wstring dots = L"\u2026";
+        const Crumb& last = app.crumbs.back();
+        if (app.crumbs.size() < 3 || last.title != crumbWide) {
+            s += L"：最后一级不是那个长名字";
+        } else if (last.text.size() < 2 || last.text.back() != dots[0]) {
+            s += L"：名字没有被截断";
+        } else if (app.crumbFirst != (int)app.crumbs.size() - 1) {
+            s += L"：长名字前面还排着别的级";
+        } else if (last.box.left != app.lay.addrMore.right || last.box.top != inner.top ||
+                   last.box.bottom != inner.bottom) {
+            s += L"：位置不对";
+        } else if (last.box.right - last.box.left != 2 * pad + measureUiText(last.text, fontPx)) {
+            s += L"：按钮不是按截断后的名字量的";
+        } else {
+            const RECT blank = app.lay.addrBlank;
+            const int room = inner.right - blankMin - last.box.left;  // what the button may take
+            if (blank.left != last.box.right || blank.right != inner.right ||
+                blank.right - blank.left < blankMin) {
+                s += L"：留出的空白不对";
+            }
+            // The longest cut that fits: one character more would not.
+            else if (last.box.right - last.box.left > room ||
+                     2 * pad + measureUiText(last.text.substr(0, last.text.size() - 1) + L"W" + dots,
+                                             fontPx) <= room)
+                s += L"：截得不是刚好";
+        }
+        app.current = was;
+        app.buildCrumbs();
         check(s.c_str(), s == name);
     }
 
@@ -4886,7 +5065,7 @@ int runUiTest(App& app) {
     }
 
     // The address bar's buttons in the real window: the narrowest there is, so
-    // that the way to the folder does not fit and some crumbs are behind the <.
+    // that the way to the folder does not fit and some crumbs are behind the ...
     {
         WNDCLASSEXW wc{sizeof(WNDCLASSEXW)};
         wc.lpfnWndProc = crumbTestProc;
@@ -4906,6 +5085,8 @@ int runUiTest(App& app) {
         g_crumb.aa = crumbAa;
         g_crumb.bb = crumbBb;
         g_crumb.root = fsx::rootOf(crumbWay);
+        g_crumb.wide = crumbBb + L"\\" + crumbWide;
+        g_crumb.wideName = crumbWide;
         if (main) {
             g_app.hwnd = main;
             g_app.scale = dpiScaleOfWindow(main);
@@ -4973,9 +5154,15 @@ int runUiTest(App& app) {
         verdict(L"点某一级后面的 v：屏幕上列出那一级的子文件夹，v 按下，当前所在的行高亮",
                 g_crumb.listCame && g_crumb.listRight && g_crumb.arrowDown && g_crumb.hotPainted,
                 g_crumb.stale[0], g_crumb.where[0]);
+        verdict(L"地址栏放不下：屏幕上电脑只留图标排在最左，后面是 ··· 和最后几级，首尾相接，末尾留白",
+                g_crumb.rowJoined && g_crumb.machineIconOnly && g_crumb.dotsShown, g_crumb.stale[11],
+                g_crumb.where[11]);
+        verdict(L"指针到 ··· 上：屏幕上它亮起，离开就灭",
+                g_crumb.dotsHover && g_crumb.dotsHoverCleared, g_crumb.stale[12], g_crumb.where[12]);
         verdict(L"列表里按 Down、回车：高亮跟着走，然后去了那一行", g_crumb.hotMoved && g_crumb.chose,
                 g_crumb.stale[2], g_crumb.where[2]);
-        verdict(L"点收起几级的 <：屏幕上列出它们，点一行就去", g_crumb.hiddenList && g_crumb.wentHidden,
+        verdict(L"点收起几级的 ···：屏幕上列出它们，··· 是按下的样子，点一行就去",
+                g_crumb.hiddenList && g_crumb.hiddenArrowDown && g_crumb.wentHidden,
                 g_crumb.stale[3], g_crumb.where[3]);
         verdict(L"点某一级按钮：就去那一级，屏幕上就是它", g_crumb.clicked, g_crumb.stale[4],
                 g_crumb.where[4]);
@@ -5003,6 +5190,9 @@ int runUiTest(App& app) {
                 s += L"：Esc 之后屏幕上有 " + std::to_wstring(g_crumb.stale[10]) + L" 个像素与状态不符";
             check(s.c_str(), s == name);
         }
+        verdict(L"当前文件夹的名字独自也放不下：屏幕上名字以省略号结尾，后面是空白",
+                g_crumb.cutState && g_crumb.cutInk && g_crumb.cutWhite, g_crumb.stale[13],
+                g_crumb.where[13]);
     }
 
     // Paint benchmark: catches accidental full-window repaint storms.

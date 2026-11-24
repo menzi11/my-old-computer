@@ -40,7 +40,7 @@ struct Layout {
     RECT listHeader{}, listViewport{}, listBar{};
     RECT gridViewport{}, gridBar{};
     RECT addrField{}, addrGo{}, addrArrow{};
-    RECT addrMore{};   // the < that lists the crumbs out of view to the left; empty when all fit
+    RECT addrMore{};   // the ... that stands for the crumbs out of view; empty when all fit
     RECT addrBlank{};  // the rest of the field: a click there types a path
     RECT statusLeft{}, statusRight{};
     int colX[4]{};
@@ -71,7 +71,11 @@ struct RenameField {
 struct Crumb {
     std::wstring path;   // the folder the button goes to; empty for the machine, the first
     std::wstring title;
-    RECT box{};          // the button; empty for one that is out of view to the left
+    // What the button shows: the title; nothing for the machine when the row
+    // is too narrow (its icon alone), or the title cut with an ellipsis when
+    // even the current folder's name alone does not fit.
+    std::wstring text;
+    RECT box{};          // the button; empty for one that is out of view
     RECT more{};         // the v after it, which lists the folder's subfolders
 };
 
@@ -209,13 +213,15 @@ public:
     // when the folder changes (buildCrumbs) and placed when the window is
     // (layoutCrumbs).
     std::vector<Crumb> crumbs;
-    int crumbFirst = 0;          // the first one in view; the ones before are behind addrMore
+    // The first of the last crumbs, the ones after the ...; 0 when the whole
+    // way fits.  The machine is in view before the ... either way.
+    int crumbFirst = 0;
     int hoverCrumb = -1;         // the crumb under the pointer, -1 none
     int hoverCrumbMore = -1;     // ... its v
-    bool hoverAddrMore = false;  // ... the < that lists the crumbs out of view
+    bool hoverAddrMore = false;  // ... the ... that stands for the crumbs out of view
     int pressCrumb = -1;         // a crumb pressed and not released yet
     int pressCrumbMore = -1;     // the v whose list is up
-    bool pressAddrMore = false;  // the < of the crumbs out of view, while its list is up
+    bool pressAddrMore = false;  // the ... of the crumbs out of view, while its list is up
 
     // In-place rename, Explorer style: an edit control laid over the row's
     // name.  Enter commits, Escape cancels, losing focus commits.
@@ -381,8 +387,9 @@ public:
     RECT addressInner() const;
     // The crumbs for the current folder, one per folder from the machine down.
     void buildCrumbs();
-    // Places them in the field: left to right while they fit, else the end of
-    // the way flush right and the rest behind the < (called by relayout).
+    // Places them in the field, from the left: all in a row while they fit,
+    // else as many of the last ones as do, with a ... in front for the rest
+    // (called by relayout).
     void layoutCrumbs();
     // What is under p on the address bar; `crumb` gets the one the point is on
     // the button or the v of.
@@ -391,7 +398,8 @@ public:
     // drives.  `currentRow` gets the one the way to the current folder goes
     // through, -1 when the list does not have it.
     std::vector<FolderRow> crumbRows(int crumb, int* currentRow) const;
-    // The crumbs that are out of view to the left, the machine first.
+    // The crumbs the ... stands for, in order: the machine is not among them,
+    // it is in view ahead of it.
     std::vector<FolderRow> hiddenCrumbRows() const;
 
 private:

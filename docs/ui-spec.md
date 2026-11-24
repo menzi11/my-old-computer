@@ -97,9 +97,9 @@ the hand-drawn set.  macOS draws the icons in `Icons.swift` per extension.
   `yyyy/M/d HH:mm`.
 - The address bar (Windows build; the macOS build still shows the path as
   text) is Explorer's breadcrumb bar: the way to the current folder as
-  buttons - the machine with its icon, the drive as the tree names it, then
-  one button per folder, each named as it is on the disk. Nothing is left out
-  and nothing is abbreviated.
+  buttons, from the left - the machine with its icon and name, the drive as
+  the tree names it, then one button per folder, each named as it is on the
+  disk. While the way fits, nothing is left out and nothing is abbreviated.
 - A click on a button goes to that folder when the button comes back up on it;
   let go somewhere else and nothing happens. The machine's button has nowhere
   to go: it opens the list of its drives. Only the first click of a double
@@ -112,10 +112,15 @@ the hand-drawn set.  macOS draws the icons in `Icons.swift` per extension.
   root, Program Files). The `>` stays pressed while its list is up, a press on
   another `>` opens that one's list in its place (as between menu titles),
   Escape or a press anywhere else closes it, and that press goes no further.
-- When the way is too long for the bar, the current folder stays whole at the
-  right end with as much of the way as fits before it; the rest is behind a `<`
-  at the left, which lists them. The blank part of the bar is never too small
-  to click.
+- When the way is too long for the bar, the row still starts at the left and
+  has no gap in it, as in Explorer: the machine gives up its name (an icon
+  alone), the crumbs that do not fit are stood for by a `...` right after it,
+  where they would be, and as many of the last crumbs as fit follow it. The
+  current folder's name, when it is too long for the bar even alone, is cut
+  with an ellipsis. The `...` lights up under the pointer, opens on a press
+  and stays pressed while its list is up; the list holds the crumbs it stands
+  for, the drive first, and a click on a row goes there. The blank part at
+  the right end is never too small to click.
 - A click on the blank part of the bar, F4, Ctrl+L or Alt+D (the label's
   `地址(D)`) puts the whole path in an edit box, selected, to be typed over.
   Enter goes there at once: the typed path stays in the box until the new

@@ -1276,6 +1276,25 @@ int measureUiText(const std::wstring& s, int fontPx) {
     return sz.cx;
 }
 
+namespace {
+
+// As much of the start of `s` as fits maxW pixels in the UI font, then an
+// ellipsis - decided when a row is laid out, so that painting only draws it.
+std::wstring ellipsizeUiText(const std::wstring& s, int maxW, int fontPx) {
+    if (maxW <= 0) return std::wstring();
+    if (measureUiText(s, fontPx) <= maxW) return s;
+    const std::wstring dots = L"\u2026";
+    int lo = 0, hi = (int)s.size();
+    while (lo < hi) {
+        const int mid = (lo + hi + 1) / 2;
+        if (measureUiText(s.substr(0, mid) + dots, fontPx) <= maxW) lo = mid;
+        else hi = mid - 1;
+    }
+    return lo > 0 ? s.substr(0, lo) + dots : dots;
+}
+
+}  // namespace
+
 extern const wchar_t* const kMenuTitles[6] = {L"文件", L"编辑", L"查看", L"收藏", L"工具", L"帮助"};
 extern const wchar_t* const kToolTitles[7] = {L"后退", L"前进", L"向上", L"文件夹",
                                               L"查看", L"刷新", L"隐藏文件"};
@@ -1832,13 +1851,17 @@ void App::buildCrumbs() {
 }
 
 void App::layoutCrumbs() {
-    const int pad = pxAt(scale, 5), moreW = pxAt(scale, 12);
+    const int pad = pxAt(scale, 5), moreW = pxAt(scale, 12), dotsW = pxAt(scale, 20);
     const int blankMin = pxAt(scale, 20);  // the blank part is never too small to click
+    const int fontPx = (int)(14.6667 * scale + 0.5);
     const RECT field = addressInner();
     const int left = field.left, top = field.top, right = field.right, bottom = field.bottom;
     const int avail = std::max(0, right - left);
     const int n = (int)crumbs.size();
-    for (int i = 0; i < n; ++i) crumbs[i].box = crumbs[i].more = RECT{};
+    for (int i = 0; i < n; ++i) {
+        crumbs[i].box = crumbs[i].more = RECT{};
+        crumbs[i].text = crumbs[i].title;
+    }
     lay.addrMore = RECT{};
     lay.addrBlank = RECT{left, top, right, bottom};
     crumbFirst = 0;
@@ -1847,24 +1870,49 @@ void App::layoutCrumbs() {
     std::vector<int> w(n);
     int total = 0;
     for (int i = 0; i < n; ++i) {
-        w[i] = 2 * pad + measureUiText(crumbs[i].title, (int)(14.6667 * scale + 0.5)) +
-               (i == 0 ? pxAt(scale, 19) : 0);
+        w[i] = 2 * pad + measureUiText(crumbs[i].title, fontPx) + (i == 0 ? pxAt(scale, 19) : 0);
         total += w[i] + (i + 1 < n ? moreW : 0);
     }
-    int x = left;
-    if (total + blankMin > avail) {
-        // Out of room.  The end of the way is what matters, so it is flush
-        // right: the current folder and as much of the way to it as fits in
-        // what is left of the <, the rest behind the <.
-        const int room = std::max(1, avail - moreW - blankMin);
+    bool outOfRoom = total + blankMin > avail;
+    if (outOfRoom && n >= 2) {
+        // The machine's name is what goes first: its icon alone says as much.
+        total -= w[0];
+        w[0] = 2 * pad + pxAt(scale, 16);
+        crumbs[0].text.clear();
+        outOfRoom = total + w[0] + blankMin > avail;
+    }
+    int lead = 0;  // what comes before the last crumbs when the way does not fit
+    if (outOfRoom) {
+        // Out of room, as Explorer has it: the row still starts at the left
+        // with the machine, and the crumbs that do not fit are stood for by
+        // a ... right after it, where they would be; as many of the last
+        // crumbs as fit follow it.  There is never a gap in the row.
+        const int room = std::max(0, avail - (w[0] + moreW + dotsW) - blankMin);
         int used = w[n - 1];
         crumbFirst = n - 1;
-        while (crumbFirst > 0 && used + moreW + w[crumbFirst - 1] <= room) {
+        while (crumbFirst > 2 && used + moreW + w[crumbFirst - 1] <= room) {
             used += moreW + w[crumbFirst - 1];
             --crumbFirst;
         }
-        x = std::max(left + moreW + blankMin, right - used);
-        lay.addrMore = RECT{left, top, left + moreW, bottom};
+        lead = w[0] + moreW + (crumbFirst >= 2 ? dotsW : 0);
+        // The current folder's name alone is too long: it is cut, with an
+        // ellipsis, to what is left of the row.
+        const int textW = std::max(0, avail - lead - blankMin - 2 * pad);
+        if (w[n - 1] - 2 * pad > textW) {
+            crumbs[n - 1].text = ellipsizeUiText(crumbs[n - 1].title, textW, fontPx);
+            w[n - 1] = 2 * pad + measureUiText(crumbs[n - 1].text, fontPx);
+        }
+    }
+    int x = left;
+    if (crumbFirst > 0) {  // the machine, its v, and the ... for the crumbs behind it
+        crumbs[0].box = RECT{x, top, std::min(x + w[0], right), bottom};
+        x += w[0];
+        crumbs[0].more = RECT{x, top, std::min(x + moreW, right), bottom};
+        x += moreW;
+        if (crumbFirst >= 2) {
+            lay.addrMore = RECT{x, top, std::min(x + dotsW, right), bottom};
+            x += dotsW;
+        }
     }
     for (int i = crumbFirst; i < n; ++i) {
         crumbs[i].box = RECT{x, top, std::min(x + w[i], right), bottom};
@@ -1874,28 +1922,24 @@ void App::layoutCrumbs() {
             x += moreW;
         }
     }
-    // The blank part: what is left after the last button, or between the <
-    // and the first button in view.
-    lay.addrBlank = RECT{left, top, right, bottom};
-    if (n > 0) {
-        const int blankLeft = lay.addrMore.right > lay.addrMore.left ? lay.addrMore.right : x;
-        const int blankRight = lay.addrMore.right > lay.addrMore.left
-                                   ? std::max(blankLeft, (int)crumbs[crumbFirst].box.left)
-                                   : right;
-        lay.addrBlank = RECT{blankLeft, top, blankRight, bottom};
-    }
+    // The blank part: what is left after the last button.
+    lay.addrBlank = RECT{std::min(x, right), top, right, bottom};
 }
 
 AddressHit App::addressAt(POINT p, int* crumb) const {
     if (crumb) *crumb = -1;
     if (!PtInRect(&lay.addrField, p)) return AddressHit::None;
     if (PtInRect(&lay.addrMore, p)) return AddressHit::More;
-    for (int i = crumbFirst; i < (int)crumbs.size(); ++i) {
-        if (crumbs[i].more.right > crumbs[i].more.left && PtInRect(&crumbs[i].more, p)) {
+    // In view: the machine, ahead of the ... when there is one, and the last
+    // crumbs after it.
+    for (int i = 0; i < (int)crumbs.size(); ++i) {
+        if (i != 0 && i < crumbFirst) continue;  // behind the ...
+        const Crumb& c = crumbs[i];
+        if (c.more.right > c.more.left && PtInRect(&c.more, p)) {
             if (crumb) *crumb = i;
             return AddressHit::CrumbMore;
         }
-        if (PtInRect(&crumbs[i].box, p)) {
+        if (PtInRect(&c.box, p)) {
             if (crumb) *crumb = i;
             return AddressHit::Crumb;
         }
@@ -1930,10 +1974,8 @@ std::vector<FolderRow> App::crumbRows(int crumb, int* currentRow) const {
 
 std::vector<FolderRow> App::hiddenCrumbRows() const {
     std::vector<FolderRow> rows;
-    for (int i = 0; i < crumbFirst && i < (int)crumbs.size(); ++i) {
-        const TreeNode::Kind kind = i == 0       ? TreeNode::Machine
-                                    : i == 1     ? TreeNode::Volume
-                                                 : TreeNode::Folder;
+    for (int i = 1; i < crumbFirst && i < (int)crumbs.size(); ++i) {
+        const TreeNode::Kind kind = i == 1 ? TreeNode::Volume : TreeNode::Folder;
         rows.push_back({crumbs[i].path, crumbs[i].title, kind});
     }
     return rows;

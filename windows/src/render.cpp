@@ -167,7 +167,9 @@ void drawToolbar(Canvas& c, App& a) {
 
 // The address bar's crumbs: every folder on the way to the current one, from
 // the machine down, each a button; a v after each one but the last, which
-// lists that folder's subfolders.
+// lists that folder's subfolders.  When the way is too long for the bar, the
+// machine is an icon alone and a ... after it stands for the crumbs that do
+// not fit.
 void drawAddressCrumbs(Canvas& c, App& a) {
     const RECT inner = a.addressInner();
     ClipScope clip(c.dc(), inner);
@@ -182,29 +184,19 @@ void drawAddressCrumbs(Canvas& c, App& a) {
             c.fill(r, Theme::faceHi);
         }
     };
-    const auto triangle = [&](const RECT& r, bool right) {
+    const auto triangle = [&](const RECT& r) {
         const int cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
         const int dx = c.px(2), dy = c.px(3);
         POINT tri[3] = {{cx - dx, cy - dy}, {cx + dx, cy}, {cx - dx, cy + dy}};
-        if (!right) {  // mirrored: pointing left
-            tri[0].x = cx + dx;
-            tri[2].x = cx + dx;
-            tri[1].x = cx - dx;
-        }
         c.polygonFill(tri, 3, Theme::dark);
     };
-
-    // The < that lists the crumbs out of view to the left.
-    if (a.lay.addrMore.right > a.lay.addrMore.left) {
-        const RECT r = a.lay.addrMore;
-        button(r, a.hoverAddrMore, a.pressAddrMore);
-        triangle(r, false);
-    }
     const int textTop = inner.top + 1, textBottom = inner.bottom - 1;
-    for (int i = a.crumbFirst; i < (int)a.crumbs.size(); ++i) {
+    // A crumb's button: the machine's with its icon, then its name - or what
+    // is left of it - and the v after it.
+    const auto drawCrumb = [&](int i) {
         const Crumb& crumb = a.crumbs[i];
         const RECT box = crumb.box;
-        if (box.right <= box.left) continue;
+        if (box.right <= box.left) return;
         button(box, a.hoverCrumb == i, a.pressCrumb == i);
         int text = box.left + pad;
         if (i == 0) {  // the machine: its icon, as the tree's root row shows it
@@ -213,14 +205,25 @@ void drawAddressCrumbs(Canvas& c, App& a) {
             Icon::computer(c, iconRect);
             text = iconRect.right + c.px(3);
         }
-        c.textClip(crumb.title, RECT{text, textTop, box.right - pad, textBottom}, Theme::text,
-                   Align::Left);
+        if (!crumb.text.empty())
+            c.textClip(crumb.text, RECT{text, textTop, box.right - pad, textBottom}, Theme::text,
+                       Align::Left);
         const RECT more = crumb.more;
         if (more.right > more.left) {
             button(more, a.hoverCrumbMore == i, a.pressCrumbMore == i);
-            triangle(more, true);
+            triangle(more);
         }
+    };
+    if (a.crumbFirst > 0) drawCrumb(0);
+    // The ... that stands for the crumbs out of view.
+    if (a.lay.addrMore.right > a.lay.addrMore.left) {
+        const RECT r = a.lay.addrMore;
+        button(r, a.hoverAddrMore, a.pressAddrMore);
+        const int cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+        const int d = c.px(2), step = c.px(4);
+        for (int i = -1; i <= 1; ++i) c.fill(cx + i * step - d / 2, cy - d / 2, d, d, Theme::dark);
     }
+    for (int i = a.crumbFirst; i < (int)a.crumbs.size(); ++i) drawCrumb(i);
 }
 
 void drawAddressBar(Canvas& c, App& a) {
