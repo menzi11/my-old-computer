@@ -8,7 +8,8 @@
 #include "canvas.h"
 
 namespace Icon {
-void folder(Canvas& c, const RECT& r, bool open = false);
+// `colour` (non-zero) is a colour the folder was given instead of its yellow.
+void folder(Canvas& c, const RECT& r, bool open = false, COLORREF colour = 0);
 void document(Canvas& c, const RECT& r);
 void computer(Canvas& c, const RECT& r);
 void views(Canvas& c, const RECT& r);

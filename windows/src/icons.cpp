@@ -185,18 +185,29 @@ void page(Canvas& c, const RECT& r, const std::wstring& ext) {
     }
 }
 
+// `a` with `part` of `b` in it.
+COLORREF mix(COLORREF a, COLORREF b, double part) {
+    return RGB(GetRValue(a) + (int)((GetRValue(b) - GetRValue(a)) * part),
+               GetGValue(a) + (int)((GetGValue(b) - GetGValue(a)) * part),
+               GetBValue(a) + (int)((GetBValue(b) - GetBValue(a)) * part));
+}
+
 }  // namespace
 
 namespace Icon {
 
-void folder(Canvas& c, const RECT& r, bool open) {
+void folder(Canvas& c, const RECT& r, bool open, COLORREF colour) {
     Grid g(c, r);
     const double tabH = 3.2;
-    g.poly({{0.5, tabH}, {0.5, 0.5}, {6.4, 0.5}, {8.32, tabH}}, Theme::folderTop, false);
+    // Given a colour: lighter above, darker at the edge, as the yellow one is.
+    const COLORREF top = colour ? mix(colour, Theme::white, 0.45) : Theme::folderTop;
+    const COLORREF body = colour ? colour : Theme::folderBody;
+    const COLORREF edge = colour ? mix(colour, Theme::dark, 0.45) : Theme::folderEdge;
+    g.poly({{0.5, tabH}, {0.5, 0.5}, {6.4, 0.5}, {8.32, tabH}}, top, false);
     g.poly({{0.5, tabH}, {0.5, 0.5}, {6.4, 0.5}, {8.32, tabH}}, Theme::dark, true);
-    g.poly({{0.5, tabH}, {15.5, tabH}, {15.5, 15.5}, {0.5, 15.5}}, Theme::folderBody, false);
+    g.poly({{0.5, tabH}, {15.5, tabH}, {15.5, 15.5}, {0.5, 15.5}}, body, false);
     g.poly({{0.5, tabH}, {15.5, tabH}, {15.5, 15.5}, {0.5, 15.5}}, Theme::dark, true);
-    g.rect(1, 13.5, 14, 1, Theme::folderEdge);
+    g.rect(1, 13.5, 14, 1, edge);
     if (open) g.rect(2, tabH + 2, 12, 16 - tabH - 5, Theme::faceHi);
 }
 

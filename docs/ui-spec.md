@@ -86,13 +86,15 @@ the hand-drawn set.  macOS draws the icons in `Icons.swift` per extension.
 - Details rows draw the icon at x+3, the name at x+22, and highlight only the
   icon and the name text. There is no full-row select: clicks to the right of the
   name text (including the size, type and date columns) do not select the row.
-- A single click selects; Ctrl/Command toggles; Shift extends from the anchor;
+- A single click selects; Ctrl/Command toggles (a file, that is - for a folder
+  see below); Shift extends from the anchor;
   dragging on empty space (or on the blank part of a row) draws a rubber band.
   The band selects only the items whose icon or name it actually touches.
 - Dragging an icon or a name starts a file drag; dropping it on a folder, on the
   tree or on another application moves (or, across volumes, copies) the items.
 - Double-click opens; Enter opens; Backspace goes up; F2 renames; F5 refreshes;
-  Delete moves to the Trash / Recycle Bin.
+  Delete moves to the Trash / Recycle Bin. Ctrl+W closes the window - typed in
+  the address box too.
 - Ctrl and a click on a folder - in the list, or on its row in the tree -
   opens it in a new window; so does Ctrl and Enter on the one folder
   selected. (Ctrl and a double click is one click more than that: one
@@ -107,6 +109,17 @@ the hand-drawn set.  macOS draws the icons in `Icons.swift` per extension.
   with Shift and a click or with the rubber band, not with Ctrl and a click;
   for a file, Ctrl changes nothing. The context menu's `在新窗口中打开` is
   the same thing.
+- A folder can be given a colour from its context menu (Windows build):
+  `文件夹颜色` opens eight colours and `默认颜色`. The folder's icon is that
+  colour wherever this program shows it - in the list, as a big icon, in the
+  tree (and in the sidebar's Favorites): the yellow of the folder becomes the
+  colour, its outline and the paper in it stay. With several folders selected
+  they all get it. The colour is kept in a file of this program's own
+  (`foldercolours.ini`, beside `settings.ini`): nothing is written into the
+  folder, and Explorer shows it as it always did. Every window of this program
+  shows what any of them coloured (it reads the file again when it comes to
+  the front or opens a menu). The item can be switched off in the settings,
+  like the other ones of that menu.
 - Sizes use the same units on both platforms (`字节`/KB/MB/GB); dates are
   `yyyy/M/d HH:mm`.
 - The address bar (Windows build; the macOS build still shows the path as

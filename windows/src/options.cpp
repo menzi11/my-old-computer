@@ -26,6 +26,7 @@ const OwnOption kOwn[] = {
     {L"使用 Windows 原生菜单（含所有扩展）", kMenuShell, false},
     {L"快速查看", kMenuItemPreview, false},
     {L"在新窗口中打开", kMenuItemNewWindow, false},
+    {L"文件夹颜色", kMenuItemFolderColour, false},
     {L"在资源管理器中显示", kMenuItemReveal, false},
     {L"复制路径", kMenuItemCopyPath, false},
     {L"在命令提示符中打开", kMenuItemTerminal, false},

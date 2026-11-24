@@ -8,6 +8,7 @@
 
 #include "app.h"
 #include "canvas.h"
+#include "foldercolours.h"
 #include "icons.h"
 #include "ids.h"
 #include "shellicons.h"
@@ -50,17 +51,33 @@ std::wstring ellipsize(Canvas& c, const std::wstring& s, int maxW) {
     return s.substr(0, lo) + dots;
 }
 
-// Draws the icon Explorer would show for this item.  Returns false when the
-// shell has no icon (or system icons are switched off), so the caller can fall
-// back to the code-drawn set.
+// The colour a folder was given (its context menu: 文件夹颜色); kDefault for
+// any other item and for a drive.
+int folderColourOf(const std::wstring& path, bool isDir) {
+    return isDir && !fsx::isRoot(path) ? foldercolours::of(path) : foldercolours::kDefault;
+}
+
+// Draws the icon Explorer would show for this item - a folder in the colour it
+// was given, if it was given one.  Returns false when the shell has no icon
+// (or system icons are switched off), so the caller can fall back to the
+// code-drawn set.
 bool drawShellIcon(Canvas& c, App& a, const RECT& r, const std::wstring& path, bool isDir) {
     if (!a.useSystemIcons || path.empty()) return false;
     const bool isDrive = isDir && fsx::isRoot(path);
-    HICON icon = shellicons::icon(path, isDir, isDrive, (int)(r.right - r.left));
+    const int colour = folderColourOf(path, isDir);
+    HICON icon = colour == foldercolours::kDefault ? nullptr
+                                                   : shellicons::folder(colour, (int)(r.right - r.left));
+    if (!icon) icon = shellicons::icon(path, isDir, isDrive, (int)(r.right - r.left));
     if (!icon) return false;
     DrawIconEx(c.dc(), r.left, r.top, icon, r.right - r.left, r.bottom - r.top, 0, nullptr,
                DI_NORMAL);
     return true;
+}
+
+// The code-drawn folder, in the colour it was given if it was given one.
+void drawFolder(Canvas& c, const RECT& r, int colour, bool open = false) {
+    Icon::folder(c, r, open,
+                 colour == foldercolours::kDefault ? 0 : foldercolours::colour(colour).rgb);
 }
 
 void drawRoot(Canvas& c, App& a) {
@@ -321,7 +338,7 @@ void drawTree(Canvas& c, App& a) {
                 switch (n->kind) {
                 case TreeNode::Machine: Icon::computer(c, iconRect); break;
                 case TreeNode::Volume: Icon::drive(c, iconRect); break;
-                default: Icon::folder(c, iconRect, n->expanded); break;
+                default: drawFolder(c, iconRect, folderColourOf(n->path, true), n->expanded); break;
                 }
             }
             RECT textRect{iconRect.right + c.px(3), r.top, r.right - c.px(4), r.bottom};
@@ -411,7 +428,7 @@ void drawDetailsRow(Canvas& c, App& a, int i) {
                   r.top + c.px(2) + s16};
     if (!drawShellIcon(c, a, iconRect, e.path, e.isDir)) {
         if (e.isDir) {
-            Icon::folder(c, iconRect);
+            drawFolder(c, iconRect, folderColourOf(e.path, true));
         } else {
             Icon::file(c, iconRect, fsx::extensionLower(e.name));
         }
@@ -498,7 +515,7 @@ void drawGridCell(Canvas& c, App& a, int i) {
                    selectionColour(a, i));
         }
         if (!drawShellIcon(c, a, iconRect, e.path, e.isDir)) {
-            if (e.isDir) Icon::folder(c, iconRect);
+            if (e.isDir) drawFolder(c, iconRect, folderColourOf(e.path, true));
             else Icon::file(c, iconRect, fsx::extensionLower(e.name));
         }
         if (renamingRow(a, i)) {
@@ -514,7 +531,7 @@ void drawGridCell(Canvas& c, App& a, int i) {
                  (r.left + r.right) / 2 + iconSize / 2, r.top + c.px(4) + iconSize};
     if (!drawShellIcon(c, a, iconBox, e.path, e.isDir)) {
         if (e.isDir) {
-            Icon::folder(c, iconBox);
+            drawFolder(c, iconBox, folderColourOf(e.path, true));
         } else {
             const int inset = c.px(8);
             Icon::file(c,

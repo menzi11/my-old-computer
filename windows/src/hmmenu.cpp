@@ -24,6 +24,7 @@ struct Node {
     std::vector<bool> checked;
     std::vector<bool> enabled;
     std::vector<bool> isDefault;
+    std::vector<COLORREF> swatch;  // a colour the item stands for, to show in a box (0: none)
     int hover = -1;
     int chosen = 0;
     double scale = 1.0;
@@ -88,11 +89,12 @@ void parseMenu(Node* n) {
     n->checked.assign(count, false);
     n->enabled.assign(count, true);
     n->isDefault.assign(count, false);
+    n->swatch.assign(count, 0);
     n->hover = -1;
     for (int i = 0; i < count; ++i) {
         MENUITEMINFOW info{};
         info.cbSize = sizeof(info);
-        info.fMask = MIIM_FTYPE | MIIM_ID | MIIM_SUBMENU | MIIM_STATE;
+        info.fMask = MIIM_FTYPE | MIIM_ID | MIIM_SUBMENU | MIIM_STATE | MIIM_DATA;
         GetMenuItemInfoW(n->menu, i, TRUE, &info);
         n->seps[i] = (info.fType & MFT_SEPARATOR) != 0;
         n->subs[i] = info.hSubMenu != nullptr;
@@ -100,6 +102,7 @@ void parseMenu(Node* n) {
         n->checked[i] = (info.fState & MFS_CHECKED) != 0;
         n->enabled[i] = (info.fState & MFS_DISABLED) == 0;
         n->isDefault[i] = (info.fState & MFS_DEFAULT) != 0;
+        n->swatch[i] = (COLORREF)info.dwItemData;
         n->texts[i] = n->seps[i] ? L"" : itemText(n->menu, i);
     }
     int y = (int)(3 * n->scale + 0.5);
@@ -143,7 +146,18 @@ void drawNode(Canvas& c, HWND hwnd, Node* n) {
         const bool hot = (int)i == n->hover && n->enabled[i];
         if (hot) c.fill(r, Theme::select);
         COLORREF fg = !n->enabled[i] ? Theme::dim : (hot ? Theme::white : Theme::text);
-        if (n->checked[i]) {
+        if (n->swatch[i]) {
+            // The item stands for a colour (a folder's): a box in it, where
+            // the tick would be - pressed in when it is the one chosen.
+            const int cy = (r.top + r.bottom) / 2;
+            RECT box{r.left + c.px(4), cy - c.px(4), r.left + c.px(13), cy + c.px(4)};
+            c.fill(RECT{box.left - 1, box.top - 1, box.right + 1, box.bottom + 1}, Theme::face);
+            if (n->checked[i])
+                c.bevelSunken(RECT{box.left - 1, box.top - 1, box.right + 1, box.bottom + 1});
+            else
+                c.bevelRaised(RECT{box.left - 1, box.top - 1, box.right + 1, box.bottom + 1});
+            c.fill(box, n->swatch[i]);
+        } else if (n->checked[i]) {
             const int cy = (r.top + r.bottom) / 2;
             const int x = r.left + c.px(7);
             c.line(x, cy, x + c.px(3), cy + c.px(3), fg);

@@ -36,6 +36,7 @@ enum class Command {
     Preview,
     Reveal,
     CopyPath,
+    FolderColour,  // `Result::colour` says which; foldercolours::kDefault: none
 };
 
 // State needed to draw our own working view/sort items in the background menu.
@@ -47,13 +48,19 @@ struct ViewState {
     std::vector<std::wstring> hidden;   // top-level labels to leave out
     bool isFavorite = false;    // the folder is in the sidebar's Favorites
     bool favoriteNode = false;  // ... and the menu is opened on its row there, where it can be renamed too
+    int folderColour = -1;      // the colour of the one folder the menu is for (foldercolours::kDefault: none)
 };
 
 struct Result {
     bool shown = false;      // the shell menu was displayed
     bool invokedShell = false;  // a shell verb ran
     Command command = Command::None;  // one of our own items was chosen
+    int colour = -1;  // for FolderColour: the one chosen (foldercolours::kDefault: none)
 };
+
+// What the item with id `chosen` of the menu asks for (the ids are the menu's:
+// kCustomBase and up).
+Result decodeChoice(int chosen);
 
 // Shows the shell menu for `paths` (empty = the folder background menu).
 Result show(HWND owner, const std::wstring& folder, const std::vector<std::wstring>& paths,

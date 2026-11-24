@@ -95,6 +95,10 @@ void Settings::load() {
     menuMask = (unsigned)wcstoul(
         iniRead(path, L"menu", L"mask", L"").c_str(), nullptr, 0);
     if (menuMask == 0) menuMask = kMenuDefaults;
+    // A file from before folders could be coloured (it has no "colours" entry
+    // yet) has no say on that item: it is switched on for that file, once -
+    // off stays off from then on.
+    if (iniRead(path, L"menu", L"colours", L"").empty()) menuMask |= kMenuItemFolderColour;
 
     // Per-context hidden lists.  The old flat [menu] hide* list applied to
     // every context at once, so it migrates into all three base lists.
@@ -147,6 +151,9 @@ void Settings::save() const {
     WritePrivateProfileStringW(L"view", L"sysicons", useSystemIcons ? L"1" : L"0", path.c_str());
     swprintf_s(buf, L"0x%X", menuMask);
     WritePrivateProfileStringW(L"menu", L"mask", buf, path.c_str());
+    // The mask says what the file's owner wants; from now on it is taken as
+    // it is (see the note on the colour item in load).
+    WritePrivateProfileStringW(L"menu", L"colours", L"1", path.c_str());
     // Retire the legacy flat list; the per-context sections replace it.
     writeHidden(path, L"menu", {});
     writeHidden(path, L"menu-bg", hiddenBg);

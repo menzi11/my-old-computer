@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "debug.h"
+#include "foldercolours.h"
 #include "fs.h"
 #include "hmmenu.h"
 #include "settings.h"
@@ -45,6 +46,8 @@ enum CustomId {
     kFavoriteAdd,
     kFavoriteRemove,
     kFavoriteRename,
+    kFolderColourFirst,  // one id for each colour a folder can be given
+    kFolderColourNone = kFolderColourFirst + foldercolours::kCount,  // back to no colour
 };
 
 IContextMenu2* g_menu2 = nullptr;
@@ -200,7 +203,9 @@ Command commandFor(UINT id) {
     case kPreview: return Command::Preview;
     case kReveal: return Command::Reveal;
     case kCopyPath: return Command::CopyPath;
-    default: return Command::None;
+    default:
+        if (id >= kFolderColourFirst && id <= kFolderColourNone) return Command::FolderColour;
+        return Command::None;
     }
 }
 
@@ -317,6 +322,29 @@ bool buildMenu(HWND owner, const std::wstring& folderPath, const std::vector<std
             !menuHasText(out->menu, L"在新窗口中打开"))
             InsertMenuW(out->menu, at++, MF_BYPOSITION | MF_STRING, kOpenNewWindow,
                         L"在新窗口中打开");
+        // The colour of the folder - or of each one selected, when there are
+        // several: a menu of its own, the colour it has now ticked.
+        if ((state.menuMask & kMenuItemFolderColour) && isDir) {
+            if (HMENU colours = CreatePopupMenu()) {
+                for (int i = 0; i < foldercolours::kCount; ++i) {
+                    const UINT id = kFolderColourFirst + (UINT)i;
+                    AppendMenuW(colours, MF_STRING | (state.folderColour == i ? MF_CHECKED : 0), id,
+                                foldercolours::colour(i).name);
+                    // Its swatch, for the Win98-style menu that shows it (hmmenu).
+                    MENUITEMINFOW info{};
+                    info.cbSize = sizeof(info);
+                    info.fMask = MIIM_DATA;
+                    info.dwItemData = foldercolours::colour(i).rgb;
+                    SetMenuItemInfoW(colours, i, TRUE, &info);
+                }
+                AppendMenuW(colours,
+                            MF_STRING |
+                                (state.folderColour == foldercolours::kDefault ? MF_CHECKED : 0),
+                            kFolderColourNone, foldercolours::colour(foldercolours::kDefault).name);
+                InsertMenuW(out->menu, at++, MF_BYPOSITION | MF_POPUP, (UINT_PTR)colours,
+                            L"文件夹颜色");
+            }
+        }
         // The sidebar's Favorites: a folder joins them from its own menu and
         // leaves them the same way; on its row in the tree it can be given a
         // name of its own too.
@@ -381,6 +409,17 @@ bool forwardMessage(UINT msg, WPARAM wp, LPARAM lp) {
     return false;
 }
 
+Result decodeChoice(int chosen) {
+    Result result;
+    if (chosen < (int)kCustomBase) return result;
+    result.command = commandFor((UINT)chosen);
+    if (result.command == Command::FolderColour)
+        result.colour = chosen == (int)kFolderColourNone
+                            ? foldercolours::kDefault
+                            : chosen - (int)kFolderColourFirst;
+    return result;
+}
+
 Result show(HWND owner, const std::wstring& folder, const std::vector<std::wstring>& paths,
             POINT point, const ViewState& state) {
     Result result;
@@ -409,7 +448,9 @@ Result show(HWND owner, const std::wstring& folder, const std::vector<std::wstri
     }
 
     if (chosen >= (int)kCustomBase) {
-        result.command = commandFor(chosen);
+        const Result picked = decodeChoice(chosen);
+        result.command = picked.command;
+        result.colour = picked.colour;
     } else if (chosen >= (int)kIdFirst && chosen <= (int)kIdLast) {
         CMINVOKECOMMANDINFOEX info{};
         info.cbSize = sizeof(info);

@@ -25,12 +25,13 @@ enum MenuOption : unsigned {
     kMenuBgTerminal = 1u << 11,
     kMenuBgHidden = 1u << 12,
     kMenuBgSettings = 1u << 13,
+    kMenuItemFolderColour = 1u << 14,  // 文件夹颜色: the folder's icon in a colour of one's choosing
 };
 
 constexpr unsigned kMenuDefaults =
     kMenuShell | kMenuItemNewWindow | kMenuItemPreview | kMenuItemReveal | kMenuItemCopyPath |
     kMenuItemTerminal | kMenuItemRename | kMenuBgView | kMenuBgSort | kMenuBgRefresh |
-    kMenuBgNew | kMenuBgTerminal | kMenuBgHidden | kMenuBgSettings;
+    kMenuBgNew | kMenuBgTerminal | kMenuBgHidden | kMenuBgSettings | kMenuItemFolderColour;
 
 // One entry of the sidebar's Favorites: a folder, shown under `name` when
 // that is set and under the folder's own name otherwise.

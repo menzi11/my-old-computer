@@ -1784,6 +1784,11 @@ LRESULT CALLBACK addrEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_addrOwner->endAddressEdit(false);
             return 0;
         }
+        // Ctrl+W closes the window from in here too, as it does from the list.
+        if (wp == 'W' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+            PostMessageW(g_addrOwner->hwnd, WM_CLOSE, 0, 0);
+            return 0;
+        }
     }
     if (msg == WM_KILLFOCUS && g_addrOwner && g_addrOwner->addrEditing) {
         // The user clicked elsewhere: what was typed counts, an untouched path does nothing.

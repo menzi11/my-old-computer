@@ -19,6 +19,7 @@
 #include "dialog.h"
 #include "dnd.h"
 #include "folderlist.h"
+#include "foldercolours.h"
 #include "fs.h"
 #include "hmmenu.h"
 #include "ids.h"
@@ -28,6 +29,7 @@
 #include "scrollbar.h"
 #include "settings.h"
 #include "shellmenu.h"
+#include "shellicons.h"
 #include "snapshot.h"
 #include "theme.h"
 
@@ -658,6 +660,58 @@ void showCrumbList(HWND hwnd, App& a, int crumb, bool onButton = false) {
 bool g_menuPending = false;
 POINT g_menuPendingPoint{};
 
+// 文件夹颜色: the folders the menu was for - not a file among them, not a
+// drive - are shown in that colour from now on: in this window, in every
+// other one of this program, and after the next start.
+void colourFolders(const std::vector<std::wstring>& paths, int colour) {
+    std::vector<std::wstring> folders;
+    for (const std::wstring& path : paths)
+        if (fsx::isDirectory(path) && !fsx::isRoot(path)) folders.push_back(path);
+    foldercolours::set(folders, colour);
+}
+
+// What the context menu asked for is done: one of our own items (the
+// shell ran its own verb itself) - a folder opened in a new window, a view
+// chosen, a colour given...
+void applyMenuChoice(HWND hwnd, App& a, const std::vector<std::wstring>& paths,
+                      const shellmenu::Result& result) {
+    switch (result.command) {
+    case shellmenu::Command::Open: a.openSelection(); break;
+    case shellmenu::Command::OpenNewWindow: a.openInNewWindow(); break;
+    case shellmenu::Command::ViewBig: a.setViewMode(ViewMode::Icons); break;
+    case shellmenu::Command::ViewList: a.setViewMode(ViewMode::List); break;
+    case shellmenu::Command::ViewDetails: a.setViewMode(ViewMode::Details); break;
+    case shellmenu::Command::SortName: a.sortBy(0); break;
+    case shellmenu::Command::SortSize: a.sortBy(1); break;
+    case shellmenu::Command::SortType: a.sortBy(2); break;
+    case shellmenu::Command::SortDate: a.sortBy(3); break;
+    case shellmenu::Command::Refresh: a.reload(); break;
+    case shellmenu::Command::ToggleHidden: a.performMenuAction(ID_TOGGLE_HIDDEN); break;
+    case shellmenu::Command::Terminal: a.openTerminalForSelection(); break;
+    case shellmenu::Command::Rename: a.renameSelection(); break;
+    case shellmenu::Command::AddFavorite:
+        if (!paths.empty()) a.addFavorite(paths.front());
+        break;
+    case shellmenu::Command::RemoveFavorite:
+        if (!paths.empty()) a.removeFavorite(paths.front());
+        break;
+    case shellmenu::Command::RenameFavorite:
+        if (!paths.empty()) a.promptRenameFavorite(paths.front());
+        break;
+    case shellmenu::Command::NewFolder: a.newFolder(); break;
+    case shellmenu::Command::NewTextFile: a.newTextFile(); break;
+    case shellmenu::Command::Preview:
+        if (std::wstring sel = a.firstSelectedPath(); !sel.empty()) preview::show(hwnd, sel);
+        break;
+    case shellmenu::Command::Reveal: a.revealSelection(); break;
+    case shellmenu::Command::CopyPath: a.copyPaths(); break;
+    case shellmenu::Command::FolderColour: colourFolders(paths, result.colour); break;
+    case shellmenu::Command::Settings: a.openMenuSettings(); break;
+    case shellmenu::Command::None: break;
+    }
+    if (result.invokedShell) a.refreshAfterChange();
+}
+
 void showContextMenu(HWND hwnd, App& a, POINT p) {
     diagLog(L"rclick %d,%d menuOpen=%d", p.x, p.y, (int)menuIsOpen());
     if (menuIsOpen()) {
@@ -781,6 +835,12 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
     state.hidden = a.hiddenFor(paths);
     state.isFavorite = paths.size() == 1 && a.favoriteIndex(paths.front()) >= 0;
     state.favoriteNode = favoriteNode;
+    // Another window may have coloured the folder since this one last looked.
+    foldercolours::reload();
+    state.folderColour = paths.size() == 1 && fsx::isDirectory(paths.front()) &&
+                                 !fsx::isRoot(paths.front())
+                             ? foldercolours::of(paths.front())
+                             : foldercolours::kDefault;
     shellmenu::Result result;
     if (a.settings.menuMask & kMenuShell)
         result = shellmenu::show(hwnd, folder, paths, screen, state);
@@ -792,40 +852,7 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
         int id = showPopupMenu(hwnd, items, screen.x, screen.y, false);
         if (id) a.performMenuAction(id);
     } else {
-        switch (result.command) {
-        case shellmenu::Command::Open: a.openSelection(); break;
-        case shellmenu::Command::OpenNewWindow: a.openInNewWindow(); break;
-        case shellmenu::Command::ViewBig: a.setViewMode(ViewMode::Icons); break;
-        case shellmenu::Command::ViewList: a.setViewMode(ViewMode::List); break;
-        case shellmenu::Command::ViewDetails: a.setViewMode(ViewMode::Details); break;
-        case shellmenu::Command::SortName: a.sortBy(0); break;
-        case shellmenu::Command::SortSize: a.sortBy(1); break;
-        case shellmenu::Command::SortType: a.sortBy(2); break;
-        case shellmenu::Command::SortDate: a.sortBy(3); break;
-        case shellmenu::Command::Refresh: a.reload(); break;
-        case shellmenu::Command::ToggleHidden: a.performMenuAction(ID_TOGGLE_HIDDEN); break;
-        case shellmenu::Command::Terminal: a.openTerminalForSelection(); break;
-        case shellmenu::Command::Rename: a.renameSelection(); break;
-        case shellmenu::Command::AddFavorite:
-            if (!paths.empty()) a.addFavorite(paths.front());
-            break;
-        case shellmenu::Command::RemoveFavorite:
-            if (!paths.empty()) a.removeFavorite(paths.front());
-            break;
-        case shellmenu::Command::RenameFavorite:
-            if (!paths.empty()) a.promptRenameFavorite(paths.front());
-            break;
-        case shellmenu::Command::NewFolder: a.newFolder(); break;
-        case shellmenu::Command::NewTextFile: a.newTextFile(); break;
-        case shellmenu::Command::Preview:
-            if (std::wstring sel = a.firstSelectedPath(); !sel.empty()) preview::show(hwnd, sel);
-            break;
-        case shellmenu::Command::Reveal: a.revealSelection(); break;
-        case shellmenu::Command::CopyPath: a.copyPaths(); break;
-        case shellmenu::Command::Settings: a.openMenuSettings(); break;
-        case shellmenu::Command::None: break;
-        }
-        if (result.invokedShell) a.refreshAfterChange();
+        applyMenuChoice(hwnd, a, paths, result);
     }
 
     if (fromTree) a.selection.clear();
@@ -1499,6 +1526,8 @@ void handleKey(HWND hwnd, App& a, WPARAM key, bool ctrl, bool shift, bool alt) {
     case 'X': if (ctrl) a.copySelection(true); break;
     case 'V': if (ctrl) a.paste(); break;
     case 'L': if (ctrl && !a.addrEditing) a.beginAddressEdit(); break;
+    // Ctrl+W closes this window, as it does in Explorer.
+    case 'W': if (ctrl) PostMessageW(hwnd, WM_CLOSE, 0, 0); break;
     case '1': if (ctrl) a.setViewMode(ViewMode::Details); break;
     case '2': if (ctrl) a.setViewMode(ViewMode::List); break;
     case '3': if (ctrl) a.setViewMode(ViewMode::Icons); break;
@@ -1772,6 +1801,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_ACTIVATE:
         diagLog(L"main activate %04X", (unsigned)LOWORD(wp));
+        // Another window of this program may have coloured folders since:
+        // what it did, this window shows from now on.
+        if (LOWORD(wp) != WA_INACTIVE) {
+            foldercolours::reload();
+            repaint(hwnd);
+        }
         break;
     case WM_LBUTTONDOWN: {
         POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
@@ -3960,6 +3995,456 @@ int runNewWindowForegroundTest() {
     return failed;
 }
 
+// ---------------------------------------------------------- folder colour test
+// A folder's colour chosen from its real context menu, in the real window:
+// the menu the shell builds for the folder with our items in it, shown by our
+// own Win98-style menu.  The pointer is moved onto 文件夹颜色, its submenu is
+// read off the screen (the colour boxes, each in its colour), a colour is
+// clicked - and the folder's icon is that colour on screen: in the list, as
+// a big icon, in the tree.  Then 默认颜色 puts it back.  Last, Ctrl+W closes
+// the window.
+
+constexpr UINT_PTR kColourTestTimer = 0x4D4B;
+constexpr wchar_t kColourTestClass[] = L"MyOldComputerColourTest";
+constexpr int kColourTestEnd = 12;  // the step past the last one
+
+// What the screen shows at a client point of a window.
+COLORREF screenPixel(HWND window, int x, int y) {
+    POINT p{x, y};
+    ClientToScreen(window, &p);
+    HDC screen = GetDC(nullptr);
+    const COLORREF px = GetPixel(screen, p.x, p.y);
+    ReleaseDC(nullptr, screen);
+    return px & 0x00FFFFFF;
+}
+
+// The Win98 menu's rows: 22 logical pixels from 3 logical pixels down.
+int menuRowCentre(double scale, int row) {
+    return pxOf(scale, 3) + row * pxOf(scale, 22) + pxOf(scale, 22) / 2;
+}
+
+// A picture of what the screen shows in a rectangle, kept with the frames
+// (MOC_DEBUG).
+void keepScreen(const wchar_t* name, const RECT& screen) {
+    wchar_t debug[8]{};
+    if (!GetEnvironmentVariableW(L"MOC_DEBUG", debug, 8)) return;
+    const int w = (int)(screen.right - screen.left), h = (int)(screen.bottom - screen.top);
+    if (w <= 0 || h <= 0) return;
+    HDC display = GetDC(nullptr);
+    HDC dc = CreateCompatibleDC(display);
+    HBITMAP bmp = CreateCompatibleBitmap(display, w, h);
+    HGDIOBJ old = SelectObject(dc, bmp);
+    BitBlt(dc, 0, 0, w, h, display, screen.left, screen.top, SRCCOPY);
+    GdiFlush();
+    Frame f;
+    f.w = w;
+    f.h = h;
+    readFrame(dc, bmp, f);
+    SelectObject(dc, old);
+    DeleteObject(bmp);
+    DeleteDC(dc);
+    ReleaseDC(nullptr, display);
+    wchar_t temp[MAX_PATH]{};
+    GetTempPathW(MAX_PATH, temp);
+    const std::wstring dir = std::wstring(temp) + L"moc-shots";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    writePng(dir + L"\\screen-" + name + L".png", f.px.data(), f.w, f.h);
+}
+
+// The pixels of an icon, BGRA, not premultiplied.
+std::vector<unsigned char> iconPixels(HICON icon) {
+    ICONINFO info{};
+    BITMAP bm{};
+    std::vector<unsigned char> out;
+    if (!icon || !GetIconInfo(icon, &info)) return out;
+    if (info.hbmColor && GetObjectW(info.hbmColor, sizeof(bm), &bm) && bm.bmBitsPixel == 32 &&
+        bm.bmWidth > 0 && bm.bmHeight > 0) {
+        BITMAPINFOHEADER header{};
+        header.biSize = sizeof(header);
+        header.biWidth = bm.bmWidth;
+        header.biHeight = -bm.bmHeight;
+        header.biPlanes = 1;
+        header.biBitCount = 32;
+        out.resize((size_t)bm.bmWidth * bm.bmHeight * 4);
+        HDC dc = CreateCompatibleDC(nullptr);
+        GetDIBits(dc, info.hbmColor, 0, bm.bmHeight, out.data(), (BITMAPINFO*)&header,
+                  DIB_RGB_COLORS);
+        DeleteDC(dc);
+    }
+    if (info.hbmColor) DeleteObject(info.hbmColor);
+    if (info.hbmMask) DeleteObject(info.hbmMask);
+    return out;
+}
+
+// The red a folder was given, as the tinted icon shows it.
+bool isFolderRed(COLORREF px) {
+    return GetRValue(px) >= 150 && GetGValue(px) <= 70 && GetBValue(px) <= 70;
+}
+
+// ... and its blue.
+bool isFolderBlue(COLORREF px) {
+    return GetBValue(px) >= 150 && GetRValue(px) <= 70 && GetGValue(px) <= 110;
+}
+
+struct ColourDrive {
+    HWND main = nullptr;
+    int step = 0;
+    int wait = 0;
+    int ticks = 0;
+    std::wstring folder;       // the folder that is given a colour
+    POINT menuAt{};            // where its menu is opened, on the screen
+    shellmenu::ViewState state;
+    shellmenu::Result picked;  // what the menu returned
+    bool menuDone = false;     // ... it has returned
+    HWND sub = nullptr;        // the colour submenu's window
+    int rowTried = 0;          // the root's row the pointer was moved to
+    int rowTicks = 0;          // ... how long its submenu has been waited for
+    bool menuFound = false;    // 文件夹颜色's submenu was there
+    bool swatches = true;      // ... with its eight colour boxes on screen, each in its colour
+    bool pickedRed = false, pickedDefault = false;
+    int redBefore = 1, redInList = 0, redInIcons = 0, redInTree = 0, blueInTree = 0, redAfter = 1;
+    bool baseline = false;
+    bool closed = false;       // Ctrl+W closed the window
+    int stale = 0;
+    RECT where{};
+};
+ColourDrive g_colour;
+
+void colourTestStep(HWND driver) {
+    ColourDrive& d = g_colour;
+    KillTimer(driver, kColourTestTimer);
+    if (++d.ticks > 600) {  // fifteen seconds: give up, do not hang
+        d.step = kColourTestEnd;
+        menuClose();
+        return;
+    }
+    const auto later = [driver] { SetTimer(driver, kColourTestTimer, 40, nullptr); };
+    if (d.step >= kColourTestEnd) {
+        menuClose();
+        return;
+    }
+    if (d.wait-- > 0) {
+        later();
+        return;
+    }
+    d.wait = 0;
+    const auto post = [](HWND w, UINT msg, int x, int y) {
+        PostMessageW(w, msg, msg == WM_LBUTTONDOWN ? MK_LBUTTON : 0, MAKELPARAM((short)x, (short)y));
+    };
+    const double scale = g_app.scale;
+    const int swatchX = pxOf(scale, 3) + pxOf(scale, 8);  // inside a colour box
+    const int textX = pxOf(scale, 3) + pxOf(scale, 60);   // on an item's text
+    // The folder's icon where it is on screen, and how red it is.
+    const auto redIn = [](const RECT& icon) {
+        return frameCount(shownFrame(g_colour.main), icon, isFolderRed);
+    };
+    // ... its row in the tree: the row is looked up, and says so if there is
+    // none; how many of its icon's pixels `take` counts.
+    const auto treeIn = [&](bool (*take)(COLORREF)) {
+        for (int i = 0; i < (int)g_app.treeFlat.size(); ++i) {
+            const TreeNode* n = g_app.treeFlat[i];
+            if (_wcsicmp(n->path.c_str(), d.folder.c_str()) != 0) continue;
+            const RECT r = g_app.treeRowRect(i);
+            const int x = r.left + pxOf(scale, n->depth * 14 + 3) + pxOf(scale, 13);
+            const RECT icon{x, r.top + pxOf(scale, 2), x + pxOf(scale, 16),
+                            r.top + pxOf(scale, 2) + pxOf(scale, 16)};
+            const RECT vp = g_app.lay.treeViewport;
+            diagLog(L"colour test: the folder's tree row is %d at %d,%d %dx%d, depth %d; the tree shows %d..%d",
+                    i, icon.left, icon.top, (int)(icon.right - icon.left), (int)(icon.bottom - icon.top),
+                    n->depth, vp.top, vp.bottom);
+            return frameCount(shownFrame(d.main), icon, take);
+        }
+        diagLog(L"colour test: the folder has no row in the tree (%d rows)", (int)g_app.treeFlat.size());
+        return 0;
+    };
+    // Opens the folder's real menu and returns what was picked in it (the
+    // steps that run while it is up are the ones below).
+    const auto openMenu = [&] {
+        RECT work{};
+        MONITORINFO mi{sizeof(mi)};
+        GetMonitorInfoW(MonitorFromWindow(d.main, MONITOR_DEFAULTTONEAREST), &mi);
+        const HWND foreground = GetForegroundWindow();
+        d.menuDone = false;
+        d.sub = nullptr;
+        d.rowTried = 0;
+        diagLog(L"colour test: opening the menu");
+        SetTimer(driver, kColourTestTimer, 150, nullptr);
+        d.picked = shellmenu::show(d.main, fsx::parentPath(d.folder), {d.folder}, d.menuAt, d.state);
+        diagLog(L"colour test: the menu returned %d, colour %d", (int)d.picked.command,
+                d.picked.colour);
+        if (foreground) SetForegroundWindow(foreground);
+        KillTimer(driver, kColourTestTimer);
+        // What the window procedure does with it.
+        applyMenuChoice(d.main, g_app, {d.folder}, d.picked);
+        d.menuDone = true;
+        repaint(d.main);
+        UpdateWindow(d.main);
+        d.wait = 3;
+    };
+
+    switch (d.step) {
+    case 0: {
+        UpdateWindow(d.main);
+        const Frame shown = shownFrame(d.main);
+        const Frame fresh = renderedFrame(g_app);
+        keepFrames(L"colour-baseline", shown, fresh);
+        d.stale = frameMismatch(shown, fresh, &d.where);
+        d.baseline = d.stale == 0;
+        // The folder's icon in the first row of the list, before: not red.
+        const RECT r = g_app.listRowRect(0);
+        const int s16 = pxOf(scale, 16);
+        d.redBefore = redIn(RECT{r.left + pxOf(scale, 3), r.top + pxOf(scale, 2),
+                                 r.left + pxOf(scale, 3) + s16, r.top + pxOf(scale, 2) + s16});
+        MONITORINFO mi{sizeof(mi)};
+        GetMonitorInfoW(MonitorFromWindow(d.main, MONITOR_DEFAULTTONEAREST), &mi);
+        d.menuAt = POINT{mi.rcWork.left + 40, mi.rcWork.top + 40};
+        d.state = shellmenu::ViewState{};
+        d.step = 1;  // the timer goes on inside the menu's loop: those are the steps that drive it
+        openMenu();
+        // The steps that ran while the menu was up have moved `step` on.
+        d.step = 4;
+        later();
+        return;
+    }
+    case 1: {  // the pointer goes to the next row of the menu
+        HWND root = nullptr;
+        menuWindows(&root);
+        if (!root) {
+            d.step = kColourTestEnd;
+            return;
+        }
+        d.rowTicks = 0;
+        post(root, WM_MOUSEMOVE, textX, menuRowCentre(scale, d.rowTried));
+        d.wait = 2;  // the submenu opens at once; let it paint
+        break;
+    }
+    case 2: {  // ... and opened the colour menu?
+        HWND root = nullptr;
+        const std::vector<HWND> wins = menuWindows(&root);
+        for (HWND w : wins) {
+            if (w == root) continue;
+            if (screenPixel(w, swatchX, menuRowCentre(scale, 0)) == foldercolours::colour(0).rgb)
+                d.sub = w;
+        }
+        if (!d.sub) {
+            // A submenu opens at once, but is painted a moment later: each row
+            // is given a moment before the next one is tried.
+            if (++d.rowTicks < 8) d.step = 1;  // the same row, looked at again
+            else if (++d.rowTried < 14) d.step = 0;  // the next row down
+            else {
+                // Not in any row: the menu is closed (it would otherwise stay
+                // up for good - no step is left to close it), and counts for nothing.
+                d.step = kColourTestEnd;
+                menuClose();
+                return;
+            }
+            break;
+        }
+        d.menuFound = true;
+        d.swatches = true;
+        for (int i = 0; i < foldercolours::kCount; ++i)
+            d.swatches = d.swatches &&
+                         screenPixel(d.sub, swatchX, menuRowCentre(scale, i)) ==
+                             foldercolours::colour(i).rgb;
+        // Kept with the frames: the menu and its colour submenu as they are on screen.
+        RECT a{}, b{};
+        GetWindowRect(root, &a);
+        GetWindowRect(d.sub, &b);
+        keepScreen(d.pickedRed ? L"folder-colour-default" : L"folder-colour-menu",
+                   RECT{std::min(a.left, b.left), std::min(a.top, b.top),
+                        std::max(a.right, b.right), std::max(a.bottom, b.bottom)});
+        // A click on a colour: red the first time, 默认颜色 (the row after the
+        // last colour) the second.
+        post(d.sub, WM_LBUTTONDOWN, textX,
+             menuRowCentre(scale, d.pickedRed ? foldercolours::kCount : 0));
+        d.wait = 2;
+        break;
+    }
+    case 3: {  // the other half of the click: the menu closes with that colour
+        if (d.sub && IsWindow(d.sub))
+            post(d.sub, WM_LBUTTONUP, textX,
+                 menuRowCentre(scale, d.pickedRed ? foldercolours::kCount : 0));
+        d.wait = 12;  // for the menu to close and openMenu to return
+        break;
+    }
+    case 4: {  // back from the first menu: red in the list, as it is on screen
+        if (!d.menuDone) {  // the click did not close it: it is closed, and counts for nothing
+            menuClose();
+            d.wait = 6;
+            break;
+        }
+        d.pickedRed = d.picked.command == shellmenu::Command::FolderColour && d.picked.colour == 0;
+        const RECT r = g_app.listRowRect(0);
+        const int s16 = pxOf(scale, 16);
+        d.redInList = redIn(RECT{r.left + pxOf(scale, 3), r.top + pxOf(scale, 2),
+                                 r.left + pxOf(scale, 3) + s16, r.top + pxOf(scale, 2) + s16});
+        g_app.setViewMode(ViewMode::Icons);
+        repaint(d.main);
+        UpdateWindow(d.main);
+        d.wait = 2;
+        break;
+    }
+    case 5: {  // ... as a big icon
+        const RECT r = g_app.gridCellRect(0);
+        const int side = pxOf(scale, 48);
+        d.redInIcons = redIn(RECT{(r.left + r.right) / 2 - side / 2, r.top + pxOf(scale, 4),
+                                  (r.left + r.right) / 2 - side / 2 + side,
+                                  r.top + pxOf(scale, 4) + side});
+        // Into the folder: the tree shows its row now.
+        g_app.setViewMode(ViewMode::Details);
+        g_app.loadDirectory(d.folder, false);
+        repaint(d.main);
+        UpdateWindow(d.main);
+        d.wait = 2;
+        break;
+    }
+    case 6: {  // ... and in the tree, on its row
+        d.redInTree = treeIn(isFolderRed);
+        keepFrames(L"colour-tree", shownFrame(d.main), renderedFrame(g_app));
+        // Another window of this program gives the folder another colour: the
+        // file changes behind this window's back.  Coming to the front
+        // (WM_ACTIVATE, which reads the file again), it shows that colour.
+        std::wstring lower = d.folder;
+        for (auto& ch : lower) ch = (wchar_t)towlower(ch);
+        wchar_t entry[2048]{};
+        swprintf_s(entry, L"4|%ls", lower.c_str());
+        WritePrivateProfileStringW(L"folders", L"f0", entry, foldercolours::path().c_str());
+        SendMessageW(d.main, WM_ACTIVATE, WA_ACTIVE, 0);
+        UpdateWindow(d.main);
+        d.blueInTree = treeIn(isFolderBlue);
+        // The menu again: the folder is coloured now, and is to be given none.
+        d.state.folderColour = foldercolours::of(d.folder);
+        d.step = 1;
+        openMenu();
+        d.step = 7;
+        later();
+        return;
+    }
+    case 7: {  // back from the second menu: the tree's icon is the yellow one again
+        d.pickedDefault = d.picked.command == shellmenu::Command::FolderColour &&
+                          d.picked.colour == foldercolours::kDefault;
+        d.redAfter = treeIn(isFolderRed) + treeIn(isFolderBlue);
+        // Ctrl+W: the window closes (as onKeyDown hands the key on).  The close
+        // is posted: it happens once this step has returned.
+        handleKey(d.main, g_app, 'W', true, false, false);
+        d.wait = 2;
+        break;
+    }
+    default: {  // still there after Ctrl+W: it did not close
+        d.step = kColourTestEnd;
+        return;
+    }
+    }
+    ++d.step;
+    if (d.step < kColourTestEnd) later();
+}
+
+LRESULT CALLBACK colourTestProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_TIMER && wp == kColourTestTimer) {
+        colourTestStep(hwnd);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+// The test in the real window: the menu of `folder` (a folder directly inside
+// the folder the window shows, sorted first).
+void folderColourTest(const std::wstring& listDir, const std::wstring& folder,
+                      const std::function<void(const wchar_t*, bool)>& check) {
+    WNDCLASSEXW wc{sizeof(WNDCLASSEXW)};
+    wc.lpfnWndProc = colourTestProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = kColourTestClass;
+    RegisterClassExW(&wc);
+    HWND driver = CreateWindowExW(0, kColourTestClass, L"", WS_OVERLAPPED, 0, 0, 100, 100,
+                                  nullptr, nullptr, wc.hInstance, nullptr);  // never shown
+    registerMainClass(wc.hInstance);
+    HWND main = CreateWindowExW(WS_EX_NOACTIVATE, L"MyOldComputerWindow", L"folder colour test",
+                                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, 0, 0, 0, 0, driver, nullptr,
+                                wc.hInstance, nullptr);
+    g_colour = ColourDrive{};
+    g_colour.main = main;
+    g_colour.folder = folder;
+    if (main) {
+        g_app.hwnd = main;
+        g_app.scale = dpiScaleOfWindow(main);
+        g_app.init(main);
+        // The test's folder is under AppData, a hidden one: the tree can only
+        // show the way to it when hidden folders are shown.
+        g_app.showHidden = true;
+        g_app.buildTree();
+        g_app.relayout(pxOf(g_app.scale, 700), pxOf(g_app.scale, 440));
+        g_app.sidebarVisible = true;
+        g_app.loadDirectory(listDir, false);
+        g_app.setViewMode(ViewMode::Details);
+        placeWindow(main, 0, 0, g_app.width, g_app.height);
+        ShowWindow(main, SW_SHOWNOACTIVATE);
+        SetWindowPos(main, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        UpdateWindow(main);
+        MSG msg;
+        for (SetTimer(driver, kColourTestTimer, 60, nullptr);
+             g_colour.step < kColourTestEnd && GetMessageW(&msg, nullptr, 0, 0) > 0;) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        KillTimer(driver, kColourTestTimer);
+        g_colour.closed = !IsWindow(main);
+        if (IsWindow(main)) {
+            g_app.hwnd = nullptr;  // the edit is the window's child and goes with it
+            DestroyWindow(main);
+        }
+        PeekMessageW(&msg, nullptr, WM_QUIT, WM_QUIT, PM_REMOVE);
+        g_app.hwnd = nullptr;
+        g_app.addrEdit = nullptr;
+        g_app.addrEditing = false;
+        if (g_app.addrFont) {
+            DeleteObject(g_app.addrFont);
+            g_app.addrFont = nullptr;
+        }
+    }
+    DestroyWindow(driver);
+
+    std::wstring notes;
+    if (!main) notes += L"窗口没建出来";
+    else if (g_colour.ticks > 600) notes += L"超时";
+    if (!g_colour.baseline)
+        notes += L"基准不符，范围 " + std::to_wstring(g_colour.where.left) + L"," +
+                 std::to_wstring(g_colour.where.top) + L" " +
+                 std::to_wstring(g_colour.where.right - g_colour.where.left) + L"x" +
+                 std::to_wstring(g_colour.where.bottom - g_colour.where.top);
+    const auto of = [](int v) { return std::to_wstring(v); };
+    const auto verdict = [&](const std::wstring& name, const std::wstring& why, bool ok) {
+        std::wstring label = name;
+        if (!notes.empty()) label += L"：" + notes;
+        else if (!ok) label += L"：" + why;
+        check(label.c_str(), label == name);
+    };
+    check(L"（测试基准）文件夹颜色：屏幕上的画面读得回来，且与按状态渲染的一致", g_colour.baseline);
+    verdict(L"右键一个文件夹的菜单里有“文件夹颜色”，它的子菜单在屏幕上：八个色块，各自是那个颜色",
+            g_colour.menuFound ? L"有色块不是自己的颜色" : L"菜单里没有找到“文件夹颜色”的子菜单",
+            g_colour.menuFound && g_colour.swatches);
+    verdict(L"在子菜单里点“红色”：列表里那个文件夹的图标在屏幕上就是红色的",
+            !g_colour.menuDone ? L"菜单没有关上"
+            : !g_colour.pickedRed ? L"菜单交回的不是“红色”（命令 " +
+                                           of((int)g_colour.picked.command) + L"，颜色 " +
+                                           of(g_colour.picked.colour) + L"）"
+                                  : L"图标上有 " + of(g_colour.redInList) + L" 个红色像素（原来 " +
+                                        of(g_colour.redBefore) + L" 个）",
+            g_colour.pickedRed && g_colour.redBefore == 0 && g_colour.redInList >= 10);
+    verdict(L"同一个文件夹在大图标视图里也是红色的", L"图标上有 " + of(g_colour.redInIcons) + L" 个红色像素",
+            g_colour.pickedRed && g_colour.redInIcons >= 30);
+    verdict(L"在文件夹树里，它那一行的图标也是红色的",
+            L"图标上有 " + of(g_colour.redInTree) + L" 个红色像素",
+            g_colour.pickedRed && g_colour.redInTree >= 10);
+    verdict(L"另一个窗口把这个文件夹改成了蓝色：这个窗口回到前台时，文件夹树里的图标就是蓝色的",
+            L"图标上有 " + of(g_colour.blueInTree) + L" 个蓝色像素", g_colour.blueInTree >= 10);
+    verdict(L"再点“默认颜色”：文件夹树里的图标回到原来的颜色",
+            !g_colour.pickedDefault ? L"菜单交回的不是“默认颜色”"
+                                    : L"图标上还有 " + of(g_colour.redAfter) + L" 个红色像素",
+            g_colour.pickedDefault && g_colour.redAfter == 0);
+    verdict(L"按 Ctrl+W：窗口关上了", L"窗口还在", g_colour.closed);
+}
+
 // Drives the same input handlers the window procedure uses, with synthesized
 // points, so click/selection behaviour can be checked without touching the
 // mouse or a real window.
@@ -5949,6 +6434,172 @@ int runUiTest(App& app) {
           commandArgument(crumbAa) == L"\"" + crumbAa + L"\"");
     newWindowTest(crumbsDir, crumbAa, check);
 
+    // The colours a folder can be given (its context menu: 文件夹颜色).
+    {
+        const std::wstring name = L"文件夹颜色：八种，各不相同";
+        bool ok = foldercolours::kCount == 8;
+        for (int i = 0; i < foldercolours::kCount; ++i) {
+            ok = ok && foldercolours::colour(i).name && *foldercolours::colour(i).name;
+            for (int j = 0; j < i; ++j)
+                ok = ok && foldercolours::colour(i).rgb != foldercolours::colour(j).rgb;
+        }
+        check(name.c_str(), ok);
+    }
+    {
+        const std::wstring name =
+            L"给文件夹的颜色记在本程序自己的文件里：文件夹本身不动；重读（如同重新启动）还在，不区分大小写，去掉就没了";
+        std::wstring s = name;
+        const std::wstring file = foldercolours::path();
+        // The folder itself is not touched for it: no file put into it, its
+        // attributes as they were.
+        const DWORD attributes = GetFileAttributesW(crumbAa.c_str());
+        DeleteFileW(file.c_str());
+        foldercolours::reload();
+        if (foldercolours::of(crumbAa) != foldercolours::kDefault) s += L"：没给过颜色却说有";
+        foldercolours::set({crumbAa, crumbBb}, 3);
+        if (GetFileAttributesW(crumbAa.c_str()) != attributes || fsx::exists(crumbAa + L"\\desktop.ini"))
+            s += L"：给颜色动了文件夹本身";
+        foldercolours::reload();
+        if (foldercolours::of(crumbAa) != 3 || foldercolours::of(crumbBb) != 3)
+            s += L"：重读文件后颜色不在了";
+        std::wstring upper = crumbAa;
+        for (auto& ch : upper) ch = (wchar_t)towupper(ch);
+        if (foldercolours::of(upper) != 3) s += L"：路径换个大小写就不认";
+        if (GetFileAttributesW(file.c_str()) == INVALID_FILE_ATTRIBUTES) s += L"：没有写出文件";
+        if (file.find(L"moc-uitest-settings-colours.ini") == std::wstring::npos)
+            s += L"：写的不是测试自己的文件";
+        foldercolours::set({crumbAa}, foldercolours::kDefault);
+        foldercolours::reload();
+        if (foldercolours::of(crumbAa) != foldercolours::kDefault || foldercolours::of(crumbBb) != 3)
+            s += L"：去掉一个的颜色，另一个的也不对了";
+        foldercolours::set({crumbBb}, foldercolours::kDefault);
+        check(s.c_str(), s == name);
+    }
+    {
+        const std::wstring name =
+            L"带颜色的文件夹图标：黄色成了那个颜色，轮廓、纸和透明不变，每种颜色都不一样";
+        std::wstring s = name;
+        const auto least = [](int a, int b, int c) { return std::min(a, std::min(b, c)); };
+        const auto towards = [&](int r, int g, int b, COLORREF to) {
+            // How much a colour points the way the target colour does: 1 is
+            // the same direction from grey, 0 none at all.
+            const double dr = r - least(r, g, b), dg = g - least(r, g, b), db = b - least(r, g, b);
+            const int tr = GetRValue(to), tg = GetGValue(to), tb = GetBValue(to);
+            const double er = tr - least(tr, tg, tb), eg = tg - least(tr, tg, tb),
+                         eb = tb - least(tr, tg, tb);
+            const double a = std::sqrt(dr * dr + dg * dg + db * db), e = std::sqrt(er * er + eg * eg + eb * eb);
+            return a > 0 && e > 0 ? (dr * er + dg * eg + db * eb) / (a * e) : -1.0;
+        };
+        for (int px : {16, 48}) {
+            const std::vector<unsigned char> plain =
+                iconPixels(shellicons::icon(std::wstring(), true, false, px));
+            for (int i = 0; s == name && i < foldercolours::kCount; ++i) {
+                const std::vector<unsigned char> coloured = iconPixels(shellicons::folder(i, px));
+                if (plain.empty() || coloured.size() != plain.size()) {
+                    s += L"：图标取不出来";
+                    break;
+                }
+                const COLORREF target = foldercolours::colour(i).rgb;
+                const bool greyTo =
+                    GetRValue(target) == GetGValue(target) && GetGValue(target) == GetBValue(target);
+                int opaque = 0, changed = 0, wrong = 0, onColour = 0;
+                for (size_t k = 0; k < plain.size(); k += 4) {
+                    if (!plain[k + 3]) continue;
+                    ++opaque;
+                    // Transparency, the outline and the paper: as they were.
+                    const bool grey = plain[k] == plain[k + 1] && plain[k + 1] == plain[k + 2];
+                    const bool differs = std::abs(coloured[k] - plain[k]) > 24 ||
+                                         std::abs(coloured[k + 1] - plain[k + 1]) > 24 ||
+                                         std::abs(coloured[k + 2] - plain[k + 2]) > 24;
+                    if (coloured[k + 3] != plain[k + 3] || (grey && differs)) ++wrong;
+                    if (!differs) continue;
+                    ++changed;
+                    if (greyTo ? std::abs(coloured[k] - coloured[k + 1]) <= 3 &&
+                                    std::abs(coloured[k + 1] - coloured[k + 2]) <= 3
+                              : towards(coloured[k + 2], coloured[k + 1], coloured[k], target) > 0.9)
+                        ++onColour;
+                }
+                if (changed * 3 < opaque) s += L"：颜色 " + std::to_wstring(i) + L" 没改几个像素";
+                else if (wrong) s += L"：颜色 " + std::to_wstring(i) + L" 动了不该动的地方";
+                else if (onColour * 10 < changed * 9)
+                    s += L"：颜色 " + std::to_wstring(i) + L" 的像素里只有 " +
+                         std::to_wstring(onColour) + L"/" + std::to_wstring(changed) + L" 是那个颜色";
+            }
+        }
+        check(s.c_str(), s == name);
+    }
+    {
+        // Without the shell's icons the folder is drawn by the program itself:
+        // there too, in the colour it was given.
+        const std::wstring name =
+            L"不用系统图标时（文件夹是自己画的）：带颜色的文件夹在大图标视图里画成那个颜色，图标以外一个像素不变";
+        std::wstring s = name;
+        app.loadDirectory(crumbsDir, false);
+        app.setViewMode(ViewMode::Icons);
+        app.relayout(1100, 760);
+        app.useSystemIcons = false;
+        foldercolours::set({crumbAa}, 0);
+        const Frame red = renderedFrame(app);
+        foldercolours::set({crumbAa}, foldercolours::kDefault);
+        const Frame plain = renderedFrame(app);
+        app.useSystemIcons = true;
+        const RECT r = app.gridCellRect(0);
+        const int side = pxOf(app.scale, 48), left = (r.left + r.right) / 2 - side / 2;
+        const RECT box{left, r.top + pxOf(app.scale, 4), left + side, r.top + pxOf(app.scale, 4) + side};
+        RECT where{};
+        const int stale = frameMismatch(red, plain, &where);
+        if (frameCount(red, box, isFolderRed) < 10) s += L"：自己画的文件夹没有变红";
+        else if (frameCount(plain, box, isFolderRed) != 0) s += L"：没给颜色时也是红的";
+        else if (stale == 0) s += L"：两张图一样";
+        else if (where.left < box.left || where.top < box.top || where.right > box.right ||
+                 where.bottom > box.bottom)
+            s += L"：图标以外有像素变了";
+        check(s.c_str(), s == name);
+    }
+    {
+        const std::wstring name =
+            L"文件夹的右键菜单里有“文件夹颜色”，子菜单依次是八种颜色和“默认颜色”；文件的菜单里没有，设置里关掉就没有";
+        std::wstring s = name;
+        const auto has = [](const std::vector<std::wstring>& labels, const wchar_t* text) {
+            return std::find(labels.begin(), labels.end(), text) != labels.end();
+        };
+        shellmenu::ViewState state;
+        std::vector<std::wstring> subs;
+        const auto top = shellmenu::labels(crumbsDir, {crumbAa}, state, &subs);
+        if (!has(top, L"文件夹颜色")) s += L"：菜单里没有“文件夹颜色”";
+        std::vector<std::wstring> entries;
+        for (const std::wstring& e : subs)
+            if (e.compare(0, 6, L"文件夹颜色/") == 0) entries.push_back(e.substr(6));
+        std::vector<std::wstring> wanted;
+        for (int i = 0; i < foldercolours::kCount; ++i) wanted.push_back(foldercolours::colour(i).name);
+        wanted.push_back(foldercolours::colour(foldercolours::kDefault).name);
+        if (s == name && entries != wanted) s += L"：子菜单的内容或顺序不对";
+        if (has(shellmenu::labels(crumbsDir, {crumbAa + L"\\file.txt"}, state), L"文件夹颜色"))
+            s += L"：文件的菜单里也有";
+        state.menuMask &= ~kMenuItemFolderColour;
+        if (has(shellmenu::labels(crumbsDir, {crumbAa}, state), L"文件夹颜色")) s += L"：关掉了还有";
+        check(s.c_str(), s == name);
+    }
+    {
+        const std::wstring name =
+            L"设置文件是旧的（那时还没有“文件夹颜色”这一项）：第一次读进来它是开着的，之后关了就一直是关的";
+        std::wstring s = name;
+        const std::wstring file = settingsPath();
+        WritePrivateProfileStringW(L"menu", L"colours", nullptr, file.c_str());
+        WritePrivateProfileStringW(L"menu", L"mask", L"0x3FFF", file.c_str());
+        Settings old;
+        old.load();
+        if (!(old.menuMask & kMenuItemFolderColour)) s += L"：旧设置里它是关着的";
+        old.save();  // from now on the file has its say
+        WritePrivateProfileStringW(L"menu", L"mask", L"0x3FFF", file.c_str());  // ... and the item is off
+        Settings again;
+        again.load();
+        if (again.menuMask & kMenuItemFolderColour) s += L"：关掉的又被打开了";
+        check(s.c_str(), s == name);
+    }
+
+    folderColourTest(crumbsDir, crumbAa, check);
+
     // Paint benchmark: catches accidental full-window repaint storms.
     app.setViewMode(ViewMode::Details);
     app.relayout(1100, 760);
@@ -6162,6 +6813,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
         const std::wstring scratch = std::wstring(temp) + L"moc-uitest-settings.ini";
         DeleteFileW(scratch.c_str());
         SetEnvironmentVariableW(L"MOC_SETTINGS_FILE", scratch.c_str());
+        // Nor may the colours the test gives folders reach the user's.
+        DeleteFileW(foldercolours::path().c_str());
         // The test's lists stay in the background: the machine is somebody's.
         SetEnvironmentVariableW(L"MOC_NO_FOREGROUND", L"1");
         App app;
