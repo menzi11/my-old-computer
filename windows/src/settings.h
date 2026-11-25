@@ -26,12 +26,13 @@ enum MenuOption : unsigned {
     kMenuBgHidden = 1u << 12,
     kMenuBgSettings = 1u << 13,
     kMenuItemFolderColour = 1u << 14,  // 文件夹颜色: the folder's icon in a colour of one's choosing
+    kMenuAhead = 1u << 15,  // the shell's menus are built ahead, on a thread of their own (shellmenu.h)
 };
 
 constexpr unsigned kMenuDefaults =
     kMenuShell | kMenuItemNewWindow | kMenuItemPreview | kMenuItemReveal | kMenuItemCopyPath |
     kMenuItemTerminal | kMenuItemRename | kMenuBgView | kMenuBgSort | kMenuBgRefresh |
-    kMenuBgNew | kMenuBgTerminal | kMenuBgHidden | kMenuBgSettings | kMenuItemFolderColour;
+    kMenuBgNew | kMenuBgTerminal | kMenuBgHidden | kMenuBgSettings | kMenuItemFolderColour | kMenuAhead;
 
 // One entry of the sidebar's Favorites: a folder, shown under `name` when
 // that is set and under the folder's own name otherwise.

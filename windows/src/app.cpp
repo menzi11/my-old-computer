@@ -240,6 +240,7 @@ void App::loadDirectory(const std::wstring& path, bool recordHistory, bool fromT
         fsx::sortEntries(entries, sortColumn, sortAsc);
         rebuildNameWidths();
         updateThumbnails();
+        ++listSerial;
         const double t1 = diagMillis();
     listScroll = 0;
     gridScroll = 0;
@@ -265,6 +266,7 @@ void App::reload() {
     fsx::sortEntries(entries, sortColumn, sortAsc);
     rebuildNameWidths();
     updateThumbnails();
+    ++listSerial;
     std::set<std::wstring> keep;
     for (auto& e : entries)
         if (selection.count(e.path)) keep.insert(e.path);

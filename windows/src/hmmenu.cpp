@@ -38,6 +38,7 @@ struct Node {
 
 Node* g_active = nullptr;
 Node* g_root = nullptr;
+double g_shownAt = 0;  // when the menu on screen came up (menuShownAt)
 bool g_finished = false;
 
 void destroyChildren(Node* n);
@@ -76,6 +77,9 @@ std::wstring itemText(HMENU menu, int index) {
     const size_t amp = text.find(L"(&");
     if (amp != std::wstring::npos && text.size() > amp + 3 && text.back() == L')')
         text = text.substr(0, amp);
+    // Some extensions mark an accelerator with a bare "&" (Edit with
+    // &Notepad++): the mark, not a letter of the name.
+    text.erase(std::remove(text.begin(), text.end(), L'&'), text.end());
     return text;
 }
 
@@ -512,6 +516,34 @@ void ensureClass() {
 
 bool menuIsOpen() { return g_root != nullptr; }
 
+std::vector<std::wstring> menuRootTexts() {
+    return g_root ? g_root->texts : std::vector<std::wstring>();
+}
+
+bool menuRowOf(const wchar_t* text, RECT* rect) {
+    // In the menu that has the keyboard: a submenu that is open, else the root.
+    const Node* n = g_active ? g_active : g_root;
+    if (!n || !n->hwnd) return false;
+    for (size_t i = 0; i < n->texts.size(); ++i) {
+        if (n->texts[i].find(text) == std::wstring::npos) continue;
+        *rect = n->rects[i];
+        return true;
+    }
+    return false;
+}
+
+HWND menuActiveWindow() {
+    const Node* n = g_active ? g_active : g_root;
+    return n ? n->hwnd : nullptr;
+}
+
+double menuShownAt() { return g_shownAt; }
+
+int menuRowsUp() {
+    const Node* n = g_active ? g_active : g_root;
+    return n ? (int)n->texts.size() : 0;
+}
+
 void menuClose() {
     if (g_root && g_root->hwnd) PostMessageW(g_root->hwnd, WM_CLOSE, 0, 0);
 }
@@ -524,10 +556,14 @@ int showHMenu(HWND owner, HMENU root, POINT point) {
     node->menu = root;
     node->owner = owner;
     node->scale = dpiScaleOfWindow(owner);
+    const double t0 = diagMillis();
     // Some extensions add items to the root itself on initialisation.
     SendMessageW(owner, WM_INITMENUPOPUP, (WPARAM)root, 0);
+    const double tInit = diagMillis();
     parseMenu(node);
     createNodeWindow(node, point.x, point.y);
+    diagLog(L"menu popup: extensions fill it in %.1f, window up %.1f ms", tInit - t0,
+            diagMillis() - tInit);
     if (!node->hwnd) {
         delete node;
         return 0;
@@ -536,6 +572,7 @@ int showHMenu(HWND owner, HMENU root, POINT point) {
     g_active = node;
     g_root = node;
     g_finished = false;
+    g_shownAt = diagMillis();
     SetForegroundWindow(node->hwnd);
     SetFocus(node->hwnd);
 

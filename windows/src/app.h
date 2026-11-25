@@ -130,6 +130,10 @@ public:
     // thumbnails, whatever view is the usual one.  A view chosen here is for
     // here; the usual one is back on leaving.
     bool viewAutomatic = false;
+    // Up by one whenever the folder is listed anew (loadDirectory, reload):
+    // the window's thread sees it change, and has the menus this listing is
+    // likely to want built ahead.
+    ULONGLONG listSerial = 0;
     // Per entry: its thumbnail, if it has one, is drawn in the frame.
     std::vector<bool> thumbDrawn;
     // The entries the render in progress drew with their thumbnail.

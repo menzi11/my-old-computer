@@ -191,7 +191,35 @@ first.
   loaded (Baidu Netdisk's did) lets that message run while the loader lock is
   still held, and what the message does needs a thread of its own: the window
   was dead for good, right after it was opened.  Loading them up front takes
-  that load out of the build; the first menu comes up as before.
+  that load out of the build.
+- The menus are built ahead, on a thread of the program's own that has
+  nothing else to do (Tools → Context menu settings → 提前在后台构建菜单,
+  on by default; off: built on the window's thread when the right-click
+  comes, as before).  The shell and its extensions take 70 ms (a folder) to
+  300 ms (an image) to build a menu, the first ones in a window several
+  hundred more, and every right-click used to wait for all of it.  A folder's
+  listing has its menus asked for at once - the background's, a folder's, a
+  file of each of the four commonest kinds' - and the pointer resting 70 ms
+  on an entry has that entry's asked for (the selection's, when the entry is
+  in one of several).  A right-click shows what was built: 5 to 20 ms.
+- When nothing was built for the very thing, the menu of another of its kind
+  in that folder stands for it (the shell's part of the menu of any file of a
+  kind is the same as that of the others), with this program's own items made
+  for the thing as it is.  The thing's own menu is asked for then.  A shell
+  command picked meanwhile is looked up in that menu by where the item lay
+  and what it said, and run from it only if both agree; if not, nothing ran,
+  and the thing's own menu is shown in the other's place.  A few items are
+  the file's own (WinRAR's "add to <name>.rar"): when the thing's own menu
+  is in and says anything else, it takes the stand-in's place on screen by
+  itself.
+- The background's menu says whether there is something to paste: those menus
+  are let go of whenever the clipboard changes (WM_CLIPBOARDUPDATE), and the
+  one of the folder shown is built again at once.
+- A right-click on something no menu stands for asks for that menu, and the
+  window goes on until it is in.  If anything is done in between (a click, a
+  key, a scroll), that menu is not shown.
+- Menus kept: 24 at most, for five minutes; one a command was run from is let
+  go of at once.
 - Tools → Context menu settings lists the app's own entries and the shell's
   entries grouped by where the right-click happened (empty area, folder, file
   without an extension, one group per file extension); each is hidden in that

@@ -687,6 +687,266 @@ void showCrumbList(HWND hwnd, App& a, int crumb, bool onButton = false) {
 bool g_menuPending = false;
 POINT g_menuPendingPoint{};
 
+// ------------------------------------------- the shell's menu, built ahead of the click
+//
+// The shell and its extensions take a good part of a second to build a menu.
+// It is built on a thread of this program's own, before the right-click
+// (shellmenu.h), and the right-click shows it.  This is what a right-click
+// is for, from the click to the menu and from the menu to the shell command
+// picked in it.
+struct MenuFor {
+    shellmenu::Request what;     // the things - none: the folder's background
+    shellmenu::ViewState state;  // the view as it was, for this program's own items
+    bool fromTree = false;
+    POINT client{};              // where it was clicked
+    POINT screen{};              // where its menu goes
+    ULONGLONG serial = 0;        // what the menu thread was asked under (0: nothing pending)
+    DWORD tick = 0;              // what the user had done by then (g_inputTick)
+};
+MenuFor g_menuWait;    // asked for, not up yet
+MenuFor g_menuShown;   // the one just closed with a shell command picked in it
+MenuFor g_menuOpen;    // the one on screen (while showHMenu runs)
+ULONGLONG g_menuSerial = 0;
+bool g_menuShownModel = false;  // the menu shown stood for another of the kind (the tests ask)
+ULONGLONG g_menuOpenEntry = 0;  // ... which one (a menu built), else the things' own
+ULONGLONG g_menuReplaceWith = 0;  // the things' own menu is in and says other: it is to take the stand-in's place
+int g_menuSyncDepth = 0;        // a menu is being built and shown on the window's thread, the old way
+DWORD g_inputTick = 0;  // up by one on every click, key and scroll: what was waited for is not wanted after
+// The pointer rests this long on something before its menu is built.
+constexpr UINT kHoverMenuMs = 70;
+constexpr UINT_PTR kHoverMenuTimer = 0x4D4F;
+// More things selected than this: their menu is not built ahead (it is a slow one to build, and rarely wanted).
+constexpr size_t kMenuMostPaths = 16;
+int g_hoverMenuRow = -1;  // the entry the pointer is resting on, if any
+bool menusAhead(const App& a);
+
+void cancelHover(HWND hwnd) {
+    if (g_hoverMenuRow == -1) return;
+    g_hoverMenuRow = -1;
+    KillTimer(hwnd, kHoverMenuTimer);
+}
+
+// The pointer came to rest on something a right-click would be on: after a
+// moment there, the menu of it - or of the selection it is in - is built.
+void noteHover(HWND hwnd, App& a, POINT p) {
+    int row = -1;
+    const bool onEntry = menusAhead(a) && !menuIsOpen() && !a.splitterDrag && !a.scrollDrag &&
+                         !a.marquee && !a.dragging && !a.dragArmed && !a.renaming &&
+                         a.hitTestItem(p, &row);
+    if (!onEntry) {
+        cancelHover(hwnd);
+        return;
+    }
+    if (row == g_hoverMenuRow) return;
+    g_hoverMenuRow = row;
+    SetTimer(hwnd, kHoverMenuTimer, kHoverMenuMs, nullptr);
+}
+
+// The menus a right-click in the folder is most likely to want, built while
+// nobody waits for one: the folder's background, a folder in it, and a file of
+// each of the four commonest kinds in it.  What was asked for for the folder
+// shown before is not wanted any more.
+void prefetchMenus(const App& a) {
+    if (!menusAhead(a)) return;
+    shellmenu::newBatch();
+    shellmenu::prefetch(shellmenu::Request{a.current, {}, a.hiddenFor({})});
+    std::wstring folder;
+    struct Kind {
+        size_t count = 0;
+        std::wstring first;
+    };
+    std::map<std::wstring, Kind> kinds;
+    for (const auto& e : a.entries) {
+        if (e.isDir) {
+            if (folder.empty()) folder = e.path;
+            continue;
+        }
+        Kind& kind = kinds[fsx::extensionLower(e.name)];
+        if (kind.count++ == 0) kind.first = e.path;
+    }
+    if (!folder.empty())
+        shellmenu::prefetch(shellmenu::Request{a.current, {folder}, a.hiddenFor({folder})});
+    std::vector<std::pair<size_t, std::wstring>> common;
+    for (const auto& [ext, kind] : kinds) common.emplace_back(kind.count, kind.first);
+    std::sort(common.begin(), common.end(), [](const auto& l, const auto& r) {
+        return l.first != r.first ? l.first > r.first : l.second < r.second;
+    });
+    for (int i = 0; i < 4 && i < (int)common.size(); ++i) {
+        const std::vector<std::wstring> paths{common[i].second};
+        shellmenu::prefetch(shellmenu::Request{a.current, paths, a.hiddenFor(paths)});
+    }
+}
+
+void contextMenuOver(HWND hwnd, App& a, bool fromTree);
+void applyMenuChoice(HWND hwnd, App& a, const std::vector<std::wstring>& paths,
+                     const shellmenu::Result& result);
+void showContextMenu(HWND hwnd, App& a, POINT p);
+
+bool menusAhead(const App& a) {
+    return (a.settings.menuMask & kMenuShell) && (a.settings.menuMask & kMenuAhead) &&
+           shellmenu::running();
+}
+
+// The menu of a right-click is over - shown and closed, or not shown after all.
+void contextMenuOver(HWND hwnd, App& a, bool fromTree) {
+    if (fromTree) a.selection.clear();
+    a.contextFolder.clear();
+    a.contextIsFavorite = false;
+    a.contextTreeRow = -1;
+    repaint(hwnd);
+
+    if (g_menuPending) {
+        // The user right-clicked somewhere else while the menu was open: show
+        // that menu now instead of losing the click.
+        g_menuPending = false;
+        showContextMenu(hwnd, a, g_menuPendingPoint);
+    }
+}
+
+// Whether what was right-clicked is still what a click there would be on:
+// the same things in the list are selected, or the tree's same row is there.
+bool targetStillThere(const App& a, const MenuFor& m) {
+    if (m.fromTree) {
+        const int row = a.treeRowAt(m.client);
+        if (row < 0 || row >= (int)a.treeFlat.size() || m.what.paths.size() != 1) return false;
+        return _wcsicmp(a.treeFlat[row]->path.c_str(), m.what.paths.front().c_str()) == 0;
+    }
+    if (_wcsicmp(a.current.c_str(), m.what.folder.c_str()) != 0) return false;
+    if (m.what.paths.empty()) return !a.hitTestItem(m.client, nullptr);
+    int row = -1;
+    if (!a.hitTestItem(m.client, &row)) return false;
+    if (a.selection.size() != m.what.paths.size()) return false;
+    for (const std::wstring& path : m.what.paths)
+        if (!a.selection.count(path)) return false;
+    return a.selection.count(a.entries[row].path) != 0;
+}
+
+// The menu built and shown on the window's own thread, as it was before
+// menus were built ahead - and the way when that is switched off.
+void showMenuNow(HWND hwnd, App& a, const std::wstring& folder,
+                 const std::vector<std::wstring>& paths, POINT screen,
+                 const shellmenu::ViewState& state, bool fromTree) {
+    shellmenu::Result result;
+    if (a.settings.menuMask & kMenuShell) {
+        ++g_menuSyncDepth;
+        result = shellmenu::show(hwnd, folder, paths, screen, state);
+        --g_menuSyncDepth;
+    }
+
+    if (!result.shown) {
+        // The shell could not build a menu (unusual path): fall back to the
+        // hand-drawn one so the window always has a context menu.
+        std::vector<MenuItem> items = a.contextMenu();
+        int id = showPopupMenu(hwnd, items, screen.x, screen.y, false);
+        if (id) a.performMenuAction(id);
+    } else {
+        applyMenuChoice(hwnd, a, paths, result);
+    }
+    contextMenuOver(hwnd, a, fromTree);
+}
+
+// Shows the menu built as `entry` says: a copy of the shell's part of it, with
+// this program's own items for the things as they are now.  The copy was
+// built for the very things, or (`model`) for another of their kind: a
+// stand-in until the menu of these is in.  That is asked for here, and when
+// it is in and says anything else, it takes the stand-in's place on screen
+// (kMenuReadyMessage): a few items are the file's own - an archive's name,
+// say.  A command picked meanwhile is run from it all the same.
+void showBuiltMenu(HWND hwnd, App& a, const MenuFor& m, ULONGLONG entry, bool model) {
+    std::vector<shellmenu::Item> items;
+    if (!shellmenu::itemsOf(entry, &items) || items.empty()) {
+        showMenuNow(hwnd, a, m.what.folder, m.what.paths, m.screen, m.state, m.fromTree);
+        return;
+    }
+    std::vector<shellmenu::Where> wheres;
+    HMENU menu = shellmenu::materialize(items, model, &wheres);
+    shellmenu::addOwnItems(menu, m.what.paths, m.state);
+
+    g_menuShownModel = model;
+    g_menuOpen = m;
+    g_menuOpenEntry = entry;
+    g_menuOpen.serial = 0;
+    if (model) {
+        g_menuOpen.serial = ++g_menuSerial;
+        shellmenu::ask(m.what, hwnd, g_menuOpen.serial, shellmenu::kAgainMs);
+    }
+    const int chosen = showHMenu(hwnd, menu, m.screen);
+    DestroyMenu(menu);
+    g_menuOpen.serial = 0;
+    if (chosen == 0 && g_menuReplaceWith) {
+        // The stand-in left the screen for the menu of the things themselves.
+        const ULONGLONG own = g_menuReplaceWith;
+        g_menuReplaceWith = 0;
+        showBuiltMenu(hwnd, a, m, own, false);
+        return;
+    }
+    g_menuReplaceWith = 0;
+
+    const shellmenu::Result picked = shellmenu::decodeChoice(chosen);
+    if (picked.command != shellmenu::Command::None) {
+        applyMenuChoice(hwnd, a, m.what.paths, picked);
+    } else if (chosen >= 1 && chosen < (int)wheres.size() + 1 && !wheres[chosen - 1].text.empty()) {
+        // A command of the shell's.  It is run on the thread that builds the
+        // menus, from the menu built for the things themselves, which is
+        // looked the item up in by where it lay and what it said;
+        // kMenuDoneMessage says how that went.
+        MenuFor& shown = g_menuShown;
+        shown = MenuFor{};
+        shown.what = m.what;
+        shown.state = m.state;
+        shown.fromTree = m.fromTree;
+        shown.screen = m.screen;
+        shown.client = m.screen;
+        ScreenToClient(hwnd, &shown.client);
+        shown.tick = g_inputTick;
+        shown.serial = ++g_menuSerial;
+        shellmenu::invoke(m.what, wheres[chosen - 1].path, wheres[chosen - 1].text, hwnd,
+                          shown.serial);
+    }
+    contextMenuOver(hwnd, a, m.fromTree);
+}
+
+// The menu of a right-click, from what was built ahead.  Shown from the menu
+// built for the very things, or from another of their kind until that one is
+// in (which is asked for then: a command picked in it is run from the menu of
+// the things themselves).  With nothing to show it from, it is asked for and
+// false comes back: kMenuReadyMessage brings it - `askedAndDone` then says
+// that moment came, and there is still nothing.
+bool showMenuAhead(HWND hwnd, App& a, const MenuFor& m, bool askedAndDone) {
+    const shellmenu::Request& what = m.what;
+    const bool background = what.paths.empty();
+    const shellmenu::Found own = shellmenu::find(what);
+    ULONGLONG source = 0;
+    bool model = false;
+    if (own.entry && own.ageMs < shellmenu::kAgainMs) {
+        source = own.entry;
+    } else if (!background) {
+        // Not built yet: the menu of one of its kind stands for it, until its own is in.
+        const shellmenu::Found alike = shellmenu::findKind(shellmenu::kindOf(what));
+        if (alike.entry && alike.ageMs < shellmenu::kModelAgeMs) {
+            source = alike.entry;
+            model = true;
+        }
+    }
+    if (askedAndDone) {
+        // The menu asked for is what was found - or the shell could not build it.
+        if (!source) return false;
+        showBuiltMenu(hwnd, a, m, source, model);
+        return true;
+    }
+    if (!source) {
+        // Nothing to show it from yet: asked for, and shown when it is in
+        // (kMenuReadyMessage) - unless anything is done until then.
+        g_menuWait = m;
+        g_menuWait.serial = ++g_menuSerial;
+        g_menuWait.tick = g_inputTick;
+        shellmenu::ask(what, hwnd, g_menuWait.serial, shellmenu::kAgainMs);
+        return false;
+    }
+    showBuiltMenu(hwnd, a, m, source, model);
+    return true;
+}
+
 // 文件夹颜色: the folders the menu was for - not a file among them, not a
 // drive - are shown in that colour from now on: in this window, in every
 // other one of this program, and after the next start.
@@ -868,32 +1128,19 @@ void showContextMenu(HWND hwnd, App& a, POINT p) {
                                  !fsx::isRoot(paths.front())
                              ? foldercolours::of(paths.front())
                              : foldercolours::kDefault;
-    shellmenu::Result result;
-    if (a.settings.menuMask & kMenuShell)
-        result = shellmenu::show(hwnd, folder, paths, screen, state);
-
-    if (!result.shown) {
-        // The shell could not build a menu (unusual path): fall back to the
-        // hand-drawn one so the window always has a context menu.
-        std::vector<MenuItem> items = a.contextMenu();
-        int id = showPopupMenu(hwnd, items, screen.x, screen.y, false);
-        if (id) a.performMenuAction(id);
-    } else {
-        applyMenuChoice(hwnd, a, paths, result);
+    if ((a.settings.menuMask & kMenuShell) && menusAhead(a)) {
+        // Built ahead on a thread of its own: shown now from what is there, or
+        // when what is asked for is in (the window is free until then).
+        MenuFor menu;
+        menu.what = shellmenu::Request{folder, paths, state.hidden};
+        menu.state = state;
+        menu.fromTree = fromTree;
+        menu.client = p;
+        menu.screen = screen;
+        showMenuAhead(hwnd, a, menu, false);
+        return;
     }
-
-    if (fromTree) a.selection.clear();
-    a.contextFolder.clear();
-    a.contextIsFavorite = false;
-    a.contextTreeRow = -1;
-    repaint(hwnd);
-
-    if (g_menuPending) {
-        // The user right-clicked somewhere else while the menu was open: show
-        // that menu now instead of losing the click.
-        g_menuPending = false;
-        showContextMenu(hwnd, a, g_menuPendingPoint);
-    }
+    showMenuNow(hwnd, a, folder, paths, screen, state, fromTree);
 }
 
 // ---------------------------------------------------------------- input
@@ -1750,6 +1997,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         break;
     case WM_SIZE:
+        ++g_inputTick;
         if (wp != SIZE_MINIMIZED) {
             int w = LOWORD(lp), h = HIWORD(lp);
             diagLog(L"WM_SIZE %dx%d scale=%.2f", w, h, a.scale);
@@ -1783,6 +2031,16 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_KILLFOCUS:
         a.windowActive = false;
+        ++g_inputTick;
+        return 0;
+    case WM_CLIPBOARDUPDATE:
+        // Whether there is something to paste is what a folder's background
+        // menu says: its menus are not kept past a change of the clipboard.
+        // The one of the folder shown is built anew, ahead of the next click.
+        if (menusAhead(a)) {
+            shellmenu::forgetBackgrounds();
+            shellmenu::prefetch(shellmenu::Request{a.current, {}, a.hiddenFor({})});
+        }
         return 0;
     case WM_CAPTURECHANGED:
         // Something stole the mouse: never leave a rubber band, a pending drag
@@ -1814,9 +2072,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             TrackMouseEvent(&tme);
         }
         onMouseMove(hwnd, a, p);
+        noteHover(hwnd, a, p);
         return 0;
     }
     case WM_MOUSELEAVE: {
+        // (Not the menu the pointer's resting on an entry would have built:
+        // it is made all the same if the entry was rested on long enough.)
         // Same region treatment as a hover change: only the highlighted
         // rows/buttons need redrawing.
         const RECT tree = a.hoverTree >= 0 ? a.treeRowRect(a.hoverTree) : RECT{};
@@ -1846,6 +2107,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         break;
     case WM_LBUTTONDOWN: {
         POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        ++g_inputTick;
         if (menuIsOpen()) {
             diagLog(L"main lbutton while a menu is open at %d,%d", p.x, p.y);
             menuClose();
@@ -1857,6 +2119,9 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONUP: {
         POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         onLButtonUp(hwnd, a, p);
+        // What a right-click there would be on may have changed (it was selected).
+        cancelHover(hwnd);
+        noteHover(hwnd, a, p);
         return 0;
     }
     case WM_LBUTTONDBLCLK: {
@@ -1866,6 +2131,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_RBUTTONDOWN: {
         POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        ++g_inputTick;
         showContextMenu(hwnd, a, p);
         return 0;
     }
@@ -1880,12 +2146,31 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         break;
     case WM_MOUSEWHEEL: {
         POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        ++g_inputTick;
+        cancelHover(hwnd);
         onMouseWheel(hwnd, a, p, GET_WHEEL_DELTA_WPARAM(wp));
         return 0;
     }
     case WM_TIMER:
         if (wp == kNewWindowTimer) {
             raiseNewWindows(hwnd, a);
+            return 0;
+        }
+        if (wp == kHoverMenuTimer) {
+            // The pointer has rested on an entry: the menu of a right-click
+            // there is built now, while nobody waits for it.
+            KillTimer(hwnd, kHoverMenuTimer);
+            const int row = g_hoverMenuRow;
+            g_hoverMenuRow = -1;
+            if (row >= 0 && row < (int)a.entries.size()) {
+                const std::wstring& hit = a.entries[row].path;
+                std::vector<std::wstring> paths;
+                if (a.selection.count(hit) && a.selection.size() <= kMenuMostPaths)
+                    for (const auto& e : a.entries)
+                        if (a.selection.count(e.path)) paths.push_back(e.path);
+                if (paths.empty()) paths.push_back(hit);
+                shellmenu::hover(shellmenu::Request{a.current, paths, a.hiddenFor(paths)});
+            }
             return 0;
         }
         if (wp == kMarqueeTimer && a.marquee) {
@@ -1902,10 +2187,56 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case thumbs::kReadyMessage:
         repaintThumbs(hwnd, a);
         return 0;
+    case shellmenu::kMenuReadyMessage:
+        // The menu asked for on a right-click is built.  The click is long
+        // gone if anything was done since, or what it was on is other now.
+        if (g_menuWait.serial && wp == g_menuWait.serial) {
+            const MenuFor wait = g_menuWait;
+            g_menuWait.serial = 0;
+            if (wait.tick != g_inputTick || !targetStillThere(a, wait)) {
+                contextMenuOver(hwnd, a, wait.fromTree);
+            } else if (!showMenuAhead(hwnd, a, wait, true)) {
+                // The shell could not build it ahead: as it was done before
+                // menus were, which ends in this program's own menu.
+                showMenuNow(hwnd, a, wait.what.folder, wait.what.paths, wait.screen, wait.state,
+                            wait.fromTree);
+            }
+        } else if (g_menuOpen.serial && wp == g_menuOpen.serial && menuIsOpen()) {
+            // The menu of the things themselves is in while one of their kind
+            // stands for them on screen: when that says anything else, it
+            // takes the stand-in's place (showBuiltMenu goes on from there).
+            std::vector<shellmenu::Item> standIn, own;
+            const shellmenu::Found built = shellmenu::find(g_menuOpen.what);
+            if (built.entry && shellmenu::itemsOf(g_menuOpenEntry, &standIn) &&
+                shellmenu::itemsOf(built.entry, &own) && !shellmenu::sameSay(standIn, own)) {
+                g_menuReplaceWith = built.entry;
+                menuClose();
+            }
+        }
+        return 0;
+    case shellmenu::kMenuDoneMessage:
+        if (g_menuShown.serial && wp == g_menuShown.serial) {
+            const MenuFor shown = g_menuShown;
+            g_menuShown.serial = 0;
+            if (lp == shellmenu::kVerbRan) {
+                shellmenu::Result result;
+                result.invokedShell = true;
+                applyMenuChoice(hwnd, a, shown.what.paths, result);
+            } else if (lp == shellmenu::kVerbNotFound && shown.tick == g_inputTick &&
+                       targetStillThere(a, shown)) {
+                // The menu of the thing itself has no item where the one
+                // picked lay, saying what it said (what was shown stood for
+                // another of its kind): that menu is shown now, as it is.
+                showContextMenu(hwnd, a, shown.client);
+            }
+        }
+        return 0;
     case WM_KEYDOWN:
+        ++g_inputTick;
         onKeyDown(hwnd, a, wp);
         return 0;
     case WM_SYSKEYDOWN:
+        ++g_inputTick;
         // With Alt held, arrow keys arrive here instead of WM_KEYDOWN; other
         // system keys (Alt+F4, F10) still go to DefWindowProc.
         if (wp == VK_LEFT || wp == VK_RIGHT || wp == VK_UP) {
@@ -1938,6 +2269,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         DestroyWindow(hwnd);
         return 0;
     case WM_DESTROY:
+        diagLog(L"WM_DESTROY of %p", hwnd);
         dnd::revokeTarget(hwnd);
         preview::hide();
         freePaintCache();
@@ -4484,6 +4816,743 @@ void folderColourTest(const std::wstring& listDir, const std::wstring& folder,
     verdict(L"按 Ctrl+W：窗口关上了", L"窗口还在", g_colour.closed);
 }
 
+// ---------------------------------------------------------- menus-ahead test
+// The shell's menus are built ahead on a thread of this program's own
+// (shellmenu.h), and a right-click shows what was built.  In the real window,
+// on a folder made for it.  The menus are there soon after the folder is
+// opened, and right-clicks - on the background, on a file whose menu was
+// built, on others of its kind whose were not - have their menus up at once.
+// What is shown for a file nothing was built for is read off the screen: the
+// shell's part of the menu of another of its kind, with this program's own
+// items for the file itself; and "属性" picked in it opens the properties of
+// that very file.  A command that is not where it was said to be runs nothing
+// (the menu of the thing itself is shown in its place); one that has moved
+// but says the same is found and runs.  The background's menus go when the
+// clipboard changes; the pointer resting on a file has its menu built; a
+// right-click waited for is not shown after the user does anything else; and
+// with it all switched off, the menu is built on the window's thread as it was.
+
+constexpr UINT_PTR kAheadTestTimer = 0x4D4B;
+constexpr wchar_t kAheadTestClass[] = L"MyOldComputerAheadTest";
+constexpr int kAheadTestEnd = 37;  // the step past the last one
+constexpr int kAheadSoonMs = 150;  // "at once", with room for a busy machine
+
+struct AheadDrive {
+    HWND main = nullptr;
+    int step = 0;
+    int wait = 0;  // ticks to let pass before the step goes on
+    int ticks = 0;
+    std::wstring dir;
+    double t0 = 0;  // when the last right-click was posted (ms); the menu came up at menuShownAt()
+    int builtAfterMs = -1;  // after the folder opened, its menus were built
+    int msBackground = -1, msOwn = -1, msAlike = -1;
+    bool backgroundModel = true, ownModel = true, alikeModel = true,
+         thirdModel = true;  // what each was shown from (true: not its own menu)
+    int topCount = 0;
+    bool sameTop = false, sameTree = false;  // the menu of a2.txt itself says what the one shown for it did
+    int openWith = 0;                       // what is in 打开方式 of a menu built ahead
+    std::vector<std::wstring> shown;  // what the popup on screen said at once, for a3.txt
+    std::vector<shellmenu::Item> standIn;  // ... and the menu it was shown from (built for another)
+    bool sameShown = false;  // ... which is what it is made of
+    bool differed = false;   // the menu of a3.txt itself says something else than the stand-in did
+    bool ownOnScreen = false;  // ... and then that one is what is on screen
+    bool rowFound = false;   // "属性" was in that menu, and its row was clicked
+    HWND dialog = nullptr;   // the properties dialog that opened
+    std::wstring dialogTitle;
+    ULONGLONG listed = 0;
+    bool refreshed = false;  // the listing was made anew after the command ran
+    bool reshown = false;    // a command that is not there: the menu of the thing itself came up in its place
+    int movedResult = -1;    // a command that had moved but says the same: how it went
+    bool forgotten = false, builtAgain = false;  // the background's menus, after they were let go of
+    bool hoverBuilt = false;  // the pointer rested on a file: its menu was built
+    bool dropped = false, lateShown = false, sync = false;
+    int sendTo = 0;        // what is in 发送到 of a menu built ahead, a moment after it was built
+    int openWithEarly = 0, sendToEarly = 0;  // ... as built, before the extensions were asked
+    int sendToOldWay = -1;  // what 发送到 has as the window opens it, the old way
+    bool sendToSeen = false;
+    int zip = -1;  // -1: there is no 7-Zip here to pick; 0: picked in its submenu; 1: the file came out
+    int lastStep = -1, stepSince = 0, stalled = -1;  // how long the step has been waiting
+    std::wstring path(const wchar_t* name) const { return dir + L"\\" + name; }
+};
+AheadDrive g_ahead;
+
+// The window of this process of the given class whose title has `name` in it
+// (a properties dialog, say).
+HWND windowTitled(const wchar_t* cls, const wchar_t* name) {
+    struct Found {
+        const wchar_t *cls, *name;
+        HWND hwnd = nullptr;
+    } found{cls, name, nullptr};
+    EnumWindows([](HWND h, LPARAM lp) -> BOOL {
+        auto* found = (Found*)lp;
+        DWORD pid = 0;
+        GetWindowThreadProcessId(h, &pid);
+        if (pid != GetCurrentProcessId()) return TRUE;
+        wchar_t name[64]{}, title[512]{};
+        GetClassNameW(h, name, 64);
+        GetWindowTextW(h, title, 512);
+        if (wcscmp(name, found->cls) == 0 && wcsstr(title, found->name)) {
+            found->hwnd = h;
+            return FALSE;
+        }
+        return TRUE;
+    }, (LPARAM)&found);
+    return found.hwnd;
+}
+
+// What a menu says along its top, as the Win98-style popup shows it.
+std::vector<std::wstring> menuTexts(HMENU menu) {
+    std::vector<std::wstring> out;
+    for (int i = 0; i < GetMenuItemCount(menu); ++i) {
+        wchar_t buf[512]{};
+        GetMenuStringW(menu, i, buf, 512, MF_BYPOSITION);
+        std::wstring text = buf;
+        const size_t amp = text.find(L"(&");
+        if (amp != std::wstring::npos) {
+            const size_t close = text.find(L')', amp);
+            if (close != std::wstring::npos) text.erase(amp, close - amp + 1);
+        }
+        text.erase(std::remove(text.begin(), text.end(), L'&'), text.end());
+        if (!text.empty()) out.push_back(text);
+    }
+    return out;
+}
+
+// The items of the menu built as `entry` says, with this program's own for `paths`.
+std::vector<shellmenu::Item> itemsOfEntry(ULONGLONG entry) {
+    std::vector<shellmenu::Item> items;
+    if (entry) shellmenu::itemsOf(entry, &items);
+    return items;
+}
+
+// Where, along the top of the menu built as `entry` says, the item whose text
+// has `text` in it lies, and what it says there (nowhere: -1).
+int topItem(ULONGLONG entry, const wchar_t* text, std::wstring* says) {
+    const std::vector<shellmenu::Item> items = itemsOfEntry(entry);
+    for (int i = 0; i < (int)items.size(); ++i)
+        if (items[i].text.find(text) != std::wstring::npos) {
+            if (says) *says = items[i].text;
+            return i;
+        }
+    return -1;
+}
+
+// A zip file holding one text file, stored as it is (no compression): for
+// an extension's command, picked in its submenu.
+void writeZip(const std::wstring& path, const std::string& name, const std::string& content) {
+    unsigned crc = 0xFFFFFFFF;
+    for (unsigned char c : content) {
+        crc ^= c;
+        for (int k = 0; k < 8; ++k) crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+    }
+    crc ^= 0xFFFFFFFF;
+    std::string z, central;
+    const auto le16 = [&z](std::string& out, unsigned v) {
+        out += (char)(v & 0xFF);
+        out += (char)(v >> 8);
+    };
+    const auto le32 = [&z](std::string& out, unsigned v) {
+        for (int k = 0; k < 4; ++k) out += (char)((v >> (8 * k)) & 0xFF);
+    };
+    const unsigned n = (unsigned)content.size();
+    le32(z, 0x04034b50);  // local file header
+    le16(z, 20);
+    le16(z, 0);
+    le16(z, 0);  // stored
+    le16(z, 0);  // time
+    le16(z, 0x21);  // date: 1980-01-01
+    le32(z, crc);
+    le32(z, n);
+    le32(z, n);
+    le16(z, (unsigned)name.size());
+    le16(z, 0);
+    z += name;
+    z += content;
+    le32(central, 0x02014b50);  // central directory
+    le16(central, 20);
+    le16(central, 20);
+    le16(central, 0);
+    le16(central, 0);
+    le16(central, 0);  // time
+    le16(central, 0x21);  // date
+    le32(central, crc);
+    le32(central, n);
+    le32(central, n);
+    le16(central, (unsigned)name.size());
+    le16(central, 0);
+    le16(central, 0);
+    le16(central, 0);
+    le16(central, 0);
+    le32(central, 0);
+    central += name;
+    le32(z, 0x06054b50);  // end of the central directory
+    le16(z, 0);
+    le16(z, 0);
+    le16(z, 1);
+    le16(z, 1);
+    le32(z, (unsigned)central.size());
+    le32(z, (unsigned)(30 + name.size() + n));
+    le16(z, 0);
+    z += central;
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path.c_str(), L"wb") != 0 || !f) return;
+    fwrite(z.data(), 1, z.size(), f);
+    fclose(f);
+}
+
+void aheadTestStep(HWND driver) {
+    AheadDrive& d = g_ahead;
+    KillTimer(driver, kAheadTestTimer);
+    if (d.step >= kAheadTestEnd) return;
+    const auto next = [&]() {
+        if (d.step < kAheadTestEnd) SetTimer(driver, kAheadTestTimer, 20, nullptr);
+    };
+    if (++d.ticks > 3000) {  // sixty seconds: give up, do not hang
+        d.step = kAheadTestEnd;
+        menuClose();
+        return;
+    }
+    if (d.wait > 0) {
+        --d.wait;
+        next();
+        return;
+    }
+    if (d.step != d.lastStep) {  // a step has four seconds: what it waits for and does not come
+        d.lastStep = d.step;     // is said by its own check, not by every one after it
+        d.stepSince = d.ticks;
+    } else if (d.ticks - d.stepSince > 200 && d.step < kAheadTestEnd) {
+        d.stalled = d.step;
+        menuClose();
+        ++d.step;
+        next();
+        return;
+    }
+    // Where a click is on an entry's name.
+    const auto rowPoint = [&](const wchar_t* name) {
+        for (int i = 0; i < (int)g_app.entries.size(); ++i)
+            if (g_app.entries[i].name == name) {
+                const RECT r = g_app.listRowRect(i);
+                return POINT{r.left + 40, (r.top + r.bottom) / 2};
+            }
+        return POINT{-1, -1};
+    };
+    const auto rightClick = [&](POINT p) {
+        d.t0 = diagMillis();
+        PostMessageW(d.main, WM_RBUTTONDOWN, 2, MAKELPARAM(p.x, p.y));
+    };
+    const shellmenu::Request background{d.dir, {}, {}};
+    const shellmenu::Request a1{d.dir, {d.path(L"a1.txt")}, {}},
+        a2{d.dir, {d.path(L"a2.txt")}, {}}, a3{d.dir, {d.path(L"a3.txt")}, {}},
+        hovered{d.dir, {d.path(L"k5.zz")}, {}}, late{d.dir, {d.path(L"k6.qq")}, {}};
+    shellmenu::ViewState view;  // as the window makes it for a file that is nothing special
+    view.menuMask = g_app.settings.menuMask;
+
+    switch (d.step) {
+    case 0:  // the thread up: the menus of the folder asked for, as the
+             // window's thread asks when a folder is listed
+        if (shellmenu::running()) {
+            d.t0 = diagMillis();
+            prefetchMenus(g_app);
+            d.step = 1;
+        }
+        break;
+    case 1: {  // ... and built: the background's, the folder's, the four kinds'
+        bool all = shellmenu::find(background).entry != 0;
+        const shellmenu::Request sub{d.dir, {d.path(L"sub")}, {}};
+        all = all && shellmenu::findKind(shellmenu::kindOf(sub)).entry != 0;
+        for (const wchar_t* name : {L"a1.txt", L"k1.cpp", L"k2.ini", L"k3.log"}) {
+            const shellmenu::Request what{d.dir, {d.path(name)}, {}};
+            all = all && shellmenu::findKind(shellmenu::kindOf(what)).entry != 0;
+        }
+        if (all) {
+            d.builtAfterMs = (int)(diagMillis() - d.t0);
+            d.wait = 20;  // their submenus are filled in once more by then
+            d.step = 2;
+        }
+        break;
+    }
+    case 2: {  // the background
+        const RECT row = g_app.listRowRect(0);
+        rightClick(POINT{g_app.lay.listViewport.left + g_app.lay.nameW + 40, row.top + 8});
+        d.step = 3;
+        break;
+    }
+    case 3:
+        if (menuIsOpen()) {
+            d.msBackground = (int)(menuShownAt() - d.t0);
+            d.backgroundModel = g_menuShownModel;
+            menuClose();
+            d.step = 4;
+        }
+        break;
+    case 4:
+        if (!menuIsOpen()) {
+            rightClick(rowPoint(L"a1.txt"));  // built ahead
+            d.step = 5;
+        }
+        break;
+    case 5:
+        if (menuIsOpen()) {
+            d.msOwn = (int)(menuShownAt() - d.t0);
+            d.ownModel = g_menuShownModel;
+            menuClose();
+            d.step = 6;
+        }
+        break;
+    case 6:
+        if (!menuIsOpen()) {
+            rightClick(rowPoint(L"a2.txt"));  // nothing was built for it: one of its kind stands for it
+            d.step = 7;
+        }
+        break;
+    case 7:
+        if (menuIsOpen()) {
+            d.msAlike = (int)(menuShownAt() - d.t0);
+            d.alikeModel = g_menuShownModel;
+            menuClose();
+            d.step = 8;
+        }
+        break;
+    case 8: {  // The click asked for the menu of a2.txt itself.  What the shell
+               // puts in a submenu is there as the menu is built; the
+               // extensions fill in the rest then, and once more a moment
+               // after (for what they find out in between).
+        const shellmenu::Found own = shellmenu::find(a2);
+        const shellmenu::Found alike = shellmenu::findKind(shellmenu::kindOf(a2));
+        if (!own.entry || !alike.entry) break;
+        if (!d.openWithEarly && !d.sendToEarly) {  // as built: the extensions asked once
+            const std::vector<shellmenu::Item> items = itemsOfEntry(own.entry);
+            for (const shellmenu::Item& item : items) {
+                if (!item.popup) continue;
+                if (item.text.find(L"打开方式") != std::wstring::npos)
+                    d.openWithEarly = (int)item.sub.size();
+                if (item.text.find(L"发送到") != std::wstring::npos)
+                    d.sendToEarly = (int)item.sub.size();
+            }
+        }
+        if (own.ageMs < 450) break;  // filled in once more by now
+        const std::vector<shellmenu::Item> shown = itemsOfEntry(alike.entry),
+                                           itsOwn = itemsOfEntry(own.entry);
+        if (shown.empty() || itsOwn.empty()) break;
+        d.sameTree = shellmenu::sameSay(shown, itsOwn);
+        HMENU menu = shellmenu::materialize(shown, true, nullptr);
+        shellmenu::addOwnItems(menu, a2.paths, view);
+        const std::vector<std::wstring> top = menuTexts(menu);
+        DestroyMenu(menu);
+        const std::vector<std::wstring> built = shellmenu::labels(d.dir, a2.paths, view);
+        d.topCount = (int)built.size();
+        d.sameTop = top == built;
+        d.openWith = 0;
+        d.sendTo = 0;
+        for (const shellmenu::Item& item : itsOwn) {
+            if (!item.popup) continue;
+            if (item.text.find(L"打开方式") != std::wstring::npos) d.openWith = (int)item.sub.size();
+            if (item.text.find(L"发送到") != std::wstring::npos) {
+                d.sendToSeen = true;
+                d.sendTo = (int)item.sub.size();
+            }
+        }
+        d.step = 9;
+        break;
+    }
+    case 9:  // a third of the kind, nothing built for it: shown from one of its kind
+        rightClick(rowPoint(L"a3.txt"));
+        d.step = 10;
+        break;
+    case 10: {  // up at once, from one of its kind: read off the screen
+        if (!menuIsOpen()) break;
+        d.thirdModel = g_menuShownModel;
+        d.shown = menuRootTexts();
+        d.shown.erase(std::remove(d.shown.begin(), d.shown.end(), std::wstring()), d.shown.end());
+        // What it is made of: the shell's part of the menu of another of the
+        // kind, and this program's items for a3.txt.
+        d.standIn = itemsOfEntry(g_menuOpenEntry);
+        HMENU menu = shellmenu::materialize(d.standIn, true, nullptr);
+        shellmenu::addOwnItems(menu, a3.paths, view);
+        d.sameShown = d.shown == menuTexts(menu);
+        DestroyMenu(menu);
+        d.step = 11;
+        break;
+    }
+    case 11:  // the menu of a3.txt itself was asked for as it was shown: in by now
+        if (shellmenu::find(a3).entry) {
+            d.wait = 3;  // let it take the stand-in's place, if it is to
+            d.step = 12;
+        }
+        break;
+    case 12: {
+        const HWND popup = windowTitled(L"MyOldComputerHMenu", L"");
+        if (!popup || !menuIsOpen()) break;
+        const shellmenu::Found own = shellmenu::find(a3);
+        const std::vector<shellmenu::Item> itsOwn = itemsOfEntry(own.entry);
+        d.differed = !itsOwn.empty() && !shellmenu::sameSay(d.standIn, itsOwn);
+        std::vector<std::wstring> onScreen = menuRootTexts();
+        onScreen.erase(std::remove(onScreen.begin(), onScreen.end(), std::wstring()), onScreen.end());
+        HMENU menu = shellmenu::materialize(itsOwn, false, nullptr);
+        shellmenu::addOwnItems(menu, a3.paths, view);
+        d.ownOnScreen = !itsOwn.empty() && onScreen == menuTexts(menu);
+        DestroyMenu(menu);
+        RECT row{};
+        if (!menuRowOf(L"属性", &row)) {
+            d.step = kAheadTestEnd;  // not to pick anything other
+            break;
+        }
+        d.rowFound = true;
+        d.listed = g_app.listSerial;
+        PostMessageW(popup, WM_LBUTTONUP, MK_LBUTTON,
+                     MAKELPARAM(pxOf(g_app.scale, 12), (row.top + row.bottom) / 2));
+        d.step = 13;
+        break;
+    }
+    case 13: {  // the properties of a3.txt open
+        const HWND dialog = windowTitled(L"#32770", L"a3.txt");
+        if (!dialog) break;
+        d.dialog = dialog;
+        wchar_t title[256]{};
+        GetWindowTextW(dialog, title, 256);
+        d.dialogTitle = title;
+        PostMessageW(dialog, WM_CLOSE, 0, 0);
+        d.step = 14;
+        break;
+    }
+    case 14:  // ... closed, the command is over, and the folder is listed anew
+        if (!IsWindow(d.dialog) && !g_menuShown.serial) {
+            d.refreshed = g_app.listSerial != d.listed;
+            d.step = 15;
+        }
+        break;
+    case 15: {  // a command that is neither where it is said to be nor anywhere
+               // in that menu - asked for the way the window asks when one is
+               // picked: the window is told, and shows the menu of the thing itself
+        for (int i = 0; i < (int)g_app.entries.size(); ++i)
+            if (g_app.entries[i].name == L"a1.txt") selectOnly(g_app, i);
+        const int pos = topItem(shellmenu::find(a1).entry, L"属性", nullptr);
+        if (pos < 0 || g_app.selection.size() != 1) {
+            d.step = kAheadTestEnd;
+            break;
+        }
+        MenuFor& shown = g_menuShown;
+        shown = MenuFor{};
+        shown.what = a1;
+        shown.client = rowPoint(L"a1.txt");
+        shown.tick = g_inputTick;
+        shown.serial = ++g_menuSerial;
+        shellmenu::invoke(a1, {pos}, L"(no such command)", d.main, shown.serial);
+        d.step = 16;
+        break;
+    }
+    case 16:
+        if (menuIsOpen()) {
+            d.reshown = true;
+            menuClose();
+            d.step = 17;
+        }
+        break;
+    case 17: {  // a command that has moved (it lies a row back) but says the same
+        const shellmenu::Found own = shellmenu::find(a1);
+        if (menuIsOpen() || !own.entry) break;  // the menu shown in its place is closed, and a1.txt's is built again
+        const std::vector<shellmenu::Item> items = itemsOfEntry(own.entry);
+        std::wstring says;
+        const int pos = topItem(own.entry, L"属性", &says);
+        if (pos < 1) {
+            d.step = kAheadTestEnd;
+            break;
+        }
+        shellmenu::invoke(a1, {pos - 1}, says, driver, 78);
+        d.step = 18;
+        break;
+    }
+    case 18: {  // it ran: the properties of a1.txt are up, and the command is over once they close
+        if (HWND dialog = windowTitled(L"#32770", L"a1.txt")) PostMessageW(dialog, WM_CLOSE, 0, 0);
+        if (d.movedResult >= 0) d.step = 19;
+        break;
+    }
+    case 19:  // the clipboard changed, as far as the menus go: the background's
+              // are let go of, and the one of this folder is built again
+        shellmenu::forgetBackgrounds();
+        d.forgotten = shellmenu::find(background).entry == 0;
+        shellmenu::prefetch(background);
+        d.step = 20;
+        break;
+    case 20:
+        if (shellmenu::find(background).entry) {
+            d.builtAgain = true;
+            d.step = 21;
+        }
+        break;
+    case 21: {  // the pointer came to rest on a file
+        const POINT p = rowPoint(L"k5.zz");
+        PostMessageW(d.main, WM_MOUSEMOVE, 0, MAKELPARAM(p.x, p.y));
+        d.wait = 10;  // it has rested there by then
+        d.step = 22;
+        break;
+    }
+    case 22:
+        if (shellmenu::find(hovered).entry) {
+            d.hoverBuilt = true;
+            d.step = 23;
+        }
+        break;
+    case 23:  // right-clicked where nothing was built (a kind nothing was
+              // built ahead for), and a key pressed while the menu was waited for
+        rightClick(rowPoint(L"k6.qq"));
+        PostMessageW(d.main, WM_KEYDOWN, VK_F24, 0);
+        d.wait = 60;  // a second: built by then, and not shown
+        d.step = 24;
+        break;
+    case 24:
+        d.dropped = !menuIsOpen() && shellmenu::find(late).entry != 0;
+        d.step = 25;
+        break;
+    case 25:  // ... and the next right-click has it
+        rightClick(rowPoint(L"k6.qq"));
+        d.step = 26;
+        break;
+    case 26:
+        if (menuIsOpen()) {
+            d.lateShown = true;
+            menuClose();
+            d.step = 27;
+        }
+        break;
+    case 27:
+        if (!menuIsOpen()) {
+            g_app.settings.menuMask &= ~kMenuAhead;  // switched off
+            rightClick(rowPoint(L"a1.txt"));
+            d.step = 28;
+        }
+        break;
+    case 28:  // built on the window's thread: up while the click is still being handled
+        d.sync = menuIsOpen() && g_menuSyncDepth > 0;
+        d.wait = 25;  // half a second: the shell's walk of the Send To folder is over by then
+        d.step = 29;
+        break;
+    case 29: {  // 发送到 is opened as the window opens it, the old way
+        if (!d.sync) {
+            g_app.settings.menuMask |= kMenuAhead;
+            d.step = kAheadTestEnd;
+            break;
+        }
+        RECT row{};
+        if (!menuRowOf(L"发送到", &row)) {
+            menuClose();
+            g_app.settings.menuMask |= kMenuAhead;
+            d.step = 32;
+            break;
+        }
+        PostMessageW(menuActiveWindow(), WM_MOUSEMOVE, 0,
+                     MAKELPARAM(pxOf(g_app.scale, 12), (row.top + row.bottom) / 2));
+        d.step = 30;
+        break;
+    }
+    case 30: {  // ... open: how many it has
+        d.sendToOldWay = menuRowsUp();
+        menuClose();
+        g_app.settings.menuMask |= kMenuAhead;
+        d.step = 31;
+        break;
+    }
+    case 31: {  // a command of an extension's own, in a submenu: a zip made for it, in the folder
+        if (menuIsOpen()) break;
+        writeZip(d.path(L"z.zip"), "z.txt",
+                 "extracted by the extension, through the menu built for the zip itself");
+        g_app.reload();  // the listing has it
+        d.step = 32;
+        break;
+    }
+    case 32:
+        rightClick(rowPoint(L"z.zip"));  // nothing was built for a zip, nor for its kind: waited for
+        d.step = 33;
+        break;
+    case 33: {  // up when it is built; the pointer comes to the extension's submenu
+        const HWND popup = menuActiveWindow();
+        if (!popup) break;
+        RECT row{};
+        if (!menuRowOf(L"7-Zip", &row)) {
+            d.zip = -1;  // no 7-Zip here (or nothing of the kind in this menu): nothing to pick
+            menuClose();
+            d.step = 36;
+            break;
+        }
+        PostMessageW(popup, WM_MOUSEMOVE, 0,
+                     MAKELPARAM(pxOf(g_app.scale, 12), (row.top + row.bottom) / 2));
+        d.step = 34;
+        break;
+    }
+    case 34: {  // ... open: 解压到当前文件夹 picked in it
+        const HWND sub = menuActiveWindow();
+        if (!sub) break;
+        RECT row{};
+        if (!menuRowOf(L"解压到当前", &row)) {
+            d.zip = -1;  // not as it is named here: nothing is picked
+            menuClose();
+            d.step = 36;
+            break;
+        }
+        d.zip = 0;  // picked
+        PostMessageW(sub, WM_MOUSEMOVE, 0,
+                     MAKELPARAM(pxOf(g_app.scale, 12), (row.top + row.bottom) / 2));
+        PostMessageW(sub, WM_LBUTTONUP, MK_LBUTTON,
+                     MAKELPARAM(pxOf(g_app.scale, 12), (row.top + row.bottom) / 2));
+        d.step = 35;
+        break;
+    }
+    case 35:  // the file is out
+        if (fsx::exists(d.path(L"z.txt"))) {
+            d.zip = 1;
+            d.step = 36;
+        }
+        break;
+    case 36:
+        if (!menuIsOpen() && !g_menuShown.serial) d.step = kAheadTestEnd;
+        break;
+    default:
+        d.step = kAheadTestEnd;
+        break;
+    }
+    next();
+}
+
+LRESULT CALLBACK aheadTestProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_TIMER && wp == kAheadTestTimer) {
+        aheadTestStep(hwnd);
+        return 0;
+    }
+    if (msg == shellmenu::kMenuDoneMessage) {
+        if (wp == 78) g_ahead.movedResult = (int)lp;
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+// The test in the real window, on `dir`: three text files (a1 built ahead,
+// a2 and a3 not), `k1.cpp`, `k2.ini`, `k3.log`, `k4.md`, `k5.zz` of five other
+// kinds (three are built ahead: `k4.md`'s and `k5.zz`'s are not), and a folder.
+void menusAheadTest(const std::wstring& dir, const std::function<void(const wchar_t*, bool)>& check) {
+    WNDCLASSEXW wc{sizeof(WNDCLASSEXW)};
+    wc.lpfnWndProc = aheadTestProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = kAheadTestClass;
+    RegisterClassExW(&wc);
+    HWND driver = CreateWindowExW(0, kAheadTestClass, L"", WS_OVERLAPPED, 0, 0, 100, 100, nullptr,
+                                  nullptr, wc.hInstance, nullptr);  // never shown
+    registerMainClass(wc.hInstance);
+    HWND main = CreateWindowExW(WS_EX_NOACTIVATE, L"MyOldComputerWindow", L"menus ahead test",
+                                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, 0, 0, 0, 0, driver, nullptr,
+                                wc.hInstance, nullptr);
+    g_ahead = AheadDrive{};
+    g_ahead.main = main;
+    g_ahead.dir = dir;
+    if (main) {
+        g_app.hwnd = main;
+        g_app.scale = dpiScaleOfWindow(main);
+        g_app.init(main);
+        // (An earlier test left the scratch settings with the mask of a file
+        // from before: this one is about the menus built ahead, which are on.)
+        g_app.settings.menuMask = kMenuDefaults;
+        g_app.relayout(pxOf(g_app.scale, 700), pxOf(g_app.scale, 440));
+        g_app.loadDirectory(dir, false);
+        g_app.setViewMode(ViewMode::Details);
+        placeWindow(main, 0, 0, g_app.width, g_app.height);
+        ShowWindow(main, SW_SHOWNOACTIVATE);
+        SetWindowPos(main, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        UpdateWindow(main);
+        shellmenu::start(main);
+        MSG msg;
+        for (SetTimer(driver, kAheadTestTimer, 20, nullptr);
+             g_ahead.step < kAheadTestEnd && GetMessageW(&msg, nullptr, 0, 0) > 0;) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        KillTimer(driver, kAheadTestTimer);
+        menuClose();
+        if (HWND dialog = windowTitled(L"#32770", L".txt")) PostMessageW(dialog, WM_CLOSE, 0, 0);
+        g_app.settings.menuMask |= kMenuAhead;
+        g_hoverMenuRow = -1;
+        if (IsWindow(main)) {
+            g_app.hwnd = nullptr;
+            DestroyWindow(main);
+        }
+        // The window's going posted WM_QUIT.  This loop ended by its steps,
+        // not by that message, as the other windows' loops do: it is taken
+        // here, or it would end the next test's loop at once.
+        while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        g_app.hwnd = nullptr;
+        g_app.addrEdit = nullptr;
+        g_app.addrEditing = false;
+        if (g_app.addrFont) {
+            DeleteObject(g_app.addrFont);
+            g_app.addrFont = nullptr;
+        }
+    }
+    DestroyWindow(driver);
+
+    const AheadDrive& d = g_ahead;
+    std::wstring notes;
+    if (!main) notes += L"窗口没建出来";
+    else if (d.ticks > 3000) notes += L"超时";
+    const auto of = [](int v) { return std::to_wstring(v); };
+    const auto verdict = [&](const std::wstring& name, const std::wstring& why, bool ok) {
+        std::wstring label = name;
+        if (!notes.empty()) label += L"：" + notes;
+        else if (!ok)
+            label += L"：" + why + (d.stalled >= 0
+                                        ? L"（第 " + std::to_wstring(d.stalled) + L" 步等了 4 秒没等到）"
+                                        : L"");
+        check(label.c_str(), label == name);
+    };
+    const auto soon = [&](int ms) { return L"等了 " + of(ms) + L" 毫秒"; };
+    verdict(L"打开文件夹后，空白处、文件夹和四种类型文件的菜单都在后台建好了",
+            d.builtAfterMs < 0 ? L"没有全建出来" : L"用了 " + of(d.builtAfterMs) + L" 毫秒",
+            d.builtAfterMs >= 0);
+    verdict(L"右键空白处：菜单当场弹出，用的是它自己的",
+            d.backgroundModel ? L"没有用它自己的" : soon(d.msBackground),
+            !d.backgroundModel && d.msBackground >= 0 && d.msBackground < kAheadSoonMs);
+    verdict(L"右键一个文件：菜单当场弹出，用的是它自己的",
+            d.ownModel ? L"没有用它自己的" : soon(d.msOwn),
+            !d.ownModel && d.msOwn >= 0 && d.msOwn < kAheadSoonMs);
+    verdict(L"右键同类的另一个文件（没有为它建过菜单）：菜单也当场弹出，是照同类的建的",
+            !d.alikeModel ? L"没有照同类的建" : soon(d.msAlike),
+            d.alikeModel && d.msAlike >= 0 && d.msAlike < kAheadSoonMs);
+    verdict(L"照同类建的菜单与它自己的菜单说的一样：顶层 " + of(d.topCount) +
+                L" 项相同，子菜单也相同；“打开方式”里有 " + of(d.openWith) + L" 项（建好时 " +
+                of(d.openWithEarly) + L" 项），“发送到”里有 " + of(d.sendTo) + L" 项（建好时 " +
+                of(d.sendToEarly) + L" 项；窗口当场打开、稍等后再看是 " + of(d.sendToOldWay) + L" 项）",
+            !d.sameTop ? L"顶层不同" : !d.sameTree ? L"子菜单不同"
+                       : d.openWith < 2 ? L"“打开方式”没有填进来"
+                       : d.sendToSeen && d.sendTo == 0 ? L"“发送到”是空的"
+                       : L"“发送到”比窗口当场打开的还少",
+            d.sameTop && d.sameTree && d.openWith >= 2 && (!d.sendToSeen || d.sendTo > 0) &&
+                (!d.sendToSeen || d.sendToOldWay < 0 || d.sendTo >= d.sendToOldWay));
+    verdict(L"右键第三个同类文件：屏幕上当场弹出的菜单就是“同类的 shell 部分 + 为它现做的本程序项”",
+            !d.thirdModel ? L"没有照同类的建" : L"内容与应有的不一样", d.thirdModel && d.sameShown);
+    verdict(std::wstring(L"它自己的菜单建好之后，屏幕上的就是它自己的菜单") +
+                (d.differed ? L"：它说的与快照不一样，已就地换掉" : L"（本机没有因文件而异的项）"),
+            L"屏幕上的不是它自己的菜单", d.ownOnScreen);
+    verdict(L"在这个菜单里点“属性”：打开的是这个文件自己的属性（" + d.dialogTitle + L"），之后列表刷新",
+            !d.rowFound ? L"菜单里没有找到“属性”"
+                       : !d.dialog ? L"属性窗口没有打开" : L"列表没有刷新",
+            d.rowFound && d.dialog && d.refreshed);
+    verdict(L"位置和文字都对不上的命令：不执行，改为弹出它自己的真实菜单",
+            d.reshown ? L"没有弹出真实菜单" : L"", d.reshown);
+    verdict(L"挪了位置但文字相同的命令：照样找到并执行", L"回报 " + of(d.movedResult),
+            d.movedResult == shellmenu::kVerbRan);
+    verdict(L"空白处的菜单作废后立刻重新建好",
+            std::wstring(d.forgotten ? L"" : L"没有作废") + (d.builtAgain ? L"" : L"；也没有重建"),
+            d.forgotten && d.builtAgain);
+    verdict(L"鼠标在一个文件上停一下：它的菜单就在后台建好", L"没有建", d.hoverBuilt);
+    verdict(L"等菜单时按了键：菜单不再弹出；紧接着再右键就弹出",
+            d.dropped ? L"再右键没有弹出" : L"等的时候还是弹出了", d.dropped && d.lateShown);
+    verdict(L"关掉“提前在后台构建菜单”：菜单在窗口线程上当场建、当场弹出",
+            d.sync ? L"没有弹出" : L"不是在窗口线程上建的", d.sync);
+    verdict(d.zip < 0 ? L"（本机没有 7-Zip 的“解压到当前文件夹”：子菜单里扩展自己的命令这项没考到）"
+                      : L"右键一个压缩包，在 7-Zip 的子菜单里点“解压到当前文件夹”：文件解出来了",
+            d.zip == 0 ? L"点了，文件没有出来" : L"", d.zip != 0);
+}
+
 // ---------------------------------------------------------- thumbnail test
 // A folder that is mostly pictures opens as thumbnails in the real window,
 // and what is on screen is read back: the icon at first, then - each when its
@@ -7001,8 +8070,41 @@ int runUiTest(App& app) {
         if (again.menuMask & kMenuItemFolderColour) s += L"：关掉的又被打开了";
         check(s.c_str(), s == name);
     }
+    {
+        const std::wstring name =
+            L"设置文件是旧的（那时还没有“提前在后台构建菜单”这一项）：第一次读进来它是开着的，之后关了就一直是关的";
+        std::wstring s = name;
+        const std::wstring file = settingsPath();
+        WritePrivateProfileStringW(L"menu", L"ahead", nullptr, file.c_str());
+        WritePrivateProfileStringW(L"menu", L"mask", L"0x7FFF", file.c_str());
+        Settings old;
+        old.load();
+        if (!(old.menuMask & kMenuAhead)) s += L"：旧设置里它是关着的";
+        old.save();  // from now on the file has its say
+        WritePrivateProfileStringW(L"menu", L"mask", L"0x7FFF", file.c_str());  // ... and it is off
+        Settings again;
+        again.load();
+        if (again.menuMask & kMenuAhead) s += L"：关掉的又被打开了";
+        check(s.c_str(), s == name);
+    }
 
     folderColourTest(crumbsDir, crumbAa, check);
+
+    // The shell's menus are built ahead of the right-click: three text files
+    // and six other kinds of file (five kinds are built ahead, of the other
+    // two one is hovered and one is right-clicked), and a folder.
+    const std::wstring aheadDir = base + L"\\ahead";
+    {
+        CreateDirectoryW(aheadDir.c_str(), nullptr);
+        CreateDirectoryW((aheadDir + L"\\sub").c_str(), nullptr);
+        for (const wchar_t* name : {L"a1.txt", L"a2.txt", L"a3.txt", L"k1.cpp", L"k2.ini", L"k3.log", L"k4.md", L"k5.zz",
+             L"k6.qq"})
+            if (HANDLE h = CreateFileW((aheadDir + L"\\" + name).c_str(), GENERIC_WRITE, 0, nullptr,
+                                       CREATE_ALWAYS, 0, nullptr);
+                h != INVALID_HANDLE_VALUE)
+                CloseHandle(h);
+    }
+    menusAheadTest(aheadDir, check);
 
     // Thumbnails: a folder that is mostly pictures opens as thumbnails.
     const std::wstring thumbsDir = base + L"\\thumbs", picDir = thumbsDir + L"\\pics",
@@ -7416,6 +8518,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
     }
     g_app.loadDirectory(startPath, false);
     dnd::registerTarget(hwnd, &g_app);
+    // The shell's menus are built ahead on a thread of this program's own,
+    // up before the window shows: ready when the first folder's are asked for.
+    shellmenu::start(hwnd);
+    AddClipboardFormatListener(hwnd);  // WM_CLIPBOARDUPDATE: the background menus depend on it
     DragAcceptFiles(hwnd, TRUE);
     // (The foreground test of a new window has a new instance come up
     // unactivated on purpose, MOC_SHOWNOACTIVATE, to see the window that
@@ -7430,11 +8536,22 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
         SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     UpdateWindow(hwnd);
 
+    ULONGLONG listed = 0;
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
+        // A folder was listed (opened, reloaded): what a right-click in it would
+        // want is built from now on.  (Until the thread is up the listing is
+        // left unmarked: the first one is not to be missed.)
+        if (g_app.listSerial != listed && shellmenu::running()) {
+            listed = g_app.listSerial;
+            prefetchMenus(g_app);
+        }
     }
+    // The thread that builds the menus is given a moment to be out of the
+    // shell's code before the process ends under it.
+    shellmenu::stop();
     g_app.saveSettings();
     OleUninitialize();
     return 0;

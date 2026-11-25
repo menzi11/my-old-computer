@@ -87,6 +87,10 @@ the empty area keeps working View / Sort / Refresh / New commands.  Tools →
 Context menu settings lists every shell entry grouped by where the right-click
 happened - empty area, folder, file, per file type - and each one can be hidden
 in that context only; any extension can be added to the list by hand.
+The menu is built ahead of the click, on a thread of its own: the shell and
+its extensions take 70–300 ms to make one (half a second for the first in a
+window), and the window used to stand still for all of it - now the menu is
+up within 20 ms.
 
 **A sidebar that knows the machine** — My Computer with every drive or mounted
 volume, folders that expand with `+` / `−`, a Favorites group at the top (a folder

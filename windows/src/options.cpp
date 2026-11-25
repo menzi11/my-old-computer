@@ -24,6 +24,7 @@ struct OwnOption {
 const OwnOption kOwn[] = {
     {L"文件和文件夹右键菜单", 0, true},
     {L"使用 Windows 原生菜单（含所有扩展）", kMenuShell, false},
+    {L"提前在后台构建菜单（弹出更快）", kMenuAhead, false},
     {L"快速查看", kMenuItemPreview, false},
     {L"在新窗口中打开", kMenuItemNewWindow, false},
     {L"文件夹颜色", kMenuItemFolderColour, false},
