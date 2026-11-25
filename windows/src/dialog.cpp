@@ -7,6 +7,7 @@
 #include <string>
 
 #include "canvas.h"
+#include "debug.h"
 #include "icons.h"
 #include "theme.h"
 #include "version.h"
@@ -286,8 +287,13 @@ bool runDialog(HWND owner, const std::wstring& title, const std::wstring& label,
     }
 
     if (owner) EnableWindow(owner, FALSE);
-    ShowWindow(st.hwnd, SW_SHOW);
-    SetForegroundWindow(st.hwnd);
+    // An instance that stays in the background (a test's) takes no foreground
+    // for its dialogs - not when its edit box is given the focus either: a
+    // window that cannot be activated.  Whoever is at the machine keeps it.
+    const bool background = staysInBackground();
+    if (background) SetWindowLongPtrW(st.hwnd, GWL_EXSTYLE, WS_EX_DLGMODALFRAME | WS_EX_NOACTIVATE);
+    ShowWindow(st.hwnd, background ? SW_SHOWNOACTIVATE : SW_SHOW);
+    if (!background) SetForegroundWindow(st.hwnd);
     if (prompt) {
         SetFocus(st.edit);
         SendMessageW(st.edit, EM_SETSEL, 0, -1);
@@ -308,7 +314,7 @@ bool runDialog(HWND owner, const std::wstring& title, const std::wstring& label,
     }
 
     if (owner) EnableWindow(owner, TRUE);
-    SetForegroundWindow(owner);
+    if (!background) SetForegroundWindow(owner);
     if (prompt && st.edit) {
         // The dialog was not finished (the loop ended on WM_QUIT): the edit
         // box is still there and still has to be read and removed.

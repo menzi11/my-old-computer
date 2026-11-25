@@ -777,6 +777,7 @@ struct Ahead {
         Request what;
         HWND notify = nullptr;  // Show, Verb: where the answer is posted
         ULONGLONG serial = 0;   // ... under this
+        ULONGLONG freshMs = kAgainMs;  // Show: a menu of the thing built this recently is the answer
         std::vector<int> path;  // Verb: where the item picked lay
         std::wstring text;      // ... and what it said
     };
@@ -800,6 +801,7 @@ struct Ahead {
     HWND owner = nullptr;  // the window the shell is shown to parent things to
     std::atomic<bool> running{false};
     std::atomic<HWND> window{nullptr};
+    std::atomic<ULONGLONG> shown{0};     // the menu built as this one is on screen (0: none; showing)
     std::atomic<bool> quitting{false};  // the window is gone: nothing more is built (stop)
     std::atomic<int> busy{0};           // the thread is in the shell's code (a step of work)
     std::once_flag once;
@@ -931,6 +933,12 @@ void work() {
         Ahead::Ask ask;
         if (!takeAsk(&ask)) break;
         if (a.quitting.load() && ask.rank != Ahead::Ask::Verb) continue;  // the window is going
+        // A menu someone is waiting for (the right-click's, or the command it
+        // picked) is made at the window's own priority, machine or no machine
+        // load; what is only made ahead stays behind the window.
+        SetThreadPriority(GetCurrentThread(),
+                          ask.rank >= Ahead::Ask::Show ? THREAD_PRIORITY_NORMAL
+                                                       : THREAD_PRIORITY_BELOW_NORMAL);
         Busy busy(a);  // in the shell's code from here to the end of the step
         if (ask.rank == Ahead::Ask::Verb) {
             runVerb(ask);
@@ -942,7 +950,7 @@ void work() {
             const std::wstring key = keyOf(ask.what);
             const ULONGLONG now = GetTickCount64();
             for (auto it = a.entries.rbegin(); it != a.entries.rend(); ++it)
-                if ((*it)->ok && (*it)->key == key && now - (*it)->built < kAgainMs) {
+                if ((*it)->ok && (*it)->key == key && now - (*it)->built < ask.freshMs) {
                     entry = *it;
                     break;
                 }
@@ -956,6 +964,7 @@ void work() {
             PostMessageW(ask.notify, kMenuReadyMessage, ask.serial, 0);
     }
     a.fresh.insert(a.fresh.end(), fresh.begin(), fresh.end());
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     if (!a.fresh.empty()) SetTimer(a.window.load(), kSecondPassTimer, kSecondPassMs, nullptr);
 }
 
@@ -973,6 +982,10 @@ void secondPass() {
         fillIn(*entry->menu);
         std::lock_guard<std::mutex> lock(a.mutex);
         entry->items = readItems(entry->menu->menu);
+        // A menu on screen that was made of it says the same as before: the
+        // window is told, and makes it say this.
+        if (entry->id == a.shown.load() && a.owner)
+            PostMessageW(a.owner, kMenuChangedMessage, (WPARAM)entry->id, 0);
     }
     a.fresh.clear();
 }
@@ -1085,6 +1098,8 @@ void start(HWND owner) {
 
 bool running() { return ahead().running.load(); }
 
+void showing(ULONGLONG entry) { ahead().shown.store(entry); }
+
 void stop() {
     Ahead& a = ahead();
     a.quitting.store(true);
@@ -1168,6 +1183,7 @@ void ask(const Request& what, HWND notify, ULONGLONG serial, ULONGLONG freshMs) 
                 it->rank = Ahead::Ask::Show;
                 it->notify = notify;
                 it->serial = serial;
+                it->freshMs = (std::min)(it->freshMs, freshMs);
                 asked = true;
                 ++it;
             } else if (stale) {
@@ -1182,6 +1198,7 @@ void ask(const Request& what, HWND notify, ULONGLONG serial, ULONGLONG freshMs) 
             ask.what = what;
             ask.notify = notify;
             ask.serial = serial;
+            ask.freshMs = freshMs;
             a.asks.push_back(std::move(ask));
         }
     }
@@ -1242,6 +1259,16 @@ bool sameSay(const std::vector<Item>& a, const std::vector<Item>& b) {
             return false;
         if (!sameSay(x.sub, y.sub)) return false;
     }
+    return true;
+}
+
+bool sameRows(const std::vector<Item>& a, const std::vector<Item>& b) {
+    // Along the top only: a submenu is read when it is opened, and may have
+    // as many rows as it has (发送到 gets its last one a moment after the
+    // menu was built).
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i)
+        if (a[i].separator != b[i].separator || a[i].popup != b[i].popup) return false;
     return true;
 }
 

@@ -39,6 +39,7 @@ struct Node {
 Node* g_active = nullptr;
 Node* g_root = nullptr;
 double g_shownAt = 0;  // when the menu on screen came up (menuShownAt)
+int g_putUps = 0;     // menus put up since the program started (menuPutUps)
 bool g_finished = false;
 
 void destroyChildren(Node* n);
@@ -277,7 +278,8 @@ void closeAll(Node* root) {
     g_finished = true;
 }
 
-void createNodeWindow(Node* n, int x, int y) {
+// How wide the menu's window is: for the longest of its rows.
+int nodeWidth(Node* n) {
     HDC screen = GetDC(nullptr);
     HDC mem = CreateCompatibleDC(screen);
     int width = 120;
@@ -287,7 +289,11 @@ void createNodeWindow(Node* n, int x, int y) {
     }
     DeleteDC(mem);
     ReleaseDC(nullptr, screen);
+    return width;
+}
 
+void createNodeWindow(Node* n, int x, int y) {
+    const int width = nodeWidth(n);
     const int height = n->rects.empty() ? 0 : n->rects.back().bottom + (int)(3 * n->scale + 0.5);
     RECT work{0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
     MONITORINFO mi{sizeof(mi)};
@@ -303,6 +309,7 @@ void createNodeWindow(Node* n, int x, int y) {
     n->hwnd = CreateWindowExW(ex, L"MyOldComputerHMenu", L"", WS_POPUP, x, y, width, height,
                               nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
     if (!n->hwnd) return;
+    if (!n->parent) ++g_putUps;  // a menu put up (the tests: once a right-click)
     for (auto& r : n->rects) {
         r.left = 0;
         r.right = width;
@@ -532,6 +539,22 @@ bool menuRowOf(const wchar_t* text, RECT* rect) {
     return false;
 }
 
+HWND menuRootWindow() {
+    return g_root ? g_root->hwnd : nullptr;
+}
+
+bool menuRootRowOf(const wchar_t* text, RECT* rect) {
+    // In the menu itself, a submenu open or not.
+    const Node* n = g_root;
+    if (!n || !n->hwnd) return false;
+    for (size_t i = 0; i < n->texts.size(); ++i) {
+        if (n->texts[i].find(text) == std::wstring::npos) continue;
+        *rect = n->rects[i];
+        return true;
+    }
+    return false;
+}
+
 HWND menuActiveWindow() {
     const Node* n = g_active ? g_active : g_root;
     return n ? n->hwnd : nullptr;
@@ -542,6 +565,42 @@ double menuShownAt() { return g_shownAt; }
 int menuRowsUp() {
     const Node* n = g_active ? g_active : g_root;
     return n ? (int)n->texts.size() : 0;
+}
+
+int menuPutUps() { return g_putUps; }
+
+bool menuSubmenuUp() { return g_active != nullptr && g_active != g_root; }
+
+HMENU menuRestate(HMENU menu) {
+    // The menu on screen is made to say what `menu` says - the same rows, in
+    // the same order, as the one it showed.  Gives back the one it showed
+    // (the caller's from then on); nothing, and both as they were, when no
+    // menu is up or `menu` has not as many rows.
+    if (!g_root || !g_root->hwnd || !menu) return nullptr;
+    if (GetMenuItemCount(menu) != (int)g_root->texts.size()) return nullptr;
+    HMENU was = g_root->menu;
+    destroyChildren(g_root);  // a submenu that is open shows rows of the menu that goes
+    const int hover = g_root->hover;
+    const int width = nodeWidth(g_root);
+    g_root->menu = menu;
+    parseMenu(g_root);
+    g_root->hover = hover < (int)g_root->texts.size() ? hover : -1;
+    for (auto& r : g_root->rects) {
+        r.left = 0;
+        r.right = width;
+    }
+    // The window keeps its place, as wide as its longest row is now.
+    RECT rc{};
+    GetWindowRect(g_root->hwnd, &rc);
+    MONITORINFO mi{sizeof(mi)};
+    GetMonitorInfoW(MonitorFromWindow(g_root->hwnd, MONITOR_DEFAULTTONEAREST), &mi);
+    int x = rc.left;
+    if (x + width > mi.rcWork.right) x = std::max<LONG>(mi.rcWork.left, mi.rcWork.right - width);
+    SetWindowPos(g_root->hwnd, nullptr, x, rc.top, width, rc.bottom - rc.top,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+    InvalidateRect(g_root->hwnd, nullptr, FALSE);
+    UpdateWindow(g_root->hwnd);
+    return was;
 }
 
 void menuClose() {
@@ -573,8 +632,12 @@ int showHMenu(HWND owner, HMENU root, POINT point) {
     g_root = node;
     g_finished = false;
     g_shownAt = diagMillis();
-    SetForegroundWindow(node->hwnd);
-    SetFocus(node->hwnd);
+    if (!staysInBackground()) {
+        // The foreground is taken by the menu - and kept by whoever has it, in
+        // an instance that stays in the background (a test's).
+        SetForegroundWindow(node->hwnd);
+        SetFocus(node->hwnd);
+    }
 
     MSG msg;
     while (!g_finished) {

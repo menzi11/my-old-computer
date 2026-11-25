@@ -22,8 +22,24 @@ void menuClose();
 std::vector<std::wstring> menuRootTexts();
 HWND menuActiveWindow();
 int menuRowsUp();
+// Menus put up since the program started (the tests: once a right-click).
+int menuPutUps();
+// A submenu of the menu on screen is open.
+bool menuSubmenuUp();
+// The menu on screen is made to say what `menu` says - it has the same rows,
+// in the same order, as the one shown (the caller saw to that).  The menu is
+// not closed and put up again: its rows are redrawn, and the window is as
+// wide as its longest row is now.  Gives back the menu it showed, which is
+// the caller's from then on - and `menu` is not any more.  Nothing, and both
+// as they were, when no menu is up or `menu` has not as many rows.  A
+// submenu that is open is closed: its rows were the old menu's.
+HMENU menuRestate(HMENU menu);
 // When the menu on screen came up (diagMillis's clock, ms).  Not the moment the
 // window's thread is free again: the menu takes the foreground there, and that
-// takes as long as the application that had it takes to let go.
+// takes as long as the application that had it takes to let go.  (An instance
+// that stays in the background, a test's, takes none.)
 double menuShownAt();
 bool menuRowOf(const wchar_t* text, RECT* rect);
+// The same in the menu itself, a submenu open or not; and the menu's own window.
+bool menuRootRowOf(const wchar_t* text, RECT* rect);
+HWND menuRootWindow();

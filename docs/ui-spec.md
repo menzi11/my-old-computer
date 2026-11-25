@@ -201,17 +201,32 @@ first.
   listing has its menus asked for at once - the background's, a folder's, a
   file of each of the four commonest kinds' - and the pointer resting 70 ms
   on an entry has that entry's asked for (the selection's, when the entry is
-  in one of several).  A right-click shows what was built: 5 to 20 ms.
-- When nothing was built for the very thing, the menu of another of its kind
-  in that folder stands for it (the shell's part of the menu of any file of a
-  kind is the same as that of the others), with this program's own items made
-  for the thing as it is.  The thing's own menu is asked for then.  A shell
-  command picked meanwhile is looked up in that menu by where the item lay
-  and what it said, and run from it only if both agree; if not, nothing ran,
-  and the thing's own menu is shown in the other's place.  A few items are
-  the file's own (WinRAR's "add to <name>.rar"): when the thing's own menu
-  is in and says anything else, it takes the stand-in's place on screen by
-  itself.
+  in one of several).  A right-click shows what was built, at once: 5 to 20
+  ms.  The thread stays behind the window (below normal priority) while it
+  only builds ahead, and works at the window's own priority for a menu a
+  right-click has nothing to show yet and for the command picked in one - on
+  a machine that is busy with something else too.
+- What is shown is the thing's own menu as it was last built (one built more
+  than a few seconds ago is built again behind it), or, when nothing was
+  built for the very thing, the menu of another of its kind in that folder
+  (the shell's part of the menu of any file of a kind is the same as that of
+  the others), with this program's own items made for the thing as it is.  A
+  right-click never waits for a menu to be built when there is one to show.
+  The thing's own menu, built anew, is what is on screen from then on: its
+  say is put on the rows that are there, where they differ - the window stays,
+  as does the row the pointer is on - so a menu is put up once, never taken
+  down for another right after (that was a flicker).  A submenu that is open
+  is not taken from under the pointer either: the rows are made to say it as
+  soon as it is closed.  Only when the thing's own menu has other rows than
+  the one on screen is that taken down for it.
+  What a menu built ahead says is not final when it is built: the extensions
+  fill the submenus in, and once more a moment after (发送到 gets its last
+  item then), and a menu that is on screen says what the one it shows from
+  has said since.  A few items are the file's own (WinRAR's "add to
+  <name>.rar").  A shell command picked meanwhile is looked up in the thing's
+  own menu by where the item lay and what it said there, and run from it only
+  if both agree; if not, nothing ran, and the thing's own menu is shown in
+  the other's place.
 - The background's menu says whether there is something to paste: those menus
   are let go of whenever the clipboard changes (WM_CLIPBOARDUPDATE), and the
   one of the folder shown is built again at once.

@@ -125,6 +125,11 @@ constexpr UINT kMenuReadyMessage = WM_APP + 8;
 // Posted to the window that picked a shell command: how it went (wParam: the
 // serial, lParam: one of kVerb...).
 constexpr UINT kMenuDoneMessage = WM_APP + 9;
+// Posted to the window (the one given to start) when the menu built as
+// `entry` (wParam) says something new since it was built - its submenus were
+// filled in once more, a moment after - and that is the menu on screen
+// (showing).  What it says then is on screen from then on.
+constexpr UINT kMenuChangedMessage = WM_APP + 10;
 enum VerbResult {
     kVerbFailed = 0,     // the shell could not run it
     kVerbRan = 1,
@@ -135,6 +140,9 @@ enum VerbResult {
 void start(HWND owner);
 // The thread is up and takes work.
 bool running();
+// The menu built as `entry` is on screen from now on (0: none is): when it
+// says something new, the window is told (kMenuChangedMessage).
+void showing(ULONGLONG entry);
 // The window is going: nothing more is built, and what is being built (or
 // run) is given a moment to be over - so the shell's code is not cut off by
 // the process ending in the middle of it.
@@ -176,6 +184,11 @@ bool itemsOf(ULONGLONG entry, std::vector<Item>* out);
 // file says is the same for every file of the kind; a few items are the
 // file's own - an archive's name, say - and these say so.)
 bool sameSay(const std::vector<Item>& a, const std::vector<Item>& b);
+// Whether two menus have the same rows along the top: as many, each a
+// separator or a submenu or an item as the other is - so that one can be made
+// to say what the other says, row by row.  (What is in their submenus is not
+// looked at: a submenu is read when it is opened.)
+bool sameRows(const std::vector<Item>& a, const std::vector<Item>& b);
 
 // Runs, from the menu built for `what` itself (built again if there is none
 // worth taking), the item that lay at `path` and said `text`; kMenuDoneMessage
