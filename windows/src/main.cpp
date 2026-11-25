@@ -2,6 +2,8 @@
 #include <windowsx.h>
 
 #include <shellapi.h>
+#include <shlwapi.h>
+#include <winreg.h>
 
 #include <algorithm>
 #include <cmath>
@@ -4738,6 +4740,30 @@ void thumbnailTest(const std::wstring& pictures, const std::wstring& mixed,
             g_thumb.baseline);
 }
 
+// The moment a menu of a folder is built that kills: the shell starts listing
+// the libraries, making a window of its own (a WorkerW) on our thread, and its
+// other thread reports back to that window.  What is loaded right then is what
+// matters (shellmenu.h, preloadHandlers).
+struct PreloadWatch {
+    std::vector<std::wstring> dlls;  // the extensions' DLLs, those on disk
+    int listed = 0;                  // how many times that moment came
+    int missing = -1;                // of the DLLs, not loaded at the first of them
+};
+PreloadWatch g_preloadWatch;
+
+LRESULT CALLBACK preloadCbtProc(int code, WPARAM wp, LPARAM lp) {
+    if (code == HCBT_CREATEWND) {
+        wchar_t cls[64]{};
+        if (GetClassNameW((HWND)wp, cls, 64) && lstrcmpW(cls, L"WorkerW") == 0) {
+            int missing = 0;
+            for (const std::wstring& dll : g_preloadWatch.dlls)
+                if (!GetModuleHandleW(dll.c_str())) ++missing;
+            if (g_preloadWatch.listed++ == 0) g_preloadWatch.missing = missing;
+        }
+    }
+    return CallNextHookEx(nullptr, code, wp, lp);
+}
+
 // Drives the same input handlers the window procedure uses, with synthesized
 // points, so click/selection behaviour can be checked without touching the
 // mouse or a real window.
@@ -4888,6 +4914,91 @@ int runUiTest(App& app) {
     for (auto& it : background)
         if (it.id == ID_NEW_FOLDER) hasNewFolder = true;
     check(L"空白右键有新建文件夹", hasNewFolder);
+
+    // The shell's extensions are loaded before the first menu is built, never
+    // while one is being built: a DLL that makes a window as it is loaded (and
+    // one installed here does), loaded while a folder's menu is built, leaves
+    // the window dead for good (shellmenu.h, preloadHandlers).  Seen at the
+    // moment it kills: when the shell starts listing the libraries, every
+    // extension's DLL that is on disk is in.  This is the first menu this
+    // process builds.
+    {
+        const auto of = [](int v) { return std::to_wstring(v); };
+        g_preloadWatch = PreloadWatch{};
+        int unloadedBefore = 0;
+        const std::vector<std::wstring> listed = shellmenu::handlerDlls();
+        for (const std::wstring& dll : listed) {
+            if (GetFileAttributesW(dll.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+            g_preloadWatch.dlls.push_back(dll);
+            if (!GetModuleHandleW(dll.c_str())) ++unloadedBefore;
+        }
+        const HHOOK hook = SetWindowsHookExW(WH_CBT, preloadCbtProc, nullptr, GetCurrentThreadId());
+        const std::vector<std::wstring> first = shellmenu::labels(base, {sub}, shellmenu::ViewState{});
+        if (hook) UnhookWindowsHookEx(hook);
+        const int missing = std::max(0, g_preloadWatch.missing);
+        // The list is the registry's own, read here apart from the code under
+        // test: every extension of any file, of any folder, of a drive and of
+        // the background of a folder has its DLL in it.
+        int handlers = 0, uncovered = 0;
+        static const wchar_t* const keys[] = {
+            L"*\\shellex\\ContextMenuHandlers",
+            L"AllFilesystemObjects\\shellex\\ContextMenuHandlers",
+            L"Folder\\shellex\\ContextMenuHandlers",
+            L"Directory\\shellex\\ContextMenuHandlers",
+            L"Directory\\Background\\shellex\\ContextMenuHandlers",
+            L"Drive\\shellex\\ContextMenuHandlers",
+        };
+        for (const wchar_t* key : keys) {
+            HKEY open = nullptr;
+            if (RegOpenKeyExW(HKEY_CLASSES_ROOT, key, 0, KEY_READ, &open) != ERROR_SUCCESS) continue;
+            for (DWORD i = 0;; ++i) {
+                wchar_t name[256]{}, value[256]{}, path[1024]{};
+                DWORD size = 256, valueSize = sizeof(value), pathSize = sizeof(path);
+                if (RegEnumKeyExW(open, i, name, &size, nullptr, nullptr, nullptr, nullptr) !=
+                    ERROR_SUCCESS)
+                    break;
+                HKEY handler = nullptr;
+                std::wstring clsid = name;  // or the value, when there is one
+                if (RegOpenKeyExW(open, name, 0, KEY_QUERY_VALUE, &handler) == ERROR_SUCCESS) {
+                    if (RegQueryValueExW(handler, nullptr, nullptr, nullptr, (LPBYTE)value,
+                                         &valueSize) == ERROR_SUCCESS &&
+                        value[0])
+                        clsid = value;
+                    RegCloseKey(handler);
+                }
+                bool got = false;
+                HKEY server = nullptr;
+                const std::wstring where = L"CLSID\\" + clsid + L"\\InprocServer32";
+                if (RegOpenKeyExW(HKEY_CLASSES_ROOT, where.c_str(), 0, KEY_QUERY_VALUE, &server) ==
+                    ERROR_SUCCESS) {
+                    got = RegQueryValueExW(server, nullptr, nullptr, nullptr, (LPBYTE)path,
+                                           &pathSize) == ERROR_SUCCESS &&
+                          path[0];
+                    RegCloseKey(server);
+                }
+                if (!got) continue;
+                ++handlers;
+                bool in = false;  // by the file's name: the path may be written another way
+                for (const std::wstring& dll : listed)
+                    if (_wcsicmp(PathFindFileNameW(dll.c_str()), PathFindFileNameW(path)) == 0)
+                        in = true;
+                if (!in) ++uncovered;
+            }
+            RegCloseKey(open);
+        }
+        const bool ok = hook != nullptr && !first.empty() && !g_preloadWatch.dlls.empty() &&
+                        unloadedBefore > 0 && g_preloadWatch.listed > 0 && missing == 0 &&
+                        handlers > 0 && uncovered == 0;
+        std::wstring label = L"右键扩展的 DLL 在构建菜单前就已加载好：shell 开始列库的那一刻一个不缺";
+        if (!ok)
+            label += L"：菜单 " + of((int)first.size()) + L" 项，磁盘上的扩展 DLL " +
+                     of((int)g_preloadWatch.dlls.size()) + L" 个（构建前未加载 " + of(unloadedBefore) +
+                     L" 个），shell 开始列库 " + of(g_preloadWatch.listed) + L" 次，那一刻还缺 " +
+                     of(missing) + L" 个；注册的右键扩展 " + of(handlers) +
+                     L" 个，不在清单里的 " + of(uncovered) + L" 个" +
+                     (hook ? L"" : L"，挂钩没装上");
+        check(label.c_str(), ok);
+    }
     // The real background menu, in Explorer's order, with New as a submenu.
     {
         shellmenu::ViewState state;

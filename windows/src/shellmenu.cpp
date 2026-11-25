@@ -3,6 +3,7 @@
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <shobjidl.h>
+#include <winreg.h>
 
 #include <algorithm>
 #include <cwchar>
@@ -133,6 +134,54 @@ bool bindFolder(const std::wstring& folder, IShellFolder** out) {
     return SUCCEEDED(hr) && *out != nullptr;
 }
 
+// The keys whose ContextMenuHandlers go into the menu of any file, of any
+// folder, of a drive, or of the background of a folder.
+const wchar_t* const kHandlerKeys[] = {
+    L"*\\shellex\\ContextMenuHandlers",
+    L"AllFilesystemObjects\\shellex\\ContextMenuHandlers",
+    L"Folder\\shellex\\ContextMenuHandlers",
+    L"Directory\\shellex\\ContextMenuHandlers",
+    L"Directory\\Background\\shellex\\ContextMenuHandlers",
+    L"Drive\\shellex\\ContextMenuHandlers",
+};
+
+// The default value of a key, as text (environment names in it expanded).
+std::wstring keyText(HKEY key) {
+    wchar_t buf[1024]{};
+    DWORD size = sizeof(buf), type = 0;
+    if (RegQueryValueExW(key, nullptr, nullptr, &type, (LPBYTE)buf, &size) != ERROR_SUCCESS ||
+        (type != REG_SZ && type != REG_EXPAND_SZ))
+        return std::wstring();
+    std::wstring text(buf, wcsnlen(buf, size / sizeof(wchar_t)));
+    if (type == REG_EXPAND_SZ) {
+        wchar_t expanded[1024]{};
+        ExpandEnvironmentStringsW(text.c_str(), expanded, 1024);
+        text = expanded;
+    }
+    return text;
+}
+
+// Where COM loads the in-process server of a CLSID from, as a full path: a
+// bare name is one of the system directory's, as COM takes it.
+std::wstring serverDll(const std::wstring& clsid) {
+    HKEY key = nullptr;
+    std::wstring path;
+    if (RegOpenKeyExW(HKEY_CLASSES_ROOT, (L"CLSID\\" + clsid + L"\\InprocServer32").c_str(), 0,
+                      KEY_QUERY_VALUE, &key) == ERROR_SUCCESS) {
+        path = keyText(key);
+        RegCloseKey(key);
+    }
+    if (path.size() > 2 && path.front() == L'"' && path.back() == L'"')
+        path = path.substr(1, path.size() - 2);
+    if (!path.empty() && path.find(L'\\') == std::wstring::npos &&
+        path.find(L':') == std::wstring::npos) {
+        wchar_t system[MAX_PATH]{};
+        GetSystemDirectoryW(system, MAX_PATH);
+        path = std::wstring(system) + L"\\" + path;
+    }
+    return path;
+}
+
 void addViewAndSort(HMENU menu, const ViewState& state) {
     const bool wantView = (state.menuMask & kMenuBgView) != 0;
     const bool wantSort = (state.menuMask & kMenuBgSort) != 0;
@@ -244,6 +293,10 @@ bool buildMenu(HWND owner, const std::wstring& folderPath, const std::vector<std
     const bool background = paths.empty();
     IShellFolder* psf = nullptr;
     IContextMenu* pcm = nullptr;
+
+    // Before anything asks the shell for a menu: no DLL may be loaded while
+    // one is being built (preloadHandlers).
+    preloadHandlers();
 
     if (background) {
         if (!bindFolder(folderPath, &psf)) return false;
@@ -399,6 +452,57 @@ bool buildFor(HWND owner, const std::wstring& folderPath, const std::vector<std:
 }
 
 }  // namespace
+
+std::vector<std::wstring> handlerDlls() {
+    std::vector<std::wstring> out;
+    for (const wchar_t* list : kHandlerKeys) {
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(HKEY_CLASSES_ROOT, list, 0, KEY_READ, &key) != ERROR_SUCCESS) continue;
+        for (DWORD i = 0;; ++i) {
+            wchar_t name[256]{};
+            DWORD size = 256;
+            if (RegEnumKeyExW(key, i, name, &size, nullptr, nullptr, nullptr, nullptr) !=
+                ERROR_SUCCESS)
+                break;
+            HKEY handler = nullptr;
+            std::wstring clsid = name;
+            if (RegOpenKeyExW(key, name, 0, KEY_QUERY_VALUE, &handler) == ERROR_SUCCESS) {
+                // The value is the CLSID, or empty when the key's name is.
+                const std::wstring value = keyText(handler);
+                RegCloseKey(handler);
+                if (!value.empty()) clsid = value;
+            }
+            std::wstring path = serverDll(clsid);
+            if (path.empty()) continue;
+            bool known = false;
+            for (const std::wstring& have : out)
+                if (_wcsicmp(have.c_str(), path.c_str()) == 0) known = true;
+            if (!known) out.push_back(path);
+        }
+        RegCloseKey(key);
+    }
+    return out;
+}
+
+int preloadHandlers() {
+    // The window's thread is the only one that builds a menu.
+    static bool done = false;
+    if (done) return 0;
+    done = true;
+    const double t0 = diagMillis();
+    const std::vector<std::wstring> dlls = handlerDlls();
+    int loaded = 0, missing = 0;
+    for (const std::wstring& path : dlls) {
+        if (GetModuleHandleW(path.c_str())) continue;
+        if (LoadLibraryExW(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH))
+            ++loaded;
+        else
+            ++missing;  // registered, not on disk any more: nothing to wait for later
+    }
+    diagLog(L"preload: %d handler DLLs, %d loaded, %d missing, %.1f ms", (int)dlls.size(), loaded,
+            missing, diagMillis() - t0);
+    return loaded;
+}
 
 bool forwardMessage(UINT msg, WPARAM wp, LPARAM lp) {
     if (g_menu3) {

@@ -183,6 +183,15 @@ first.
   the menu is gone), and in the file list the right-clicked items are
   selected.  The empty area uses our own working View / Sort / Refresh / New
   commands plus the shell's Paste, Properties and extensions.
+- The shell's extensions - all that are registered for any file, any folder,
+  a drive or the background of a folder - are loaded once, before the first
+  menu a window builds, never while one is being built.  Building a folder's
+  menu makes the shell list the libraries on a thread of its own, reporting
+  back in a message to ours; an extension that makes a window as its DLL is
+  loaded (Baidu Netdisk's did) lets that message run while the loader lock is
+  still held, and what the message does needs a thread of its own: the window
+  was dead for good, right after it was opened.  Loading them up front takes
+  that load out of the build; the first menu comes up as before.
 - Tools → Context menu settings lists the app's own entries and the shell's
   entries grouped by where the right-click happened (empty area, folder, file
   without an extension, one group per file extension); each is hidden in that

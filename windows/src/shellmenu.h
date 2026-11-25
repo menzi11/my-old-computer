@@ -70,6 +70,23 @@ Result show(HWND owner, const std::wstring& folder, const std::vector<std::wstri
 // shell extensions.  Returns true when it handled the message.
 bool forwardMessage(UINT msg, WPARAM wp, LPARAM lp);
 
+// The DLLs of the shell extensions a context menu of a file, a folder, a
+// drive or of a folder's background is built from - the registry's
+// ContextMenuHandlers under the keys that hold for all of them - each once,
+// where COM will load each from.
+std::vector<std::wstring> handlerDlls();
+// Loads those of them that are not loaded yet.  Once: every call after the
+// first loads nothing.  Returns how many it loaded.
+//
+// The first menu of a folder must not be the one that loads them.  Building
+// it makes the shell list the libraries on one of its own threads, which
+// reports back in a message sent to ours - and a DLL that makes a window as
+// it is loaded (Baidu Netdisk's extension does) lets that message run while
+// our thread still holds the loader lock.  What the message does needs a
+// thread of its own, which waits for that lock: the two wait for each other
+// for good, and the window never answers again.
+int preloadHandlers();
+
 // Used by --uitest: the final top-level labels of the menu that would be shown.
 // With `subMenus`, also the entries of every submenu, as "submenu/entry".
 std::vector<std::wstring> labels(const std::wstring& folder,
