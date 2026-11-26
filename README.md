@@ -92,7 +92,9 @@ its extensions take 70–300 ms to make one (half a second for the first in a
 window), and the window used to stand still for all of it - now the menu is
 up within 20 ms of the click.  Where its own menu was not built yet, a menu
 of the same kind of file stands in for it and is made to say its own's say
-when that one is in: the menu is put up once, with no flicker.
+when that one is in: the menu is put up once, with no flicker.  With the menu
+open, one click anywhere else closes it and is that click: 查看 on the menu
+bar opens at once, another file is selected.
 **A sidebar that knows the machine** — My Computer with every drive or mounted
 volume, folders that expand with `+` / `−`, a Favorites group at the top (a folder
 joins it from its context menu or by being dropped on it; its favorites rename,

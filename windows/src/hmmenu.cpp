@@ -278,6 +278,35 @@ void closeAll(Node* root) {
     g_finished = true;
 }
 
+// A press of the left button outside the menu, on a window of this program's:
+// the menu is closed for it, and the press is the window's own - given to it
+// right after the menu is down, as it would have been given with no menu up
+// (查看's list opens, a file is selected, the selection is cleared...).  The
+// mouse is not captured here, so the menu's loop is the first to see such a
+// press; the menu is taken down between messages, never from inside the
+// handling of the click (Windows drops a click whose window is activated
+// while the click is being handled - see the owner's WM_MOUSEACTIVATE).
+MSG g_kept{};
+HWND g_keptFor = nullptr;        // the window the press is on its way to
+bool g_letGo = false;            // ... and the button was let go before it came: that up is given right after it
+POINT g_letGoAt{};               // ... and where it was let go (not always where it was pressed)
+
+// The press that closes the menu.  False for anything else: the mouse's
+// other buttons (a right-click elsewhere closes the menu and opens another
+// one, as before), and what is the menu's own.
+bool keepClick(const MSG& msg) {
+    const bool press = msg.message == WM_LBUTTONDOWN || msg.message == WM_LBUTTONDBLCLK;
+    if (!press || g_keptFor || isMenuWindow(msg.hwnd)) return false;
+    closeAll(g_root);
+    g_kept = msg;
+    g_keptFor = msg.hwnd;
+    g_letGo = false;
+    g_letGoAt = POINT{(short)LOWORD(msg.lParam), (short)HIWORD(msg.lParam)};
+    diagLog(L"hmmenu: a press outside the menu kept for its window %08X at %d,%d; the menu is closed",
+            (unsigned)(UINT_PTR)msg.hwnd, g_letGoAt.x, g_letGoAt.y);
+    return true;
+}
+
 // How wide the menu's window is: for the longest of its rows.
 int nodeWidth(Node* n) {
     HDC screen = GetDC(nullptr);
@@ -647,6 +676,7 @@ int showHMenu(HWND owner, HMENU root, POINT point) {
             if (r == 0) PostQuitMessage((int)msg.wParam);
             break;
         }
+        if (keepClick(msg)) continue;
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
@@ -659,6 +689,35 @@ int showHMenu(HWND owner, HMENU root, POINT point) {
         node->hwnd = nullptr;
     }
     delete node;
+    // The press that closed the menu is the window's own, as it would have
+    // been given with no menu up.  Put in the queue, not given from here: what
+    // showed the menu has to be back first (the menu is shown from inside the
+    // right-click that asked for it), and the press may open a list of its own.
+    if (g_keptFor) {
+        if (IsWindow(g_kept.hwnd)) {
+            PostMessageW(g_kept.hwnd, g_kept.message, g_kept.wParam, g_kept.lParam);
+            diagLog(L"hmmenu: the press kept is given to its window");
+        } else {
+            g_keptFor = nullptr;  // the window is gone: nothing to give it to
+            g_letGo = false;
+        }
+    }
     return chosen;
+}
+
+bool menuPressLetGo(HWND hwnd, POINT where) {
+    if (!hwnd || hwnd != g_keptFor) return false;
+    g_letGo = true;
+    g_letGoAt = where;
+    return true;
+}
+
+bool menuPressGiven(HWND hwnd, POINT* where) {
+    if (where) *where = g_letGoAt;
+    if (hwnd != g_keptFor) return false;
+    g_keptFor = nullptr;
+    const bool letGo = g_letGo;
+    g_letGo = false;
+    return letGo;
 }
 

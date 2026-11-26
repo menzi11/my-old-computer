@@ -14,6 +14,14 @@ int showHMenu(HWND owner, HMENU root, POINT screenPoint);
 // one afterwards.
 bool menuIsOpen();
 void menuClose();
+// A left press outside the menu, on a window of this program's, closes the
+// menu - and the press is that window's own: it is put in the queue for the
+// window as soon as the menu is down.  A button-up that comes to the window
+// before that press does is kept for it (menuPressLetGo: true when it was),
+// and the press carries it along (menuPressGiven: true when an up is to
+// follow at once, and where it was let go).
+bool menuPressLetGo(HWND hwnd, POINT where);
+bool menuPressGiven(HWND hwnd, POINT* where);
 
 // (The tests.)  What the root menu on screen says, from the top; the menu that
 // has the keyboard (a submenu that is open, else the root; null when none is

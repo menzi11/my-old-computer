@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "canvas.h"
+#include "debug.h"
 #include "theme.h"
 
 namespace {
@@ -248,8 +249,12 @@ int showPopupMenu(HWND owner, const std::vector<MenuItem>& items, int x, int y, 
     st.hwnd = hwnd;
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)&st);
     ShowWindow(hwnd, SW_SHOWNA);
-    SetForegroundWindow(hwnd);
-    SetFocus(hwnd);
+    if (!staysInBackground()) {
+        // The foreground is taken by the list - and kept by whoever has it, in
+        // an instance that stays in the background (a test's).
+        SetForegroundWindow(hwnd);
+        SetFocus(hwnd);
+    }
     SetCapture(hwnd);
     ++activeMenuCount;
 

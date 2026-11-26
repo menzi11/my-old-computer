@@ -227,6 +227,17 @@ first.
   own menu by where the item lay and what it said there, and run from it only
   if both agree; if not, nothing ran, and the thing's own menu is shown in
   the other's place.
+- While the menu is up, a left press anywhere else in the window - the menu
+  bar's 查看, another file, blank canvas, the tree, a title button - closes
+  the menu and is the click it would have been with no menu up: 查看's list
+  opens, the file is selected, the selection is cleared, a rubber band starts
+  with the press and ends with the release.  The menu is taken down between
+  messages, never from inside the window's handling of that click (Windows
+  drops a click whose window is activated while the click is being handled),
+  and the press is put in the queue for its window as soon as the menu is
+  down; a button-up that comes before that press is held by the window and
+  given right after it, so press and release are never the wrong way round.
+  A right-click elsewhere closes the menu and opens the new one there.
 - The background's menu says whether there is something to paste: those menus
   are let go of whenever the clipboard changes (WM_CLIPBOARDUPDATE), and the
   one of the folder shown is built again at once.

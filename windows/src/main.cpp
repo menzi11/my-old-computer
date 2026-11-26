@@ -1998,6 +1998,14 @@ void repaintThumbs(HWND hwnd, App& a) {
     for (int i : rows) a.thumbDrawn[i] = true;
 }
 
+// WM_LBUTTONUP's whole handling.
+void onLeftReleased(HWND hwnd, App& a, POINT p) {
+    onLButtonUp(hwnd, a, p);
+    // What a right-click there would be on may have changed (it was selected).
+    cancelHover(hwnd);
+    noteHover(hwnd, a, p);
+}
+
 LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     App& a = g_app;
     switch (msg) {
@@ -2192,7 +2200,18 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONDOWN: {
         POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         ++g_inputTick;
+        // A press kept while a menu was up is the window's own now, as any
+        // other (hmmenu.cpp); it may carry an up along, let go before it came.
+        POINT letGo{};
+        if (menuPressGiven(hwnd, &letGo)) {
+            onLButtonDown(hwnd, a, p);
+            onLeftReleased(hwnd, a, letGo);
+            return 0;
+        }
         if (menuIsOpen()) {
+            // (Only a press sent straight to the window, not one put in its
+            // queue: that is kept by the menu's loop and is the window's once
+            // the menu is down.)
             diagLog(L"main lbutton while a menu is open at %d,%d", p.x, p.y);
             menuClose();
             return 0;
@@ -2202,10 +2221,10 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_LBUTTONUP: {
         POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
-        onLButtonUp(hwnd, a, p);
-        // What a right-click there would be on may have changed (it was selected).
-        cancelHover(hwnd);
-        noteHover(hwnd, a, p);
+        // An up before the press that is on its way (kept while a menu was
+        // up): kept with it, and given right after it.
+        if (menuPressLetGo(hwnd, p)) return 0;
+        onLeftReleased(hwnd, a, p);
         return 0;
     }
     case WM_LBUTTONDBLCLK: {
@@ -2224,8 +2243,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // A click while one of our shell menus is up must not run the normal
         // activation dance: activating the main window makes Windows destroy
         // the foreground menu window mid-activation, and the click that
-        // started it is lost entirely.  Take the click without activating;
-        // the context-menu path closes and reopens the menu itself.
+        // started it is lost entirely.  Take the click without activating:
+        // it is the window's own once the menu is down for it (hmmenu.cpp).
         if (menuIsOpen()) return MA_NOACTIVATE;
         break;
     case WM_MOUSEWHEEL: {
@@ -4534,6 +4553,24 @@ COLORREF screenPixel(HWND window, int x, int y) {
     return px & 0x00FFFFFF;
 }
 
+// What the screen shows in a rectangle of the screen: how many pixels are of
+// the face colour, and how many are black (text) - every other pixel counted,
+// both ways.  Read from the display itself (a popup that is on top of
+// everything shows there literally).  Either count can be left out.
+void screenTally(const RECT& screen, int* face, int* ink) {
+    HDC display = GetDC(nullptr);
+    int ofFace = 0, black = 0;
+    for (LONG y = screen.top; y < screen.bottom; y += 2)
+        for (LONG x = screen.left; x < screen.right; x += 2) {
+            const COLORREF px = GetPixel(display, x, y) & 0xFFFFFF;
+            ofFace += px == Theme::face;
+            black += px == Theme::text;
+        }
+    ReleaseDC(nullptr, display);
+    if (face) *face = ofFace;
+    if (ink) *ink = black;
+}
+
 // The Win98 menu's rows: 22 logical pixels from 3 logical pixels down.
 int menuRowCentre(double scale, int row) {
     return pxOf(scale, 3) + row * pxOf(scale, 22) + pxOf(scale, 22) / 2;
@@ -4987,7 +5024,7 @@ void folderColourTest(const std::wstring& listDir, const std::wstring& folder,
 
 constexpr UINT_PTR kAheadTestTimer = 0x4D4B;
 constexpr wchar_t kAheadTestClass[] = L"MyOldComputerAheadTest";
-constexpr int kAheadTestEnd = 50;  // the step past the last one
+constexpr int kAheadTestEnd = 65;  // the step past the last one
 constexpr int kAheadSoonMs = 150;  // "at once" (ms), with room for a busy machine: twice the processors that were busy (per cent) more
 
 struct AheadDrive {
@@ -5053,6 +5090,25 @@ struct AheadDrive {
     int zipTicks = 0;            // ticks spent waiting for the file, and for the window to close
     bool zipText = false;        // the file that came out says what was zipped
     int lastStep = -1, stepSince = 0, stalled = -1;  // how long the step has been waiting
+    // A left click elsewhere while a menu is up: the menu is closed for it,
+    // and the click is the window's own, given once - as with no menu up:
+    // [0] on the menu bar's 查看, [1] on a file, [2] on blank canvas,
+    // [3] held down on blank canvas, [4] a double click on a tree's +/- box.
+    POINT blank{}, on{};    // a blank point of the list; where the click was made
+    bool clickGone[5] = {};  // the right-click menu is gone after the click
+    bool clickDone[5] = {};  // ... and the click did what a click does there
+    int clickAgain[5] = {};  // ... menus put up since the click (the right-click's not again)
+    int clickViewFace = 0, clickViewInk = 0;  // 查看's list as the screen shows it: its face colour, its text
+    int clickFileNavy = 0;   // ... the file's row, selected, on screen
+    bool clickFileKept = false;  // [1] ... something is left of that click
+    bool clickCleared = false;   // [2] ... the selection is gone after the click on blank canvas
+    bool clickKept = false;  // ... something is left of a click: the mouse captured, a press armed, a rubber band following the pointer
+    bool clickTreeOpen = false;  // the double click's first click opened the tree row
+    int clickRow = -1;       // ... the row
+    bool clickTreeHad = false;  // ... and whether it was open before
+    bool clickHeldOver = false;  // [3] ... and let go: the band is gone
+    bool clickSelectedBefore = false;  // [2] something was selected when the click on blank canvas came
+    std::wstring clickName;     // ... its title
     std::wstring path(const wchar_t* name) const { return dir + L"\\" + name; }
 };
 AheadDrive g_ahead;
@@ -5245,11 +5301,19 @@ void aheadTestStep(HWND driver) {
     const auto next = [&]() {
         if (d.step < kAheadTestEnd) SetTimer(driver, kAheadTestTimer, 20, nullptr);
     };
+    // A list of the menu bar's that a click opened in its steps, if one is up
+    // (the steps run inside that list's loop too: nothing else would end it).
+    const auto closeLists = [&]() {
+        HWND root = nullptr;
+        menuWindows(&root);
+        if (g_popup && IsWindow(g_popup)) PostMessageW(g_popup, WM_KEYDOWN, VK_ESCAPE, 0);
+    };
     // The steps are over.  A menu still up goes first: it is shown from inside
     // the click that asked for it, and only its own loop takes it down - the
     // steps run inside that loop, and nothing else would ever end it.
     const auto endSteps = [&]() {
         menuClose();
+        closeLists();
         d.step = kAheadTestEnd;
     };
     if (++d.ticks > 3000) {  // sixty seconds: give up, do not hang
@@ -5267,6 +5331,7 @@ void aheadTestStep(HWND driver) {
     } else if (d.ticks - d.stepSince > 200 && d.step < kAheadTestEnd) {
         d.stalled = d.step;
         menuClose();
+        closeLists();  // a list of the menu bar's that no step closed
         ++d.step;
         next();
         return;
@@ -5284,6 +5349,18 @@ void aheadTestStep(HWND driver) {
         d.t0 = diagMillis();
         GetSystemTimes(&d.idleAt, &d.kernelAt, nullptr);
         PostMessageW(d.main, WM_RBUTTONDOWN, 2, MAKELPARAM(p.x, p.y));
+    };
+    // A left click: press and release, one right after the other (as a quick
+    // one arrives - the release is in the queue before the press is seen to).
+    const auto leftClick = [&](POINT p) {
+        PostMessageW(d.main, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(p.x, p.y));
+        PostMessageW(d.main, WM_LBUTTONUP, 0, MAKELPARAM(p.x, p.y));
+    };
+    // The row of the entry called `name` (-1: there is none).
+    const auto rowOf = [&](const wchar_t* name) {
+        for (int i = 0; i < (int)g_app.entries.size(); ++i)
+            if (g_app.entries[i].name == name) return i;
+        return -1;
     };
     // How much of the processors was busy since the click was posted (per cent).
     const auto busySince = [&]() {
@@ -5862,8 +5939,213 @@ void aheadTestStep(HWND driver) {
         break;
     }
     case 49:
-        if (!menuIsOpen() && !g_menuShown.serial) d.step = kAheadTestEnd;
+        if (!menuIsOpen() && !g_menuShown.serial) d.step = 50;
         break;
+
+    // ------------------------------------------------------------------ the click elsewhere
+    // While a menu is up, a left press anywhere outside it closes the menu,
+    // and the click is the window's own - given once, as with no menu up.
+    // (The press and the release come one right after the other, as a quick
+    // click arrives: the release is in the queue before the press is seen to.
+    // The up that comes before the kept press is on its way is held by the
+    // window and given right after it.)
+    case 50:  // nothing selected; where blank canvas is
+        g_app.clearSelection();
+        d.blank = POINT{g_app.lay.listViewport.left + g_app.lay.nameW + 40,
+                        g_app.lay.listViewport.top + 8};
+        d.step = 51;
+        break;
+    case 51:  // the background's menu
+        rightClick(d.blank);
+        d.step = 52;
+        break;
+    case 52: {  // ... and one click on the menu bar's 查看
+        if (!menuIsOpen()) break;
+        const RECT title = g_app.menuItemRect(2);
+        d.on = POINT{(title.left + title.right) / 2, (title.top + title.bottom) / 2};
+        d.clickAgain[0] = -menuPutUps();
+        leftClick(d.on);
+        d.wait = 3;
+        d.step = 53;
+        break;
+    }
+    case 53: {  // ... the menu is gone, and 查看's list is up - on screen
+        HWND root = nullptr;
+        const std::vector<HWND> wins = menuWindows(&root);
+        RECT list{};
+        if (g_popup && IsWindow(g_popup)) GetClientRect(g_popup, &list);
+        d.clickAgain[0] += menuPutUps();
+        d.clickGone[0] = wins.empty() && !menuIsOpen();
+        if (d.clickGone[0] && list.right > 0 && g_app.pressMenu == 2 && d.clickAgain[0] == 0) {
+            RECT at{};
+            GetWindowRect(g_popup, &at);
+            const int s = pxOf(g_app.scale, 1);
+            // The list's lower part lies over the window's content: blank
+            // canvas there, white.
+            POINT content{0, g_app.lay.content.top};
+            ClientToScreen(d.main, &content);
+            const LONG from = (std::max)(at.top + list.bottom * 3 / 5, content.y + 2 * s);
+            const RECT lower{at.left + list.right / 5, from, at.left + list.right * 4 / 5,
+                             at.top + list.bottom - 4 * s};
+            screenTally(lower, &d.clickViewFace, nullptr);
+            const int samples = (int)(((lower.right - lower.left + 1) / 2) *
+                                      ((lower.bottom - lower.top + 1) / 2));
+            // ... and its first row says something, in black
+            POINT a{18 * s, 3 * s}, b{list.right - 8 * s, 25 * s};
+            ClientToScreen(g_popup, &a);
+            ClientToScreen(g_popup, &b);
+            screenTally(RECT{a.x, a.y, b.x, b.y}, nullptr, &d.clickViewInk);
+            keepScreen(L"click-through-view", at);
+            diagLog(L"click-through: 查看's list %dx%d at %ld,%ld; face %d of %d, ink %d",
+                    (int)list.right, (int)list.bottom, at.left, at.top, d.clickViewFace, samples,
+                    d.clickViewInk);
+            d.clickDone[0] = d.clickViewFace * 10 >= samples * 9 && d.clickViewInk >= 10 &&
+                             !g_app.marquee && GetCapture() != d.main;
+        }
+        if (g_popup && IsWindow(g_popup)) PostMessageW(g_popup, WM_KEYDOWN, VK_ESCAPE, 0);
+        d.wait = 4;
+        d.step = 54;
+        break;
+    }
+    case 54: {  // the list is gone: a file is right-clicked (which selects it)
+        HWND root = nullptr;
+        menuWindows(&root);
+        if (menuIsOpen() || g_popup) break;
+        if (rowOf(L"k1.cpp") < 0 || rowOf(L"a2.txt") < 0) {
+            endSteps();
+            break;
+        }
+        rightClick(rowPoint(L"k1.cpp"));
+        d.step = 55;
+        break;
+    }
+    case 55:  // the menu is up: one click on another file
+        if (!menuIsOpen()) break;
+        d.clickAgain[1] = -menuPutUps();
+        leftClick(rowPoint(L"a2.txt"));
+        d.wait = 3;
+        d.step = 56;
+        break;
+    case 56: {  // ... the menu is gone, that file is selected - on screen - and nothing is left of the click
+        if (menuIsOpen()) break;
+        const int row = rowOf(L"a2.txt");
+        d.clickAgain[1] += menuPutUps();
+        d.clickFileNavy = row >= 0 ? frameCount(shownFrame(d.main), g_app.listRowRect(row), isNavy) : 0;
+        d.clickFileKept = g_app.marquee || g_app.dragArmed || GetCapture() == d.main;
+        d.clickKept = d.clickFileKept;
+        d.clickGone[1] = !menuIsOpen();
+        d.clickDone[1] = row >= 0 && g_app.selection.size() == 1 &&
+                         g_app.selection.count(d.path(L"a2.txt")) && d.clickFileNavy >= 100 &&
+                         !d.clickKept && d.clickAgain[1] == 0;
+        // A file's menu now (a right-click on a file keeps what is selected):
+        // the click on blank canvas must clear a selection that is there.
+        rightClick(rowPoint(L"k5.zz"));
+        d.step = 57;
+        break;
+    }
+    case 57:
+        if (!menuIsOpen()) break;
+        d.clickSelectedBefore = !g_app.selection.empty();
+        d.clickAgain[2] = -menuPutUps();
+        leftClick(d.blank);
+        d.wait = 3;
+        d.step = 58;
+        break;
+    case 58: {  // ... the menu is gone, and so is the selection; no rubber band is left
+        if (menuIsOpen()) break;
+        d.clickAgain[2] += menuPutUps();
+        d.clickGone[2] = !menuIsOpen();
+        d.clickKept = g_app.marquee || g_app.dragArmed || GetCapture() == d.main;
+        d.clickCleared = g_app.selection.empty();
+        d.clickDone[2] = d.clickSelectedBefore && d.clickCleared && !d.clickKept &&
+                        d.clickAgain[2] == 0;
+        rightClick(d.blank);  // for the press that is held
+        d.step = 59;
+        break;
+    }
+    case 59:  // the menu is up: the button pressed, and kept down
+        if (!menuIsOpen()) break;
+        d.clickAgain[3] = -menuPutUps();
+        PostMessageW(d.main, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(d.blank.x, d.blank.y));
+        d.wait = 15;  // a third of a second
+        d.step = 60;
+        break;
+    case 60: {  // ... the menu is closed by then, and the press is the window's already: the band is there
+        d.clickAgain[3] += menuPutUps();
+        d.clickGone[3] = !menuIsOpen();
+        // (The band follows the real pointer meanwhile, wherever it is on the screen.)
+        d.clickDone[3] = d.clickGone[3] && g_app.marquee && GetCapture() == d.main &&
+                        d.clickAgain[3] == 0;
+        PostMessageW(d.main, WM_LBUTTONUP, 0, MAKELPARAM(d.blank.x, d.blank.y));
+        d.wait = 3;
+        d.step = 61;
+        break;
+    }
+    case 61:  // ... and let go: the band is gone
+        d.clickHeldOver = !g_app.marquee && GetCapture() != d.main;
+        g_app.clearSelection();  // the band followed the real pointer: whatever it covered
+        repaint(d.main);
+        if (!g_app.sidebarVisible) {
+            g_app.sidebarVisible = true;
+            g_app.relayout(g_app.width, g_app.height);
+            repaint(d.main);
+        }
+        rightClick(rowPoint(L"k5.zz"));  // for the double click
+        d.step = 62;
+        break;
+    case 62: {  // the menu is up: the first click of a double click, on a tree row's +/- box
+        if (!menuIsOpen()) break;
+        int row = -1;
+        for (int k = 0; k < (int)g_app.treeFlat.size(); ++k) {
+            TreeNode* n = g_app.treeFlat[k];
+            if (n->path.empty() || n->kind == TreeNode::Favorite ||
+                n->kind == TreeNode::Favorites)
+                continue;
+            // A row that is in view (the tree is scrolled to the folder shown)
+            const RECT rr = g_app.treeRowRect(k);
+            if (rr.top < g_app.lay.treeViewport.top ||
+                rr.bottom > g_app.lay.treeViewport.bottom)
+                continue;
+            if (g_app.treeRowHasChildren(*n)) {
+                row = k;
+                break;
+            }
+        }
+        if (row < 0) {  // nothing here with a +/- to double-click on: not looked at
+            d.step = kAheadTestEnd;
+            break;
+        }
+        d.clickRow = row;
+        d.clickTreeHad = g_app.treeFlat[row]->expanded;
+        d.clickName = g_app.treeFlat[row]->title;
+        const RECT rr = g_app.treeRowRect(row);
+        const int indent = pxOf(g_app.scale, g_app.treeFlat[row]->depth * 14 + 3);
+        d.on = POINT{rr.left + indent + pxOf(g_app.scale, 4), rr.top + pxOf(g_app.scale, 9)};
+        d.clickAgain[4] = -menuPutUps();
+        leftClick(d.on);
+        d.wait = 3;
+        d.step = 63;
+        break;
+    }
+    case 63: {  // ... the row opened; the second click of the double click
+        if (d.clickRow >= (int)g_app.treeFlat.size()) break;
+        d.clickTreeOpen = g_app.treeFlat[d.clickRow]->expanded != d.clickTreeHad;
+        d.clickAgain[4] += menuPutUps();
+        d.clickGone[4] = !menuIsOpen();
+        PostMessageW(d.main, WM_LBUTTONDBLCLK, MK_LBUTTON, MAKELPARAM(d.on.x, d.on.y));
+        PostMessageW(d.main, WM_LBUTTONUP, 0, MAKELPARAM(d.on.x, d.on.y));
+        d.wait = 3;
+        d.step = 64;
+        break;
+    }
+    case 64: {  // ... and shuts again: both clicks the window's
+        if (d.clickRow >= (int)g_app.treeFlat.size()) break;
+        const bool same = g_app.treeFlat[d.clickRow]->expanded == d.clickTreeHad;
+        d.clickDone[4] = d.clickTreeOpen && same && !g_app.marquee && GetCapture() != d.main &&
+                        !g_app.dragArmed && d.clickAgain[4] == 0;
+        d.step = kAheadTestEnd;
+        break;
+    }
     default:
         endSteps();
         break;
@@ -6072,6 +6354,35 @@ void menusAheadTest(const std::wstring& dir, const std::function<void(const wcha
                                                  : L"点了，文件没有出来，或内容不是打包的")
                                     : L"",
             d.zip == 1);
+
+    // A left click elsewhere while a menu is up.
+    const auto clickWhy = [&](int k, const wchar_t* more) -> std::wstring {
+        if (!d.clickGone[k]) return L"右键菜单没有关";
+        if (d.clickAgain[k] != 0) return L"右键菜单又弹了一次";
+        return more;
+    };
+    verdict(L"右键菜单开着时点一下菜单栏的“查看”：菜单关了，“查看”的下拉当场打开，屏幕上看得到（下拉的下沿盖在窗口的内容上：底色 " +
+                of(d.clickViewFace) + L" 个采样，字 " + of(d.clickViewInk) + L" 个）",
+            clickWhy(0, !d.clickDone[0] ? L"“查看”的下拉没有打开，或屏幕上那块不是它" : L""),
+            d.clickDone[0]);
+    verdict(L"右键菜单开着时点一下别的文件（k1.cpp 的菜单开着，点 a2.txt）：菜单关了，a2.txt 被选中，屏幕上它的行是选中的蓝色（" +
+                of(d.clickFileNavy) + L" 个像素）",
+            clickWhy(1, d.clickFileKept ? L"点击没有结束：鼠标还被抓着，或框选还在"
+                                       : L"没有选中 a2.txt，或屏幕上不是选中的样子"),
+            d.clickDone[1]);
+    verdict(L"右键菜单开着时点一下空白处（k5.zz 的菜单开着，a2.txt 选中着）：菜单关了，选中没了",
+            clickWhy(2, !d.clickSelectedBefore ? L"点之前就没有选中"
+                        : !d.clickCleared ? L"选中没有清掉"
+                                          : L"点击没有结束：留下了框选，或鼠标还被抓着"),
+            d.clickDone[2]);
+    verdict(std::wstring(L"右键菜单开着时按住左键不放：菜单当场就关了，按下这一下当场算数（框选已经开始）；松开后框选结束") +
+                (d.clickHeldOver ? L"" : L"；松开后框选还在"),
+            clickWhy(3, d.clickHeldOver ? L"按住时框选没有开始" : L"松开后框选没有结束"),
+            d.clickDone[3] && d.clickHeldOver);
+    const bool clicked = d.clickRow >= 0;
+    verdict(clicked ? std::wstring(L"右键菜单开着时在树的“") + d.clickName + L"”的 +/- 上双击：两下都点到了，那一行开了又合上"
+                    : std::wstring(L"（这棵树里没有带 +/- 的行：双击这项没考到）"),
+            clicked ? clickWhy(4, L"那一行没有开了又合上") : L"", d.clickDone[4]);
 }
 
 // ---------------------------------------------------------- thumbnail test
