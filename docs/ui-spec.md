@@ -290,6 +290,27 @@ first.
   and 11 use `#0078D7`). Every other selection stays the app's navy.
 - In every view the selection box is painted under the icon, never over it: a
   selected row keeps its icon.
+- The program can be the one that opens folders, in place of Explorer (Windows
+  build; 工具 → 设为默认文件管理器, ticked while it is). The shell opens every
+  folder - a drive, a folder on the desktop or in a window, and the Recycle
+  Bin, Control Panel's icons and all else it keeps as folders - with the
+  "open" verb of the Folder class. The program writes its own command there
+  for the current user only (`HKCU\Software\Classes\Folder\shell\open\command`:
+  `"<program>" --path "%1"`, with `DelegateExecute` written empty: a user's
+  key and the machine's are read as one, value by value, and that value is the
+  shell's way of starting Explorer whatever the command says). The machine's
+  is not touched; unticking the item takes the user's out again, with the keys
+  made on the way to it (to undo without the program, that key is deleted).
+  What the shell hands over is a folder's path, except for its own folders,
+  which come as `::{...}` and the like: those, and anything else that is not
+  a folder that is there, are given to Explorer to show (`explorer.exe` with
+  it in quotes) and no window of this program's comes up. Written for the
+  program where it was before it was moved, the command is written again for
+  where it is when the program starts. Another copy of the program that is
+  still there is left to open folders itself; another program's command is
+  neither taken out nor shown as ticked. Win+E and the taskbar's File
+  Explorer start Explorer itself and are not changed (the shell has Win+E
+  registered as its own hotkey).
 
 ## Responsiveness contract
 

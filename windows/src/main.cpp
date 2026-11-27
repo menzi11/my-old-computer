@@ -36,6 +36,7 @@
 #include "snapshot.h"
 #include "theme.h"
 #include "thumbs.h"
+#include "takeover.h"
 
 int measureUiText(const std::wstring& s, int fontPx);  // the UI font, as the rows are measured with
 
@@ -7077,6 +7078,557 @@ void faintTest(const std::wstring& dir, const std::wstring& pics,
             d.notListed);
 }
 
+// ---------------------------------------------------------------- takeover tests
+// This program in place of Explorer for opening folders (takeover.h), where
+// nothing is live: under a key of HKEY_CURRENT_USER in the same shape as the
+// real one (the self-test's is under its own).
+std::wstring g_takeoverKey;
+
+// What `value` of `key` says (the command itself when `value` is null):
+// false when it is not there, or says something else.
+bool takeoverSays(const wchar_t* key, const wchar_t* value, const wchar_t* want) {
+    wchar_t buf[2048]{};
+    DWORD size = sizeof(buf);
+    return RegGetValueW(HKEY_CURRENT_USER, key, value, RRF_RT_REG_SZ, nullptr, buf, &size) ==
+               ERROR_SUCCESS &&
+           wcscmp(buf, want) == 0;
+}
+
+// Writes `what` under `value` of `key` (null: takes the value out).
+bool takeoverPut(const wchar_t* key, const wchar_t* value, const wchar_t* what) {
+    HKEY h = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, key, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &h,
+                        nullptr) != ERROR_SUCCESS)
+        return false;
+    const LSTATUS put =
+        what ? RegSetValueExW(h, value, 0, REG_SZ, (const LPBYTE)what,
+                              (DWORD)((wcslen(what) + 1) * sizeof(wchar_t)))
+             : RegDeleteValueW(h, value);
+    RegCloseKey(h);
+    return put == ERROR_SUCCESS || (!what && put == ERROR_FILE_NOT_FOUND);
+}
+
+// The command's key is gone, and so are the keys made on the way to it (the
+// ...\Folder one): taking this program out left nothing of itself behind.
+bool takeoverKeyGone(const std::wstring& key) {
+    const size_t cut = key.rfind(L"\\shell\\");
+    if (cut == std::wstring::npos) return false;
+    HKEY h = nullptr;
+    return RegOpenKeyExW(HKEY_CURRENT_USER, key.substr(0, cut).c_str(), 0, KEY_READ, &h) ==
+               ERROR_FILE_NOT_FOUND &&
+           !h;
+}
+
+constexpr UINT_PTR kTakeoverStepTimer = 0x4D50;   // the next step
+constexpr UINT_PTR kTakeoverClickTimer = 0x4D51;  // ... while the Tools menu is up
+constexpr wchar_t kTakeoverTestClass[] = L"MyOldComputerTakeoverTest";
+constexpr int kTakeoverTestEnd = 3;
+constexpr int kToolsMenu = 4;  // 文件 编辑 查看 收藏 工具 帮助
+// Set: the real key is written for this program once, and taken out again.
+constexpr wchar_t kTakeoverLive[] = L"MOC_LIVE_TAKEOVER";
+
+struct TakeoverDrive {
+    HWND main = nullptr;
+    int step = 0;
+    int ticks = 0;
+    int waits = 0;            // how long the Tools menu was waited for
+    int rowY = 0;             // the row of 设为默认文件管理器 in it
+    int ink[2] = {-1, -1};    // black pixels of its tick, as the screen shows it, before each click
+    bool clicked[2] = {};
+    bool listed = false;      // the item is in the Tools menu, not ticked while Explorer opens folders
+    bool on = false, written = false, delegated = false;
+    bool off = false, gone = false;
+};
+TakeoverDrive g_takeover;
+
+// Black pixels of the tick at the start of a row of the popup (menu.cpp draws
+// it 7 to 15 px in, 3 px either side of the row's middle), read from the
+// screen: the popup is on top of everything, so that is what is shown.
+int takeoverTickInk(HWND popup, int rowMiddle, double scale) {
+    int n = 0;
+    for (int y = rowMiddle - pxOf(scale, 4); y <= rowMiddle + pxOf(scale, 4); ++y)
+        for (int x = pxOf(scale, 6); x <= pxOf(scale, 16); ++x)
+            n += (screenPixel(popup, x, y) & 0xFFFFFF) == (Theme::text & 0xFFFFFF);
+    return n;
+}
+
+// The window of `pid`'s program, once it has one.
+struct ProgramWindow {
+    DWORD pid;
+    HWND found;
+};
+HWND windowOfProgram(DWORD pid) {
+    ProgramWindow found{pid, nullptr};
+    EnumWindows([](HWND h, LPARAM lp) -> BOOL {
+        auto* found = (ProgramWindow*)lp;
+        DWORD owner = 0;
+        wchar_t cls[64]{};
+        GetWindowThreadProcessId(h, &owner);
+        if (owner == found->pid && IsWindowVisible(h) && GetClassNameW(h, cls, 64) &&
+            lstrcmpW(cls, L"MyOldComputerWindow") == 0) {
+            found->found = h;
+            return FALSE;
+        }
+        return TRUE;
+    }, (LPARAM)&found);
+    return found.found;
+}
+
+// The folder a window of the program shows: asked (dumpLayout), it writes its
+// layout out, and the line that says which folder is read back.
+bool windowShowsFolder(HWND window, const std::wstring& folder) {
+    wchar_t temp[MAX_PATH]{};
+    GetTempPathW(MAX_PATH, temp);
+    DeleteFileW((std::wstring(temp) + L"moc-layout.txt").c_str());
+    DWORD_PTR result = 0;
+    if (!SendMessageTimeoutW(window, g_dumpMsg, 0, 0, SMTO_ABORTIFHUNG, 5000, &result)) return false;
+    const std::vector<std::wstring> lines = dumpLines(L"current ");
+    if (lines.empty()) return false;
+    std::wstring shown = lines.front().substr(8);  // past "current "
+    shown.erase(shown.find_first_of(L"\r\n"));     // (to the end of the line)
+    return _wcsicmp(shown.c_str(), folder.c_str()) == 0;
+}
+
+// Explorer's windows, to tell one that comes up from those that were there.
+std::vector<HWND> explorerWindows() {
+    struct Found {
+        std::vector<HWND> out;
+    } found;
+    EnumWindows([](HWND h, LPARAM lp) -> BOOL {
+        auto* found = (Found*)lp;
+        wchar_t cls[64]{};
+        if (IsWindowVisible(h) && GetClassNameW(h, cls, 64) && lstrcmpW(cls, L"CabinetWClass") == 0)
+            found->out.push_back(h);
+        return TRUE;
+    }, (LPARAM)&found);
+    return found.out;
+}
+
+// The processes of this program started since `since` (whatever started them).
+std::vector<DWORD> programSince(FILETIME since) {
+    std::vector<DWORD> out;
+    wchar_t exe[2048]{};
+    GetModuleFileNameW(nullptr, exe, 2048);
+    const std::wstring name = fsx::fileName(exe);
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return out;
+    PROCESSENTRY32W e{};
+    e.dwSize = sizeof(e);
+    const DWORD me = GetCurrentProcessId();
+    for (BOOL more = Process32FirstW(snap, &e); more; more = Process32NextW(snap, &e)) {
+        if (e.th32ProcessID == me || _wcsicmp(e.szExeFile, name.c_str()) != 0) continue;
+        HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                               e.th32ProcessID);
+        if (!h) continue;
+        FILETIME created{}, exited{}, kernel{}, user{};
+        GetProcessTimes(h, &created, &exited, &kernel, &user);
+        const bool fresh = CompareFileTime(&created, &since) >= 0;
+        CloseHandle(h);
+        if (fresh) out.push_back(e.th32ProcessID);
+    }
+    CloseHandle(snap);
+    return out;
+}
+
+struct LiveDrive {
+    bool on = false;         // the steps are the live test's
+    int step = 0, ticks = 0, waits = 0;
+    std::wstring base;       // the tests' folder
+    std::wstring folder;     // opened the way the shell opens one
+    FILETIME since{};        // when the key was written: what starts after that is the shell's doing
+    std::vector<HWND> explorer;  // Explorer's windows before the hand-over
+    DWORD handedPid = 0;     // the program's process started on what is not a folder
+    HANDLE handed = nullptr;
+    bool wasThere = false;   // ... which showed a window of this program, though it should have gone
+    bool first = false;      // nothing was written for this user to begin with
+    bool wrote = false;      // ... and this test wrote this program there
+    bool written = false;    // the shell sees this program open folders now
+    bool opened = false, closed = false;  // a folder opened the shell's way started this program on it; gone again
+    bool handedOver = false, explorerOpened = false;  // what is not a folder went to Explorer
+    bool restored = false;  // and Explorer's is what the shell sees again
+};
+LiveDrive g_live;
+constexpr int kTakeoverLiveEnd = 6;
+
+void takeoverTestStep(HWND driver);
+void takeoverLiveStep(HWND driver);
+
+LRESULT CALLBACK takeoverTestProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_TIMER && wp == kTakeoverClickTimer) {
+        // The Tools menu is up: its tick is read off the screen, then the row
+        // is clicked.  (Not up yet: looked again, a few times.)
+        KillTimer(hwnd, kTakeoverClickTimer);
+        HWND root = nullptr;
+        menuWindows(&root);  // also finds g_popup
+        TakeoverDrive& d = g_takeover;
+        const int k = d.step - 1;
+        if (g_popup && IsWindow(g_popup) && k >= 0 && k < 2) {
+            d.ink[k] = takeoverTickInk(g_popup, d.rowY, g_app.scale);
+            // The menu as it is on screen just then, kept with the frames (MOC_DEBUG).
+            RECT popup{};
+            GetWindowRect(g_popup, &popup);
+            keepScreen(k == 0 ? L"takeover-unticked" : L"takeover-ticked", popup);
+            PostMessageW(g_popup, WM_LBUTTONUP, 0, MAKELPARAM(pxOf(g_app.scale, 40), d.rowY));
+            d.clicked[k] = true;
+        } else if (g_popup && IsWindow(g_popup)) {
+            PostMessageW(g_popup, WM_KEYDOWN, VK_ESCAPE, 0);  // no step of ours: the menu is not sat in
+        } else if (++d.waits < 40) {
+            SetTimer(hwnd, kTakeoverClickTimer, 60, nullptr);
+        }
+        return 0;
+    }
+    if (msg == WM_TIMER && wp == kTakeoverStepTimer) {
+        KillTimer(hwnd, kTakeoverStepTimer);
+        if (g_live.on)
+            takeoverLiveStep(hwnd);
+        else if (++g_takeover.ticks > 200)  // forty seconds: give up, do not hang
+            g_takeover.step = kTakeoverTestEnd;
+        else
+            takeoverTestStep(hwnd);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+// Opens the Tools menu of the test's window and lets the click timer click
+// the item's row: the menu's own loop runs meanwhile.
+void takeoverClick(HWND driver) {
+    g_takeover.waits = 0;
+    SetTimer(driver, kTakeoverClickTimer, 300, nullptr);
+    const RECT title = g_app.menuItemRect(kToolsMenu);
+    showAppMenu(g_takeover.main, g_app, kToolsMenu,
+                POINT{(title.left + title.right) / 2, (title.top + title.bottom) / 2});
+    KillTimer(driver, kTakeoverClickTimer);
+}
+
+void takeoverTestStep(HWND driver) {
+    TakeoverDrive& d = g_takeover;
+    const double scale = g_app.scale;
+    // Where the item's row is in the menu: rows from 3 px down, 22 px each,
+    // 7 for a separator.
+    int y = pxOf(scale, 3);
+    bool found = false, ticked = false;
+    for (const MenuItem& it : g_app.menuFor(L"工具")) {
+        y += it.separator ? pxOf(scale, 7) : pxOf(scale, 22);
+        if (it.id == ID_TAKEOVER_FOLDERS) {
+            d.rowY = y - pxOf(scale, 11);
+            found = true;
+            ticked = it.checked;
+        }
+    }
+    switch (d.step) {
+    case 0:  // not ticked while Explorer opens folders; clicked: on
+        d.listed = found && !ticked && takeover::state() == takeover::State::explorer;
+        ++d.step;
+        takeoverClick(driver);
+        d.on = d.clicked[0] && takeover::state() == takeover::State::ours && takeover::on();
+        d.written = takeoverSays(g_takeoverKey.c_str(), nullptr, takeover::command().c_str());
+        d.delegated = takeoverSays(g_takeoverKey.c_str(), L"DelegateExecute", L"");
+        break;
+    case 1:  // ticked now; clicked again: off
+        ++d.step;
+        takeoverClick(driver);
+        d.off = d.clicked[1] && takeover::state() == takeover::State::explorer && !takeover::on();
+        d.gone = takeoverKeyGone(g_takeoverKey);
+        break;
+    default:
+        d.step = kTakeoverTestEnd;
+        break;
+    }
+    if (d.step < kTakeoverTestEnd) SetTimer(driver, kTakeoverStepTimer, 200, nullptr);
+}
+
+HWND takeoverDriver() {
+    WNDCLASSEXW wc{sizeof(WNDCLASSEXW)};
+    wc.lpfnWndProc = takeoverTestProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = kTakeoverTestClass;
+    RegisterClassExW(&wc);
+    return CreateWindowExW(0, kTakeoverTestClass, L"", WS_OVERLAPPED, 0, 0, 100, 100, nullptr,
+                           nullptr, wc.hInstance, nullptr);  // never shown
+}
+
+// The program's own window, behind everything, showing `dir` - as the tests
+// of a real window have theirs.
+HWND takeoverWindow(HWND driver, const wchar_t* title, const std::wstring& dir) {
+    registerMainClass(GetModuleHandleW(nullptr));
+    HWND main = CreateWindowExW(WS_EX_NOACTIVATE, L"MyOldComputerWindow", title,
+                                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, 0, 0, 0, 0, driver, nullptr,
+                                GetModuleHandleW(nullptr), nullptr);
+    if (!main) return nullptr;
+    g_app.hwnd = main;
+    g_app.scale = dpiScaleOfWindow(main);
+    g_app.init(main);
+    g_app.buildTree();
+    g_app.relayout(pxOf(g_app.scale, 700), pxOf(g_app.scale, 440));
+    g_app.loadDirectory(dir, false);
+    g_app.setViewMode(ViewMode::Details);
+    g_app.clearSelection();
+    placeWindow(main, 0, 0, g_app.width, g_app.height);
+    ShowWindow(main, SW_SHOWNOACTIVATE);
+    SetWindowPos(main, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    UpdateWindow(main);
+    return main;
+}
+
+void takeoverWindowGone(HWND driver, HWND main) {
+    if (IsWindow(main)) {
+        g_app.hwnd = nullptr;  // the edit is the window's child and goes with it
+        DestroyWindow(main);
+    }
+    MSG msg{};
+    PeekMessageW(&msg, nullptr, WM_QUIT, WM_QUIT, PM_REMOVE);
+    g_app.hwnd = nullptr;
+    g_app.addrEdit = nullptr;
+    g_app.addrEditing = false;
+    if (g_app.addrFont) {
+        DeleteObject(g_app.addrFont);
+        g_app.addrFont = nullptr;
+    }
+    DestroyWindow(driver);
+}
+
+void takeoverMenuTest(const std::wstring& dir, const std::function<void(const wchar_t*, bool)>& check) {
+    HWND driver = takeoverDriver();
+    g_takeover = TakeoverDrive{};
+    g_live.on = false;
+    const HWND main = takeoverWindow(driver, L"takeover test", dir);
+    g_takeover.main = main;
+    if (main) {
+        MSG msg;
+        for (SetTimer(driver, kTakeoverStepTimer, 100, nullptr);
+             g_takeover.step < kTakeoverTestEnd && GetMessageW(&msg, nullptr, 0, 0) > 0;) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        KillTimer(driver, kTakeoverStepTimer);
+    }
+    takeoverWindowGone(driver, main);
+
+    const TakeoverDrive& d = g_takeover;
+    const auto of = [](int v) { return std::to_wstring(v); };
+    std::wstring notes;
+    if (!main) notes += L"窗口没建出来";
+    else if (d.ticks > 200) notes += L"超时";
+    const auto verdict = [&](const std::wstring& name, const std::wstring& why, bool ok) {
+        std::wstring label = name;
+        if (!notes.empty()) label += L"：" + notes;
+        else if (!ok) label += L"：" + why;
+        check(label.c_str(), label == name);
+    };
+    std::wstring why;
+    if (!d.clicked[0]) why = L"没点到那一项";
+    else if (d.ink[0] < 0) why = L"没读到那一行的勾";
+    else why = L"有勾的笔画：屏幕上那一行有 " + of(d.ink[0]) + L" 个黑色像素";
+    verdict(L"「工具」菜单里有「设为默认文件管理器」：没接管的时候没有勾，屏幕上那一行没有勾的笔画", why,
+            d.listed && d.clicked[0] && d.ink[0] == 0);
+    if (!d.clicked[0]) why = L"没点到";
+    else if (!d.on) why = L"注册表里没有写成接管";
+    else if (!d.written) why = L"写的不是本程序加文件夹";
+    else if (!d.delegated) why = L"DelegateExecute 没留空";
+    else why = L"勾的笔画只有 " + of(std::max(0, d.ink[1])) + L" 个黑色像素";
+    verdict(L"点一下「设为默认文件管理器」：接管打开，注册表里写的是本程序加文件夹、Explorer 的 DelegateExecute 留空；"
+            L"再打开菜单，屏幕上那一行有勾",
+            why, d.on && d.written && d.delegated && d.clicked[1] && d.ink[1] >= 8);
+    if (!d.clicked[1]) why = L"没点到";
+    else if (!d.off) why = L"注册表里还是接管";
+    else why = L"留下了空的键";
+    verdict(L"再点一下：接管关掉，注册表里为本程序写下的都没了，回到资源管理器", why, d.off && d.gone);
+}
+
+// ---------------------------------------------------------- the real key, once, by hand
+// What the shell sees for opening a folder: the user's key and the machine's
+// as one (`value`: the command itself when null).  Read as written: what is
+// there for the machine is a value that gets expanded when it is read
+// (%SystemRoot%\Explorer.exe).
+bool shellSees(const wchar_t* value, const wchar_t* want) {
+    wchar_t buf[2048]{};
+    DWORD size = sizeof(buf);
+    return RegGetValueW(HKEY_CLASSES_ROOT, L"Folder\\shell\\open\\command", value,
+                        RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND, nullptr, buf,
+                        &size) == ERROR_SUCCESS &&
+           wcscmp(buf, want) == 0;
+}
+
+void takeoverLiveStep(HWND driver) {
+    LiveDrive& d = g_live;
+    const auto later = [&](int ms) { SetTimer(driver, kTakeoverStepTimer, ms, nullptr); };
+    const auto end = [&]() {
+        if (d.handed) {
+            CloseHandle(d.handed);
+            d.handed = nullptr;
+        }
+        d.step = kTakeoverLiveEnd;
+    };
+    if (d.step >= kTakeoverLiveEnd) return;
+    if (++d.ticks > 600) {  // three minutes: give up, do not hang
+        end();
+        return;
+    }
+    switch (d.step) {
+    case 0: {  // nothing is written for this user; this program is written, and the shell sees it
+        takeover::useKey(nullptr);  // the real key
+        d.first = takeover::state() == takeover::State::explorer;
+        if (!d.first) {
+            end();  // somebody's is there (another program's, or this program's from before): not touched
+            break;
+        }
+        GetSystemTimeAsFileTime(&d.since);
+        d.wrote = true;
+        d.written = takeover::set(true) && takeover::state() == takeover::State::ours &&
+                    shellSees(nullptr, takeover::command().c_str()) &&
+                    shellSees(L"DelegateExecute", L"");
+        // A folder, opened the way anything opens one: what is written is what runs.
+        d.folder = d.base + L"\\live";
+        CreateDirectoryW(d.folder.c_str(), nullptr);
+        SHELLEXECUTEINFOW sei{sizeof(sei)};
+        sei.lpFile = d.folder.c_str();
+        sei.lpVerb = L"open";
+        sei.nShow = SW_SHOWNOACTIVATE;  // (this test's environment makes the new window stay behind)
+        sei.fMask = SEE_MASK_NOASYNC;
+        if (d.written) ShellExecuteExW(&sei);
+        d.step = 1;
+        later(400);
+        break;
+    }
+    case 1: {  // ... and this program came up on that folder
+        for (DWORD pid : programSince(d.since)) {
+            const HWND w = windowOfProgram(pid);
+            if (!w) continue;
+            d.opened = windowShowsFolder(w, d.folder);
+            PostMessageW(w, WM_CLOSE, 0, 0);
+            d.waits = 0;
+            d.step = 2;
+            later(300);
+            return;
+        }
+        if (++d.waits < 40)  // given twelve seconds
+            later(300);
+        else {
+            d.waits = 0;
+            d.step = 2;
+        }
+        break;
+    }
+    case 2: {  // ... and is gone again
+        d.closed = programSince(d.since).empty();
+        if (!d.closed) {
+            if (++d.waits < 30) {  // given nine seconds
+                later(300);
+                break;
+            }
+        }
+        // What is not a folder (the shell's own: the Recycle Bin): this program
+        // is started on it the way the shell starts it.
+        d.explorer = explorerWindows();
+        wchar_t exe[2048]{};
+        GetModuleFileNameW(nullptr, exe, 2048);
+        std::wstring line = L"\"" + std::wstring(exe) + L"\" --path \"shell:RecycleBinFolder\"";
+        std::vector<wchar_t> command(line.begin(), line.end());
+        command.push_back(0);
+        STARTUPINFOW si{sizeof(si)};
+        PROCESS_INFORMATION pi{};
+        if (CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si,
+                           &pi)) {
+            d.handed = pi.hProcess;
+            d.handedPid = pi.dwProcessId;
+            CloseHandle(pi.hThread);
+        }
+        d.waits = 0;
+        d.step = 3;
+        later(100);
+        break;
+    }
+    case 3: {  // ... gives it to Explorer and goes, a window of its own never up
+        if (d.handed) {
+            d.wasThere = d.wasThere || windowOfProgram(d.handedPid) != nullptr;
+            if (WaitForSingleObject(d.handed, 0) == WAIT_OBJECT_0) {
+                DWORD code = 1;
+                GetExitCodeProcess(d.handed, &code);
+                CloseHandle(d.handed);
+                d.handed = nullptr;
+                d.handedOver = code == 0 && !d.wasThere;
+            } else if (++d.waits < 40) {  // given twelve seconds
+                later(300);
+                break;
+            } else {
+                TerminateProcess(d.handed, 0);  // this test's own
+                CloseHandle(d.handed);
+                d.handed = nullptr;
+            }
+        }
+        d.waits = 0;
+        d.step = 4;
+        later(800);  // Explorer takes a moment
+        break;
+    }
+    case 4: {  // ... and Explorer shows it: a window that was not there before
+        std::vector<HWND> fresh;
+        for (HWND h : explorerWindows())
+            if (std::find(d.explorer.begin(), d.explorer.end(), h) == d.explorer.end())
+                fresh.push_back(h);
+        for (HWND h : fresh) PostMessageW(h, WM_CLOSE, 0, 0);  // the test's: closed again
+        d.explorerOpened = !fresh.empty();
+        if (!d.explorerOpened && ++d.waits < 8) {  // looked again, three seconds in all
+            later(400);
+            break;
+        }
+        d.step = 5;
+        later(500);
+        break;
+    }
+    default: {  // taken out: the shell sees Explorer's again
+        d.restored = takeover::set(false) && takeover::state() == takeover::State::explorer &&
+                     shellSees(nullptr, L"%SystemRoot%\\Explorer.exe") &&
+                     shellSees(L"DelegateExecute", L"{11dbb47c-a525-400b-9e80-a54615a090c0}");
+        end();
+        break;
+    }
+    }
+}
+
+void takeoverLiveTest(const std::wstring& base, const std::function<void(const wchar_t*, bool)>& check) {
+    HWND driver = takeoverDriver();
+    g_live = LiveDrive{};
+    g_live.on = true;
+    g_live.base = base;
+    MSG msg;
+    for (SetTimer(driver, kTakeoverStepTimer, 100, nullptr);
+         g_live.step < kTakeoverLiveEnd && GetMessageW(&msg, nullptr, 0, 0) > 0;) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    KillTimer(driver, kTakeoverStepTimer);
+    // Whatever ended the steps, what this test wrote on the real key is taken out.
+    if (g_live.wrote && takeover::on()) takeover::set(false);
+    takeover::useKey(g_takeoverKey.c_str());
+    DestroyWindow(driver);
+
+    const LiveDrive& d = g_live;
+    std::wstring notes;
+    if (d.ticks > 600) notes += L"超时";
+    const auto verdict = [&](const std::wstring& name, const std::wstring& why, bool ok) {
+        std::wstring label = name;
+        if (!notes.empty()) label += L"：" + notes;
+        else if (!ok) label += L"：" + why;
+        check(label.c_str(), label == name);
+    };
+    std::wstring why = d.first ? L"系统看到的不是本程序" : L"起初就已经有接管在，没动它";
+    verdict(L"实机（真的注册表项）：写入后，系统看到的是本程序打开文件夹", why, d.first && d.written);
+    if (!d.written) why = L"没有写入，没往下测";
+    else if (!d.opened) why = L"没有等来本程序的窗口，或它显示的不是那个文件夹";
+    else why = L"那个窗口没有关掉";
+    verdict(L"实机：像系统那样打开一个文件夹，启动的就是本程序，显示的正是那个文件夹", why,
+            d.written && d.opened && d.closed);
+    if (!d.written) why = L"没有写入，没往下测";
+    else if (!d.handedOver) why = L"本程序没有交出去并退出";
+    else why = L"没有等来资源管理器的窗口";
+    verdict(L"实机：回收站不是文件夹——本程序把它交给资源管理器、自己退出，资源管理器打开了它", why,
+            d.written && d.handedOver && d.explorerOpened);
+    why = d.wrote ? L"系统看到的不是资源管理器" : L"没写过，没往下测";
+    verdict(L"实机：恢复后，系统看到的又是资源管理器", why, d.wrote && d.restored);
+}
+
 // Drives the same input handlers the window procedure uses, with synthesized
 // points, so click/selection behaviour can be checked without touching the
 // mouse or a real window.
@@ -7090,6 +7642,12 @@ int runUiTest(App& app) {
         HANDLE h = CreateFileW(f.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
         if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
     }
+
+    // "This program opens folders" is tried under a scratch key (takeover.h):
+    // the machine is somebody's, and the real one is live.
+    g_takeoverKey = L"Software\\MyOldComputer\\Tests\\Ui\\Folder\\shell\\open\\command";
+    RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\MyOldComputer\\Tests\\Ui");
+    takeover::useKey(g_takeoverKey.c_str());
 
     std::vector<std::pair<std::wstring, bool>> results;
     auto writeOut = [&results, &temp]() {
@@ -9372,6 +9930,13 @@ int runUiTest(App& app) {
     // faint: its icon at half strength, as Explorer shows one.
     faintTest(base + L"\\hidden", base + L"\\hiddenpics", check);
 
+    // This program in place of Explorer for opening folders, from the Tools
+    // menu of a real window - on a scratch key; and, where that is asked for,
+    // once on the real one.
+    takeoverMenuTest(base, check);
+    wchar_t liveAsked[4]{};
+    if (GetEnvironmentVariableW(kTakeoverLive, liveAsked, 4)) takeoverLiveTest(base, check);
+
     // Thumbnails: a folder that is mostly pictures opens as thumbnails.
     const std::wstring thumbsDir = base + L"\\thumbs", picDir = thumbsDir + L"\\pics",
                         mixedDir = thumbsDir + L"\\mixed";
@@ -9519,6 +10084,13 @@ int runUiTest(App& app) {
     // %TEMP%, one per run; and this one's path may be past MAX_PATH.)
     std::error_code ignored;
     std::filesystem::remove_all(L"\\\\?\\" + base, ignored);
+    // The scratch key of "this program opens folders" goes with the rest, and
+    // the real one is the program's again - with the keys above the scratch
+    // ones, when nothing else is in them.
+    RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\MyOldComputer\\Tests\\Ui");
+    takeover::useKey(nullptr);
+    RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\MyOldComputer\\Tests");
+    RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\MyOldComputer");
     diagLog(L"UI test: real mouse or keyboard input noticed %d times", inputs);
     return 0;
 }
@@ -9579,20 +10151,88 @@ int runSelfTest(App& app) {
     results.push_back(std::wstring(L"拖放同目录 ") +
                       (!noopDrop && fsx::exists(dir + L"\\f1.txt") ? L"OK" : L"FAIL"));
 
+    // This program in place of Explorer for opening folders (takeover.h), on
+    // a scratch key: what is written, what is taken out, what is left alone,
+    // and what goes to Explorer.
+    {
+        const std::wstring root = L"Software\\MyOldComputer\\Tests\\SelfTest";
+        const std::wstring key = root + L"\\Folder\\shell\\open\\command";
+        RegDeleteTreeW(HKEY_CURRENT_USER, root.c_str());
+        takeover::useKey(key.c_str());
+        const wchar_t* other = L"\"C:\\Nowhere\\Other.exe\" \"%1\"";
+        wchar_t exe[2048]{};
+        GetModuleFileNameW(nullptr, exe, 2048);
+        // This program from where it was before it was moved: there is nothing there.
+        const std::wstring elsewhere =
+            L"\"" + base + L"\\" + fsx::fileName(exe) + L"\" --path \"%1\"";
+        const auto line = [&](const wchar_t* name, bool ok) {
+            results.push_back(std::wstring(name) + (ok ? L"OK" : L"FAIL"));
+        };
+        line(L"接管文件夹·起初是资源管理器 ",
+             takeover::state() == takeover::State::explorer && !takeover::on());
+        line(L"接管文件夹·打开 ",
+             takeover::set(true) && takeover::state() == takeover::State::ours && takeover::on() &&
+                 takeoverSays(key.c_str(), nullptr, takeover::command().c_str()) &&
+                 takeoverSays(key.c_str(), L"DelegateExecute", L""));
+        line(L"接管文件夹·别的程序的不动 ",
+             takeoverPut(key.c_str(), nullptr, other) &&
+                 takeoverPut(key.c_str(), L"DelegateExecute", nullptr) &&
+                 takeover::state() == takeover::State::other && !takeover::set(false) &&
+                 takeover::state() == takeover::State::other);
+        line(L"接管文件夹·程序被移动过就重写 ",
+             takeoverPut(key.c_str(), nullptr, elsewhere.c_str()) &&
+                 takeover::state() == takeover::State::moved && takeover::on() && takeover::heal() &&
+                 takeover::state() == takeover::State::ours &&
+                 takeoverSays(key.c_str(), nullptr, takeover::command().c_str()));
+        // Another copy of this program, where it still is, opens folders as
+        // well as this one would: it is left to it.  (The same file by another
+        // way to it.)
+        const std::wstring copy = L"\"\\\\?\\" + std::wstring(exe) + L"\" --path \"%1\"";
+        line(L"接管文件夹·另一份还在的拷贝不动 ",
+             takeoverPut(key.c_str(), nullptr, copy.c_str()) &&
+                 takeover::state() == takeover::State::ours && takeover::on() && !takeover::heal() &&
+                 takeoverSays(key.c_str(), nullptr, copy.c_str()));
+        line(L"接管文件夹·关掉 ",
+             takeover::set(false) && takeover::state() == takeover::State::explorer &&
+                 takeoverKeyGone(key));
+        line(L"转交 Explorer·在的文件夹留给自己，其余的转交 ",
+             takeover::isFolder(dir) && takeover::isFolder(dir + L"\\sub") &&
+                 !takeover::isFolder(dir + L"\\f1.txt") && !takeover::isFolder(dir + L"\\not-there") &&
+                 !takeover::isFolder(L"::{645FF040-5081-101B-9F08-00AA002F954E}") &&
+                 !takeover::isFolder(L"shell:RecycleBinFolder") && !takeover::isFolder(L""));
+        line(L"转交 Explorer·交给它的参数是带引号的原样 ",
+             takeover::explorerParameters(L"shell:RecycleBinFolder") == L"\"shell:RecycleBinFolder\"" &&
+                 takeover::explorerParameters(L"C:\\A B\\::{5}") == L"\"C:\\A B\\::{5}\"");
+        RegDeleteTreeW(HKEY_CURRENT_USER, root.c_str());
+        takeover::useKey(nullptr);
+        // ... and the keys above the scratch ones, when nothing else is in them.
+        RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\MyOldComputer\\Tests");
+        RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\MyOldComputer");
+    }
+
     std::wstring out;
+    int failed = 0;
     for (auto& r : results) {
         if (!out.empty()) out += L" | ";
         out += r;
+        // A line that passed ends in "OK"; anything else is a failure.
+        if (!(r.size() >= 2 && r.compare(r.size() - 2, 2, L"OK") == 0)) ++failed;
     }
     std::wstring line = L"SELFTEST " + out;
     OutputDebugStringW((line + L"\n").c_str());
+    // The lines are in one file of %TEMP%, for whoever looks; the test's
+    // folder goes with the test, as the UI test's does (runs used to leave
+    // one behind, each).
     FILE* f = nullptr;
-    if (_wfopen_s(&f, (base + L"\\selftest.txt").c_str(), L"w, ccs=UTF-8") == 0 && f) {
+    if (_wfopen_s(&f, (std::wstring(temp) + L"moc-selftest.txt").c_str(), L"w, ccs=UTF-8") == 0 &&
+        f) {
         fwprintf(f, L"%s\n", line.c_str());
         fclose(f);
     }
-    app.loadDirectory(base, false);
-    return 0;
+    app.loadDirectory(temp, false);
+    std::error_code ignored;
+    std::filesystem::remove_all(L"\\\\?\\" + base, ignored);
+    return failed;
 }
 
 int runSnapshot(App& app, const std::vector<std::wstring>& args) {
@@ -9738,6 +10378,19 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
 
     registerMainClass(instance);
 
+    // Opened by the shell for what is not a folder this program shows - it
+    // opens its own folders (the Recycle Bin, Control Panel) by the same
+    // command, see takeover.h.  Explorer shows those.  Nothing of a window is
+    // up yet: there is nothing to take down.
+    std::wstring startPath = argValue(args, L"--path");
+    if (!startPath.empty() && !takeover::isFolder(startPath)) {
+        takeover::handOver(startPath);
+        return 0;
+    }
+    // (This program opens folders, but was moved since that was written: it
+    // is written again for here, before anything can be double-clicked.)
+    takeover::heal();
+
     Settings settings;
     settings.load();
     int w = settings.w, h = settings.h;
@@ -9777,7 +10430,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
     placeWindow(hwnd, place.x, place.y, physicalW, physicalH);
     g_app.relayout(physicalW, physicalH);
     g_app.demo = hasArg(args, L"--demo");
-    std::wstring startPath = argValue(args, L"--path");
     if (startPath.empty()) startPath = fsx::homeDir();
     if (g_app.demo) {
         g_app.current = startPath;

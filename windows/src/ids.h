@@ -41,5 +41,6 @@ enum MenuId {
     ID_SETTINGS,
     ID_TREE_TOGGLE,  // expand/collapse the sidebar row the context menu opened on
     ID_FAV_RENAME,   // give a favorite a name of its own (prompt)
+    ID_TAKEOVER_FOLDERS,  // this program opens folders in place of Explorer, for this user (takeover.h)
     ID_FAV_BASE = 1000,
 };

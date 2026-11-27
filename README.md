@@ -118,6 +118,10 @@ being shown, which is how every screenshot in this README was produced.
 - Sort arrow in the active column, `字节 / KB / MB / GB` sizes and `yyyy/M/d HH:mm` dates
 - Toolbar button and View-menu toggle for hidden and system files; the ones
   shown are drawn faint, their icon at half strength, as Explorer draws them
+- Can open folders in place of Explorer (Tools → 设为默认文件管理器): a
+  double-click on a folder or a drive anywhere starts this program on it.  For
+  the current user only; unticking it gives Explorer the folders back.  Win+E
+  and the taskbar's File Explorer still open Explorer
 - File and folder icons come from the shell on Windows, so every type matches Explorer;
   the View menu can switch back to the hand-drawn icon set
 - Copy the selected paths to the clipboard

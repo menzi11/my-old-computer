@@ -16,6 +16,7 @@
 #include "options.h"
 #include "preview.h"
 #include "shellmenu.h"
+#include "takeover.h"
 #include "thumbs.h"
 
 // Defined further down in this file; relayout() needs them for the cached
@@ -1659,6 +1660,9 @@ std::vector<MenuItem> App::menuFor(const std::wstring& name) const {
         items.push_back({L"在命令提示符中打开", ID_OPEN_TERMINAL, true});
         items.push_back({L"", 0, false, false, true});
         items.push_back({L"右键菜单设置…", ID_SETTINGS, true});
+        items.push_back({L"", 0, false, false, true});
+        // Ticked while this program is the one that opens folders (takeover.h).
+        items.push_back({L"设为默认文件管理器", ID_TAKEOVER_FOLDERS, true, takeover::on()});
     } else if (name == L"帮助") {
         items.push_back({L"关于 My Old Computer", ID_ABOUT, true});
     }
@@ -1790,6 +1794,12 @@ void App::performMenuAction(int id, const std::wstring& arg) {
     case ID_FAV_RENAME: promptRenameFavorite(contextFolder.empty() ? current : contextFolder); break;
     case ID_OPEN_TERMINAL: openTerminalForSelection(); break;
     case ID_SETTINGS: openMenuSettings(); break;
+    case ID_TAKEOVER_FOLDERS:
+        // On when it is not, and off when it is (takeover.h).
+        if (!takeover::set(!takeover::on()))
+            showError(hwnd, L"设为默认文件管理器",
+                      L"没能改写注册表里的 HKEY_CURRENT_USER\\Software\\Classes\\Folder\\shell\\open\\command。");
+        break;
     case ID_TREE_TOGGLE:
         // Sidebar header menu (我的电脑 / 收藏夹): expand or collapse that row.
         if (hoverTree >= 0 && hoverTree < (int)treeFlat.size())
