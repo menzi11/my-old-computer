@@ -82,6 +82,68 @@ void drawFolder(Canvas& c, const RECT& r, int colour, bool open = false) {
                  colour == foldercolours::kDefault ? 0 : foldercolours::colour(colour).rgb);
 }
 
+// How faint a hidden item is drawn: half of it over what is behind it.  That
+// is how Explorer shows one - a hidden folder's yellow (254, 190, 24) comes
+// out (254, 222, 139) over white - and its name stays as black as any other.
+constexpr BYTE kFaint = 128;
+
+// What `paint` draws into a canvas, at half strength over this canvas's `r`.
+// It is drawn whole onto a surface of `behind` - the colour that is under it
+// in `r` (the white of the list, or the selection's navy under a selected
+// item) - and that is blended half and half with what is here.  So the icon
+// looks the same wherever it lies, as one drawn with half transparency would.
+template <class Paint>
+void faint(Canvas& c, const RECT& r, COLORREF behind, Paint paint) {
+    const int w = r.right - r.left, h = r.bottom - r.top;
+    if (w <= 0 || h <= 0) return;
+    // The surface is kept from one icon to the next, and grows when an icon
+    // bigger than any before comes (48 px in the big-icon view).
+    static HDC memory = nullptr;
+    static int keptW = 0, keptH = 0;
+    if (!memory) memory = CreateCompatibleDC(c.dc());
+    if (memory && (w > keptW || h > keptH)) {
+        keptW = std::max(keptW, w);
+        keptH = std::max(keptH, h);
+        HGDIOBJ bigger = CreateCompatibleBitmap(c.dc(), keptW, keptH);
+        if (bigger) {
+            HGDIOBJ was = SelectObject(memory, bigger);
+            if (was && was != HGDI_ERROR) DeleteObject(was);  // the surface that was
+        }
+    }
+    if (!memory) {  // nowhere to draw it whole: as any other icon, then
+        paint(c, r);
+        return;
+    }
+    {
+        Canvas own(memory, c.scale());
+        const RECT box{0, 0, w, h};
+        own.fill(box, behind);
+        paint(own, box);
+    }
+    BLENDFUNCTION blend{AC_SRC_OVER, 0, kFaint, 0};
+    AlphaBlend(c.dc(), r.left, r.top, w, h, memory, 0, 0, w, h, blend);
+}
+
+// An entry's icon in a box of the list or of a cell: the one Explorer shows
+// for it, or this program's own when the shell has none (a file's own one,
+// `inset` in from the box).  A hidden entry's at half strength over `behind`,
+// the colour under the icon.
+void drawItemIcon(Canvas& c, App& a, const RECT& r, const Entry& e, int inset, COLORREF behind) {
+    const auto paint = [&](Canvas& on, const RECT& box) {
+        if (drawShellIcon(on, a, box, e.path, e.isDir)) return;
+        if (e.isDir) {
+            drawFolder(on, box, folderColourOf(e.path, true));
+        } else {
+            Icon::file(on, RECT{box.left + inset, box.top + inset, box.right - inset, box.bottom - inset},
+                       fsx::extensionLower(e.name));
+        }
+    };
+    if (e.hidden)
+        faint(c, r, behind, paint);
+    else
+        paint(c, r);
+}
+
 void drawRoot(Canvas& c, App& a) {
     c.fill(a.lay.client, Theme::face);
     RECT border{0, 0, a.width, a.height};
@@ -333,15 +395,23 @@ void drawTree(Canvas& c, App& a) {
             }
             RECT iconRect{r.left + indent + c.px(13), r.top + c.px(2),
                           r.left + indent + c.px(13) + c.px(16), r.top + c.px(2) + c.px(16)};
-            bool drewIcon = false;
-            if (n->kind != TreeNode::Machine && !n->path.empty())
-                drewIcon = drawShellIcon(c, a, iconRect, n->path, true);
-            if (!drewIcon) {
+            const auto paintIcon = [&](Canvas& on, const RECT& box) {
+                if (n->kind != TreeNode::Machine && !n->path.empty() &&
+                    drawShellIcon(on, a, box, n->path, true))
+                    return;
                 switch (n->kind) {
-                case TreeNode::Machine: Icon::computer(c, iconRect); break;
-                case TreeNode::Volume: Icon::drive(c, iconRect); break;
-                default: drawFolder(c, iconRect, folderColourOf(n->path, true), n->expanded); break;
+                case TreeNode::Machine: Icon::computer(on, box); break;
+                case TreeNode::Volume: Icon::drive(on, box); break;
+                default: drawFolder(on, box, folderColourOf(n->path, true), n->expanded); break;
                 }
+            };
+            // A hidden folder's icon at half strength, over what its row shows behind it.
+            if (n->hidden) {
+                const bool lit = a.hoverTree == i || (a.dragTargetIsTree && a.dragTargetRow == i);
+                const COLORREF behind = selected ? Theme::select : lit ? Theme::faceHi : Theme::white;
+                faint(c, iconRect, behind, paintIcon);
+            } else {
+                paintIcon(c, iconRect);
             }
             RECT textRect{iconRect.right + c.px(3), r.top, r.right - c.px(4), r.bottom};
             c.textClip(n->title, textRect,
@@ -428,13 +498,7 @@ void drawDetailsRow(Canvas& c, App& a, int i) {
     const int s16 = c.px(16);
     RECT iconRect{r.left + c.px(3), r.top + c.px(2), r.left + c.px(3) + s16,
                   r.top + c.px(2) + s16};
-    if (!drawShellIcon(c, a, iconRect, e.path, e.isDir)) {
-        if (e.isDir) {
-            drawFolder(c, iconRect, folderColourOf(e.path, true));
-        } else {
-            Icon::file(c, iconRect, fsx::extensionLower(e.name));
-        }
-    }
+    drawItemIcon(c, a, iconRect, e, 0, sel ? selectionColour(a, i) : Theme::white);
     RECT nameRect{r.left + c.px(22), r.top, r.left + a.lay.nameW - c.px(4), r.bottom};
     if (!editing) c.textClip(e.name, nameRect, sel ? Theme::white : Theme::text, Align::Left);
     if (e.hasSize)
@@ -500,8 +564,10 @@ void drawDetails(Canvas& c, App& a) {
 
 // One list/icon cell; also used for single-cell repaints during a drag.
 // A picture in its cell: the thumbnail centred in the box and, when the item
-// is selected, a frame in the selection's colour around it.
-void drawThumbnail(Canvas& c, const thumbs::Bitmap& thumbnail, const RECT& box, COLORREF selected) {
+// is selected, a frame in the selection's colour around it.  A hidden
+// picture's at half strength (alpha 128).
+void drawThumbnail(Canvas& c, const thumbs::Bitmap& thumbnail, const RECT& box, COLORREF selected,
+                   BYTE alpha = 255) {
     const int w = std::min(thumbnail.w, (int)(box.right - box.left));
     const int h = std::min(thumbnail.h, (int)(box.bottom - box.top));
     if (w <= 0 || h <= 0) return;
@@ -510,7 +576,7 @@ void drawThumbnail(Canvas& c, const thumbs::Bitmap& thumbnail, const RECT& box, 
     HDC memory = CreateCompatibleDC(c.dc());
     if (!memory) return;
     HGDIOBJ old = SelectObject(memory, thumbnail.handle);
-    BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    BLENDFUNCTION blend{AC_SRC_OVER, 0, alpha, AC_SRC_ALPHA};
     AlphaBlend(c.dc(), x, y, w, h, memory, 0, 0, w, h, blend);
     SelectObject(memory, old);
     DeleteDC(memory);
@@ -534,10 +600,7 @@ void drawGridCell(Canvas& c, App& a, int i) {
             c.fill(RECT{r.left + c.px(1), r.top, textLeft + tw + c.px(3), r.bottom},
                    selectionColour(a, i));
         }
-        if (!drawShellIcon(c, a, iconRect, e.path, e.isDir)) {
-            if (e.isDir) drawFolder(c, iconRect, folderColourOf(e.path, true));
-            else Icon::file(c, iconRect, fsx::extensionLower(e.name));
-        }
+        drawItemIcon(c, a, iconRect, e, 0, sel ? selectionColour(a, i) : Theme::white);
         if (renamingRow(a, i)) {
             drawRenameField(c, a, i);
             return;
@@ -554,19 +617,12 @@ void drawGridCell(Canvas& c, App& a, int i) {
     const std::shared_ptr<const thumbs::Bitmap> thumbnail =
         a.thumbnails && thumbs::isPicture(e.name) ? thumbs::get(e.path, iconSize, a.hwnd) : nullptr;
     if (thumbnail) {
-        drawThumbnail(c, *thumbnail, iconBox, sel ? selectionColour(a, i) : 0);
+        drawThumbnail(c, *thumbnail, iconBox, sel ? selectionColour(a, i) : 0,
+                      e.hidden ? kFaint : 255);
         // For whoever shows this frame: this one is drawn with its thumbnail.
         a.thumbRendered.push_back(i);
-    } else if (!drawShellIcon(c, a, iconBox, e.path, e.isDir)) {
-        if (e.isDir) {
-            drawFolder(c, iconBox, folderColourOf(e.path, true));
-        } else {
-            const int inset = c.px(8);
-            Icon::file(c,
-                       RECT{iconBox.left + inset, iconBox.top + inset, iconBox.right - inset,
-                            iconBox.bottom - inset},
-                       fsx::extensionLower(e.name));
-        }
+    } else {
+        drawItemIcon(c, a, iconBox, e, c.px(8), Theme::white);
     }
     const int bandTop = r.top + a.labelTop();
     const int bandH = std::max(0, (int)(r.bottom - c.px(2)) - bandTop);

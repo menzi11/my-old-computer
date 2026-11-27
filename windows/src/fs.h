@@ -12,6 +12,7 @@ struct Entry {
     std::wstring path;
     std::wstring name;
     bool isDir = false;
+    bool hidden = false;  // the hidden or the system attribute: in the list only while those are shown, and drawn faint
     unsigned long long size = 0;
     bool hasSize = false;
     std::wstring type;

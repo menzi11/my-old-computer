@@ -116,7 +116,8 @@ being shown, which is how every screenshot in this README was produced.
 ### Practical extras
 
 - Sort arrow in the active column, `字节 / KB / MB / GB` sizes and `yyyy/M/d HH:mm` dates
-- Toolbar button and View-menu toggle for hidden and system files
+- Toolbar button and View-menu toggle for hidden and system files; the ones
+  shown are drawn faint, their icon at half strength, as Explorer draws them
 - File and folder icons come from the shell on Windows, so every type matches Explorer;
   the View menu can switch back to the hand-drawn icon set
 - Copy the selected paths to the clipboard

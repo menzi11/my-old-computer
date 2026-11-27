@@ -6665,6 +6665,418 @@ LRESULT CALLBACK preloadCbtProc(int code, WPARAM wp, LPARAM lp) {
     return CallNextHookEx(nullptr, code, wp, lp);
 }
 
+// ------------------------------------------------------------------ faint test
+// A hidden file or folder, shown because hidden files are shown, is drawn
+// faint as Explorer draws it: its icon half of what it would be and half of
+// what lies behind it, and its name as black as any other's.  In the real
+// window, with Explorer's icons and with this program's own, in each view,
+// over the white of the list and over the selection's navy, in the tree, and
+// as a picture's thumbnail: what the window shows, read back from the
+// compositor, is compared pixel by pixel with the item's twin that is not
+// hidden (a folder and a file of the kind, one hidden, one not).
+constexpr UINT_PTR kFaintTestTimer = 0x4D4F;
+constexpr wchar_t kFaintTestClass[] = L"MyOldComputerFaintTest";
+
+struct FaintLook {
+    ViewMode mode;
+    bool system;  // Explorer's icons (else this program's own)
+    bool select;  // selected, the hidden ones and their twins: their icons lie over the navy
+    const wchar_t* name;
+};
+constexpr FaintLook kFaintLooks[] = {
+    {ViewMode::Details, true, false, L"详细资料视图，Explorer 的图标"},
+    {ViewMode::Details, true, true, L"详细资料视图，隐藏项和与它相比的那个都选中着，图标在选中的蓝色上"},
+    {ViewMode::Details, false, false, L"详细资料视图，本程序自己的图标"},
+    {ViewMode::List, true, false, L"列表视图，Explorer 的图标"},
+    {ViewMode::List, false, false, L"列表视图，本程序自己的图标"},
+    {ViewMode::Icons, true, false, L"大图标视图，Explorer 的图标"},
+    {ViewMode::Icons, false, false, L"大图标视图，本程序自己的图标"},
+};
+constexpr int kFaintLookCount = (int)(sizeof(kFaintLooks) / sizeof(kFaintLooks[0]));
+constexpr int kFaintTree = kFaintLookCount;      // ... and the tree's row of the hidden folder
+constexpr int kFaintThumb = kFaintTree + 1;      // ... and a hidden picture's thumbnail
+constexpr int kFaintSeen = kFaintThumb + 1;      // the looks there are
+constexpr int kFaintTreeSet = 2 * kFaintLookCount + 1;  // the steps: each look is set, then looked at;
+constexpr int kFaintTestEnd = kFaintTreeSet + 5;        // then the tree, the thumbnail, hidden files off
+
+// What the pictures' colour comes to at half strength over white.
+COLORREF g_faintThumb = 0;
+bool isFaintThumb(COLORREF px) { return px == g_faintThumb; }
+
+struct FaintDrive {
+    HWND main = nullptr;
+    int step = 0;
+    int wait = 0;
+    int ticks = 0;
+    std::wstring dir, pics;
+    int row[2][2] = {{-1, -1}, {-1, -1}};  // [a folder, a file][shown whole, hidden]: their rows in the list
+    int pic[2] = {-1, -1};                 // the pictures' rows: [shown whole, hidden]
+    bool baseline = false;
+    bool listed = false;      // with hidden files shown, the hidden twins are in the list
+    bool notListed = false;   // ... and are not when they are not shown
+    bool treeSeen = false;    // the tree shows the twins' rows
+    // Each look: pixels of a hidden twin's icon that are not half its twin's and half of what
+    // lies behind it; and the black pixels of its name (-1: not looked at).
+    int off[kFaintSeen][2] = {};
+    int ink[kFaintSeen][2] = {};
+    bool thumbWait = false;   // the thumbnails did not come in time
+    int thumbTicks = 0;       // how long they were waited for
+};
+FaintDrive g_faint;
+
+void faintTestStep(HWND driver) {
+    FaintDrive& d = g_faint;
+    KillTimer(driver, kFaintTestTimer);
+    if (++d.ticks > 800) {  // over thirty seconds: give up, do not hang
+        d.step = kFaintTestEnd;
+        return;
+    }
+    const auto later = [driver] { SetTimer(driver, kFaintTestTimer, 40, nullptr); };
+    if (d.step >= kFaintTestEnd) return;
+    if (d.wait > 0) {
+        --d.wait;
+        later();
+        return;
+    }
+    const double scale = g_app.scale;
+    const auto px = [scale](int v) { return pxOf(scale, v); };
+    // The row of the entry called `name` (-1: it is not in the list).
+    const auto rowOf = [](const wchar_t* name) {
+        for (int i = 0; i < (int)g_app.entries.size(); ++i)
+            if (g_app.entries[i].name == name) return i;
+        return -1;
+    };
+    // Where an entry's icon is in this view.
+    const auto iconBox = [&](int i) {
+        if (g_app.mode == ViewMode::Details) {
+            const RECT r = g_app.listRowRect(i);
+            return RECT{r.left + px(3), r.top + px(2), r.left + px(3) + px(16), r.top + px(2) + px(16)};
+        }
+        if (g_app.mode == ViewMode::List) {
+            const RECT r = g_app.gridCellRect(i);
+            return RECT{r.left + px(2), r.top + px(2), r.left + px(2) + px(16), r.top + px(2) + px(16)};
+        }
+        const RECT r = g_app.gridCellRect(i);
+        const int side = g_app.iconBox(), mid = (r.left + r.right) / 2;
+        return RECT{mid - side / 2, r.top + px(4), mid + side / 2, r.top + px(4) + side};
+    };
+    // A frame's pixel as a colour: a frame holds what GetDIBits gives, blue,
+    // green, red in memory - a COLORREF is red, green, blue (as frameCount does).
+    const auto colour = [](COLORREF raw) { return RGB((raw >> 16) & 0xFF, (raw >> 8) & 0xFF, raw & 0xFF); };
+    // Pixels of `faint`'s box that are not half of `whole`'s box and half of `behind`: what
+    // a half-transparent icon comes to over `behind` (GDI blends 128 of 255 with 127 of 255).
+    const auto halfOff = [&](const Frame& f, const RECT& whole, const RECT& faint, COLORREF behind) {
+        const int w = (std::min)(whole.right - whole.left, faint.right - faint.left);
+        const int h = (std::min)(whole.bottom - whole.top, faint.bottom - faint.top);
+        if (w <= 0 || h <= 0) return -1;
+        int n = 0;
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                const COLORREF a = colour(f.px[(whole.top + y) * f.w + whole.left + x]);
+                const COLORREF b = colour(f.px[(faint.top + y) * f.w + faint.left + x]);
+                const int want[3] = {(GetRValue(a) * 128 + GetRValue(behind) * 127) / 255,
+                                     (GetGValue(a) * 128 + GetGValue(behind) * 127) / 255,
+                                     (GetBValue(a) * 128 + GetBValue(behind) * 127) / 255};
+                const int got[3] = {GetRValue(b), GetGValue(b), GetBValue(b)};
+                if (std::abs(got[0] - want[0]) > 1 || std::abs(got[1] - want[1]) > 1 ||
+                    std::abs(got[2] - want[2]) > 1)
+                    ++n;
+            }
+        return n;
+    };
+    // Black pixels of an entry's name: right of its icon in the details and
+    // the list views, under it in the big-icon view.
+    const auto nameInk = [&](const Frame& f, int i) {
+        const RECT box = iconBox(i);
+        const RECT r = g_app.mode == ViewMode::Details ? g_app.listRowRect(i) : g_app.gridCellRect(i);
+        if (g_app.mode == ViewMode::Icons)
+            return frameCount(f, RECT{r.left + px(2), r.top + g_app.labelTop(), r.right - px(2), r.bottom},
+                              isBlack);
+        return frameCount(f, RECT{box.right + px(2), r.top, r.right - px(2), r.bottom}, isBlack);
+    };
+    // The list as it is shown now: each hidden twin's icon against its twin's.
+    const auto lookAt = [&](int k, bool navy) {
+        UpdateWindow(d.main);
+        const Frame f = shownFrame(d.main);
+        for (int p = 0; p < 2; ++p) {
+            d.off[k][p] = halfOff(f, iconBox(d.row[p][0]), iconBox(d.row[p][1]),
+                                  navy ? Theme::select : Theme::white);
+            // A selected row's name is white on the navy: not looked at for black.
+            d.ink[k][p] = navy ? -1 : nameInk(f, d.row[p][1]);
+        }
+        keepFrames((L"faint-" + std::to_wstring(k)).c_str(), f, f);
+        diagLog(L"faint look %d: selection %d, off %d and %d", k, (int)g_app.selection.size(),
+                d.off[k][0], d.off[k][1]);
+    };
+    const auto show = [&]() {
+        g_app.clampScroll();
+        repaint(d.main);
+        UpdateWindow(d.main);
+    };
+
+    switch (d.step) {
+    case 0: {  // the baseline, and where the twins are
+        UpdateWindow(d.main);
+        RECT where{};
+        d.baseline = frameMismatch(shownFrame(d.main), renderedFrame(g_app), &where) == 0;
+        d.row[0][0] = rowOf(L"sub");
+        d.row[0][1] = rowOf(L"hsub");
+        d.row[1][0] = rowOf(L"a.txt");
+        d.row[1][1] = rowOf(L"h.txt");
+        d.listed = d.row[0][0] >= 0 && d.row[0][1] >= 0 && d.row[1][0] >= 0 && d.row[1][1] >= 0;
+        for (int k = 0; k < kFaintSeen; ++k) d.off[k][0] = d.off[k][1] = d.ink[k][0] = d.ink[k][1] = -1;
+        // Nothing to look at without the twins: only whether they come back when hidden files
+        // are not shown (the last step), which needs no rows.
+        d.step = d.listed ? 1 : kFaintTreeSet + 4;
+        break;
+    }
+    default: {
+        const int k = d.step - 1;
+        if (k < 2 * kFaintLookCount) {
+            const FaintLook& look = kFaintLooks[k / 2];
+            if (k % 2 == 0) {  // the view is set...
+                g_app.useSystemIcons = look.system;
+                g_app.setViewMode(look.mode);
+                g_app.clearSelection();
+                // Selected, both of each pair: then what lies behind either icon is the same
+                // navy, and the hidden one's is half the other's and half of that.  (Over
+                // white the hidden one's would not be: where the icon is transparent, what
+                // shows through is the navy itself, not half of the white behind the other.)
+                if (look.select)
+                    for (int p = 0; p < 2; ++p)
+                        for (int t = 0; t < 2; ++t)
+                            g_app.selection.insert(g_app.entries[d.row[p][t]].path);
+                show();
+            } else {  // ... and looked at
+                lookAt(k / 2, look.select && look.mode != ViewMode::Icons);
+            }
+            ++d.step;
+            break;
+        }
+        switch (d.step) {
+        case kFaintTreeSet: {  // the folder of the twins, expanded in the tree, its row at the top
+            g_app.useSystemIcons = true;
+            g_app.clearSelection();
+            g_app.hoverTree = -1;
+            for (int i = 0; i < (int)g_app.treeFlat.size(); ++i) {
+                TreeNode* n = g_app.treeFlat[i];
+                if (_wcsicmp(n->path.c_str(), d.dir.c_str()) != 0) continue;
+                if (!n->expanded) g_app.toggleTreeNode(*n);
+                const RECT r = g_app.treeRowRect(i);
+                g_app.treeScroll += r.top - g_app.lay.treeViewport.top;
+                break;
+            }
+            show();
+            ++d.step;
+            break;
+        }
+        case kFaintTreeSet + 1: {  // ... and the hidden folder's icon against its twin's
+            UpdateWindow(d.main);
+            const Frame f = shownFrame(d.main);
+            int whole = -1, hidden = -1;
+            for (int i = 0; i < (int)g_app.treeFlat.size(); ++i) {
+                if (_wcsicmp(g_app.treeFlat[i]->path.c_str(), (d.dir + L"\\sub").c_str()) == 0) whole = i;
+                if (_wcsicmp(g_app.treeFlat[i]->path.c_str(), (d.dir + L"\\hsub").c_str()) == 0) hidden = i;
+            }
+            const auto box = [&](int i) {
+                const RECT r = g_app.treeRowRect(i);
+                const int x = r.left + px(g_app.treeFlat[i]->depth * 14 + 3) + px(13);
+                return RECT{x, r.top + px(2), x + px(16), r.top + px(2) + px(16)};
+            };
+            const auto inView = [&](int i) {
+                const RECT r = g_app.treeRowRect(i);
+                return r.top >= g_app.lay.treeViewport.top && r.bottom <= g_app.lay.treeViewport.bottom;
+            };
+            d.treeSeen = whole >= 0 && hidden >= 0 && inView(whole) && inView(hidden);
+            diagLog(L"faint test: the tree's rows are %d and %d (in view: %d), %d rows, scroll %d",
+                    whole, hidden, (int)d.treeSeen, (int)g_app.treeFlat.size(), g_app.treeScroll);
+            if (d.treeSeen)
+                d.off[kFaintTree][0] = halfOff(f, box(whole), box(hidden), Theme::white);
+            d.step = kFaintTreeSet + 2;
+            break;
+        }
+        case kFaintTreeSet + 2: {  // the pictures: a folder of thumbnails
+            g_app.useSystemIcons = true;
+            g_app.loadDirectory(d.pics, false);
+            d.pic[0] = rowOf(L"p0.bmp");
+            d.pic[1] = rowOf(L"hp.bmp");
+            show();
+            ++d.step;
+            break;
+        }
+        case kFaintTreeSet + 3: {  // ... once their thumbnails are in
+            UpdateWindow(d.main);
+            const Frame f = shownFrame(d.main);
+            // The picture shown whole has its thumbnail when its box holds a good many pixels of it.
+            const bool in = d.pic[0] >= 0 && d.pic[1] >= 0 &&
+                            frameCount(f, iconBox(d.pic[0]), isThumbColour) > 200 &&
+                            frameCount(f, iconBox(d.pic[1]), isFaintThumb) > 200;
+            if (!in && ++d.thumbTicks < 100) {  // given four seconds
+                later();
+                return;
+            }
+            d.thumbWait = !in;
+            d.off[kFaintThumb][0] = d.pic[0] >= 0 && d.pic[1] >= 0
+                                        ? halfOff(f, iconBox(d.pic[0]), iconBox(d.pic[1]), Theme::white)
+                                        : -1;
+            keepFrames(L"faint-thumbnail", f, f);
+            ++d.step;
+            break;
+        }
+        default: {  // hidden files not shown: the hidden twins are not in the list
+            g_app.showHidden = false;
+            g_app.loadDirectory(d.dir, false);
+            d.notListed = rowOf(L"sub") >= 0 && rowOf(L"a.txt") >= 0 && rowOf(L"hsub") < 0 &&
+                          rowOf(L"h.txt") < 0;
+            d.step = kFaintTestEnd;
+            break;
+        }
+        }
+        break;
+    }
+    }
+    later();
+}
+
+LRESULT CALLBACK faintTestProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_TIMER && wp == kFaintTestTimer) {
+        faintTestStep(hwnd);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+// The twins are made in `dir` (a folder and a file, each hidden and each
+// not) and two pictures of one colour in `pics`, one of them hidden.
+void faintTest(const std::wstring& dir, const std::wstring& pics,
+               const std::function<void(const wchar_t*, bool)>& check) {
+    CreateDirectoryW(dir.c_str(), nullptr);
+    CreateDirectoryW(pics.c_str(), nullptr);
+    for (const wchar_t* name : {L"sub", L"hsub"})
+        CreateDirectoryW((dir + L"\\" + name).c_str(), nullptr);
+    for (const wchar_t* name : {L"a.txt", L"h.txt"})
+        if (HANDLE h = CreateFileW((dir + L"\\" + name).c_str(), GENERIC_WRITE, 0, nullptr,
+                                   CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            h != INVALID_HANDLE_VALUE)
+            CloseHandle(h);
+    writeBmp(pics + L"\\p0.bmp", 300, 200, kThumbColours[0]);
+    writeBmp(pics + L"\\hp.bmp", 300, 200, kThumbColours[0]);
+    SetFileAttributesW((dir + L"\\hsub").c_str(), FILE_ATTRIBUTE_HIDDEN);
+    SetFileAttributesW((dir + L"\\h.txt").c_str(), FILE_ATTRIBUTE_HIDDEN);
+    SetFileAttributesW((pics + L"\\hp.bmp").c_str(), FILE_ATTRIBUTE_HIDDEN);
+
+    WNDCLASSEXW wc{sizeof(WNDCLASSEXW)};
+    wc.lpfnWndProc = faintTestProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = kFaintTestClass;
+    RegisterClassExW(&wc);
+    HWND driver = CreateWindowExW(0, kFaintTestClass, L"", WS_OVERLAPPED, 0, 0, 100, 100, nullptr,
+                                  nullptr, wc.hInstance, nullptr);  // never shown
+    registerMainClass(wc.hInstance);
+    HWND main = CreateWindowExW(WS_EX_NOACTIVATE, L"MyOldComputerWindow", L"faint test",
+                                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, 0, 0, 0, 0, driver, nullptr,
+                                wc.hInstance, nullptr);
+    g_faint = FaintDrive{};
+    g_faint.main = main;
+    g_faint.dir = dir;
+    g_faint.pics = pics;
+    const bool wasHidden = g_app.showHidden, wasSystem = g_app.useSystemIcons;
+    const bool setHidden = g_app.settings.showHidden, setSystem = g_app.settings.useSystemIcons;
+    if (main) {
+        g_app.hwnd = main;
+        g_app.scale = dpiScaleOfWindow(main);
+        g_app.init(main);
+        // The test's folder is under AppData, a hidden one: the tree can only show the way
+        // to it when hidden folders are shown - and this test is about what is shown then.
+        g_app.showHidden = true;
+        g_app.buildTree();
+        g_app.sidebarVisible = true;
+        g_app.relayout(pxOf(g_app.scale, 700), pxOf(g_app.scale, 440));
+        // The pictures' colour, and what it comes to at half strength over white.
+        g_thumbColour = kThumbColours[0];
+        g_faintThumb = RGB((GetRValue(kThumbColours[0]) * 128 + 255 * 127) / 255,
+                           (GetGValue(kThumbColours[0]) * 128 + 255 * 127) / 255,
+                           (GetBValue(kThumbColours[0]) * 128 + 255 * 127) / 255);
+        g_app.useSystemIcons = true;
+        g_app.loadDirectory(dir, false);
+        g_app.setViewMode(ViewMode::Details);
+        g_app.clearSelection();
+        placeWindow(main, 0, 0, g_app.width, g_app.height);
+        ShowWindow(main, SW_SHOWNOACTIVATE);
+        SetWindowPos(main, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        UpdateWindow(main);
+        MSG msg;
+        for (SetTimer(driver, kFaintTestTimer, 40, nullptr);
+             g_faint.step < kFaintTestEnd && GetMessageW(&msg, nullptr, 0, 0) > 0;) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        KillTimer(driver, kFaintTestTimer);
+        g_app.showHidden = wasHidden;
+        g_app.useSystemIcons = wasSystem;
+        if (IsWindow(main)) {
+            g_app.hwnd = nullptr;  // the edit is the window's child and goes with it
+            DestroyWindow(main);
+        }
+        PeekMessageW(&msg, nullptr, WM_QUIT, WM_QUIT, PM_REMOVE);
+        g_app.hwnd = nullptr;
+        g_app.addrEdit = nullptr;
+        g_app.addrEditing = false;
+        if (g_app.addrFont) {
+            DeleteObject(g_app.addrFont);
+            g_app.addrFont = nullptr;
+        }
+    }
+    DestroyWindow(driver);
+    g_app.settings.showHidden = setHidden;
+    g_app.settings.useSystemIcons = setSystem;
+    // What was made hidden is made a plain file again, so that the folder goes with the rest.
+    SetFileAttributesW((dir + L"\\hsub").c_str(), FILE_ATTRIBUTE_DIRECTORY);
+    SetFileAttributesW((dir + L"\\h.txt").c_str(), FILE_ATTRIBUTE_NORMAL);
+    SetFileAttributesW((pics + L"\\hp.bmp").c_str(), FILE_ATTRIBUTE_NORMAL);
+
+    const FaintDrive& d = g_faint;
+    std::wstring notes;
+    if (!main) notes += L"窗口没建出来";
+    else if (d.ticks > 800) notes += L"超时";
+    const auto of = [](int v) { return std::to_wstring(v); };
+    const auto verdict = [&](const std::wstring& name, const std::wstring& why, bool ok) {
+        std::wstring label = name;
+        if (!notes.empty()) label += L"：" + notes;
+        else if (!ok) label += L"：" + why;
+        check(label.c_str(), label == name);
+    };
+    check(L"（测试基准）隐藏项画得虚：屏幕上的画面读得回来，且与按状态渲染的一致", d.baseline);
+    verdict(L"显示隐藏文件时，隐藏的文件和文件夹也在列表里", L"没有都列出来", d.listed);
+    const auto twins = [&](int k, int pairs) {
+        std::wstring why;
+        for (int p = 0; p < pairs && d.listed; ++p) {
+            if (d.off[k][p] != 0)
+                why += std::wstring(p ? L"；" : L"") + (p ? L"隐藏文件的图标有 " : L"隐藏文件夹的图标有 ") +
+                       of(d.off[k][p] < 0 ? 0 : d.off[k][p]) + L" 个像素不是各一半";
+            else if (d.ink[k][p] >= 0 && d.ink[k][p] < 10)
+                why += std::wstring(p ? L"；" : L"") + (p ? L"隐藏文件的名字不是黑的" : L"隐藏文件夹的名字不是黑的");
+        }
+        return why;
+    };
+    for (int k = 0; k < kFaintLookCount; ++k) {
+        const std::wstring why = twins(k, 2);
+        verdict(std::wstring(L"隐藏的文件和文件夹画得虚一些（") + kFaintLooks[k].name +
+                    L"）：图标的每个像素都是它正常时的图标与背后的颜色各一半，名字还是黑的",
+                why, why.empty());
+    }
+    const std::wstring treeWhy =
+        !d.treeSeen ? L"树的窗口里看不到这两个文件夹的行" : twins(kFaintTree, 1);
+    verdict(L"文件夹树里，隐藏的文件夹的图标也是虚的（与同级的正常文件夹比，各一半）", treeWhy,
+            d.treeSeen && treeWhy.empty());
+    verdict(L"图片文件夹里，隐藏图片的缩略图也是虚的（与同色的正常图片比，各一半）",
+            d.thumbWait ? L"缩略图没有及时出来" : L"隐藏图片的缩略图有 " + of(std::max(0, d.off[kFaintThumb][0])) +
+                                                          L" 个像素不是各一半",
+            !d.thumbWait && d.off[kFaintThumb][0] == 0);
+    verdict(L"不显示隐藏文件时，隐藏的文件和文件夹不在列表里", L"还在列表里，或正常的那个不在了",
+            d.notListed);
+}
+
 // Drives the same input handlers the window procedure uses, with synthesized
 // points, so click/selection behaviour can be checked without touching the
 // mouse or a real window.
@@ -8955,6 +9367,10 @@ int runUiTest(App& app) {
                 CloseHandle(h);
     }
     menusAheadTest(aheadDir, check);
+
+    // A hidden file or folder, shown because hidden files are shown, is drawn
+    // faint: its icon at half strength, as Explorer shows one.
+    faintTest(base + L"\\hidden", base + L"\\hiddenpics", check);
 
     // Thumbnails: a folder that is mostly pictures opens as thumbnails.
     const std::wstring thumbsDir = base + L"\\thumbs", picDir = thumbsDir + L"\\pics",

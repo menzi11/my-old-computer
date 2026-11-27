@@ -38,6 +38,7 @@ struct TreeNode {
     bool hasChildren = true;
     bool hasChildrenKnown = true;
     bool missing = false;  // a favorite whose folder is gone: shown, but it leads nowhere
+    bool hidden = false;   // a hidden folder (in the tree only while those are shown), drawn faint
     std::vector<TreeNode> children;
 };
 

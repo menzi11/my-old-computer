@@ -162,6 +162,7 @@ std::vector<Entry> listDirectory(const std::wstring& dir, bool showHidden) {
         if (!e.path.empty() && e.path.back() != L'\\') e.path += L'\\';
         e.path += name;
         e.isDir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        e.hidden = isHiddenEntry(fd);
         if (!e.isDir) {
             e.size = ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
             e.hasSize = true;

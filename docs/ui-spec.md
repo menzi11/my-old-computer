@@ -79,6 +79,14 @@ Windows uses the shell's own image lists (`SHGetFileInfo` + `SHGetImageList`), s
 file types look exactly as they do in Explorer; the View menu can switch back to
 the hand-drawn set.  macOS draws the icons in `Icons.swift` per extension.
 
+A hidden item (the hidden or the system attribute), shown because hidden files
+are shown, is drawn as Explorer draws it: its icon at half strength over what
+lies behind it, and its name as black as any other's.  A hidden folder's yellow
+(254, 190, 24) comes out (254, 222, 139) over white; over the selection's navy it
+is half of the folder over the navy and half of the navy.  So in every view (the
+details, the list, the big icons, a picture's thumbnail) and in the tree, with
+the shell's icons and with the hand-drawn set.  (Windows build.)
+
 ### Thumbnails (Windows build)
 
 A folder in which more than half of the files are pictures opens in the

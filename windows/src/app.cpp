@@ -1108,6 +1108,7 @@ void App::loadTreeChildren(TreeNode& node) {
         kid.kind = TreeNode::Folder;
         kid.path = e.path;
         kid.title = e.name;
+        kid.hidden = e.hidden;
         kid.depth = node.depth + 1;
         kid.hasChildrenKnown = false;  // asked for when its row is drawn or clicked, not now
         node.children.push_back(std::move(kid));
